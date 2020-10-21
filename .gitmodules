@@ -1,0 +1,6 @@
+[submodule "dep/nanosvg"]
+	path = dep/nanosvg
+	url = git@github.com:memononen/nanosvg.git
+[submodule "dep/nanovg"]
+	path = dep/nanovg
+	url = git@github.com:memononen/nanovg.git
