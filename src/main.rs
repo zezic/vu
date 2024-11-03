@@ -308,7 +308,6 @@ impl ApplicationHandler for App {
                         filter.set_samplerate(fps);
                         let rms = filter.process(rms);
 
-                        let mut path_0 = Path::new();
                         let x_base = VU_WIDTH * idx as f32 + VU_WIDTH / 2.0;
 
                         // Convert value from [0.0, 1.0] to angle range [-45°, 45°] in radians
@@ -324,9 +323,9 @@ impl ApplicationHandler for App {
 
                         let center_y = 207.0;
 
+                        let mut path_0 = Path::new();
                         path_0.move_to(x_base, center_y);
                         path_0.line_to(x_base + x, center_y + y);
-
                         let mut paint_0 = Paint::color(Color::rgb(255, 200, 160));
                         paint_0.set_line_width(1.0);
 
@@ -461,8 +460,8 @@ fn run(
         marks: generate_din_scale(),
         overload: Default::default(),
         filter: [
-            SecondOrderLowPassFilter::new(20.00, 60.0),
-            SecondOrderLowPassFilter::new(20.00, 60.0),
+            SecondOrderLowPassFilter::new(5.00, 60.0),
+            SecondOrderLowPassFilter::new(5.00, 60.0),
         ]
     };
 
