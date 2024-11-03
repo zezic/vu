@@ -8,6 +8,7 @@ use glutin::{
 };
 use instant::Instant;
 use log::info;
+use motion_filter::{LowPassFilter, SecondOrderLowPassFilter};
 use processor::Processor;
 use resource::resource;
 use scales::{draw_scale, generate_din_scale, Mark};
@@ -25,6 +26,7 @@ use winit::{
 
 mod audio;
 mod helpers;
+mod motion_filter;
 mod processor;
 mod scales;
 
@@ -69,6 +71,7 @@ struct App {
     font_ids: Vec<FontId>,
     marks: Vec<Mark>,
     overload: [f32; 2],
+    filter: [SecondOrderLowPassFilter; 2],
 }
 
 impl ApplicationHandler for App {
@@ -289,13 +292,21 @@ impl ApplicationHandler for App {
                         self.canvas.fill_path(&path, &paint);
                     }
 
+                    let fps = 1.0 / self.perf.get_average();
+
                     // Hands
                     for (idx, rms) in rms.into_iter().enumerate() {
                         let rms = if rms.is_nan() { 0.0 } else { rms };
+
                         let rms = normalized_to_db(rms, self.negative_db_range);
                         let rms = rms + self.negative_db_range;
                         let rms = rms / (self.negative_db_range + 6.0);
                         let rms = rms.powf(self.bend);
+
+                        let filter = &mut self.filter[idx];
+
+                        filter.set_samplerate(fps);
+                        let rms = filter.process(rms);
 
                         let mut path_0 = Path::new();
                         let x_base = VU_WIDTH * idx as f32 + VU_WIDTH / 2.0;
@@ -449,6 +460,10 @@ fn run(
         font_ids,
         marks: generate_din_scale(),
         overload: Default::default(),
+        filter: [
+            SecondOrderLowPassFilter::new(20.00, 60.0),
+            SecondOrderLowPassFilter::new(20.00, 60.0),
+        ]
     };
 
     el.run_app(&mut app).unwrap();
