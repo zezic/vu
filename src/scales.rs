@@ -22,7 +22,7 @@ enum MarkStyle {
 pub fn generate_din_scale() -> Vec<Mark> {
     let mut marks = vec![];
 
-    for val in [-50, -40, -30, -20, -10, -5, 0, 5] {
+    for val in [-100, -90, -80, -70, -60, -50, -40, -30, -20, -10, -5, 0, 5] {
         marks.push(Mark {
             position: db_to_normalized(val as f32),
             label: Some(if val > 0 {
@@ -120,6 +120,9 @@ pub fn draw_scale(
 
     for mark in marks {
         let rms = normalized_to_db(mark.position, negative_db_range);
+        if rms < -negative_db_range {
+            continue;
+        }
         let rms = rms + negative_db_range;
         let rms = rms / (negative_db_range + positive_db_range);
         let rms = rms.powf(bend);

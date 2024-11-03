@@ -166,10 +166,14 @@ impl ApplicationHandler for App {
                     let dx = position.x as f32 - self.mouse.0;
                     let dy = position.y as f32 - self.mouse.1;
 
-                    self.negative_db_range += dx * 0.1;
-                    self.bend *= 1.0 + dy * 0.003;
-                    info!("negative_db_range: {}", self.negative_db_range);
-                    info!("bend: {}", self.bend);
+                    if dx.abs() > dy.abs() {
+                        self.negative_db_range += dx * 0.1;
+                        self.negative_db_range = self.negative_db_range.min(100.0);
+                        info!("negative_db_range: {}", self.negative_db_range);
+                    } else {
+                        self.bend *= 1.0 + dy * 0.003;
+                        info!("bend: {}", self.bend);
+                    }
                 }
 
                 self.mouse.0 = position.x as f32;
@@ -250,7 +254,7 @@ impl ApplicationHandler for App {
 
                         // Hole
                         let mut path = Path::new();
-                        path.circle(x_base, center_y * 0.6, 9.0);
+                        path.circle(x_base, center_y * 0.6, 7.0);
                         let paint = Paint::color(Color::rgbaf(0.0, 0.0, 0.0, 0.25));
                         self.canvas.fill_path(&path, &paint);
 
@@ -261,13 +265,13 @@ impl ApplicationHandler for App {
                         let paint = Paint::radial_gradient(
                             x_base,
                             center_y * 0.6,
-                            7.0,
+                            5.0,
                             GLOW_SIZE,
                             Color::rgbaf(
                                 1.0,
                                 self.overload[idx].powf(2.0) * 0.2,
                                 self.overload[idx].powf(4.0) * 0.1,
-                                self.overload[idx].powf(2.0) * 0.3,
+                                self.overload[idx].powf(2.0) * 0.2,
                             ),
                             Color::rgbaf(1.0, 0.0, 0.0, 0.0),
                         );
@@ -275,7 +279,7 @@ impl ApplicationHandler for App {
 
                         // Light
                         let mut path = Path::new();
-                        path.circle(x_base, center_y * 0.6, 7.0);
+                        path.circle(x_base, center_y * 0.6, 5.0);
                         let paint = Paint::color(Color::rgbaf(
                             1.0,
                             self.overload[idx].powf(2.0) * 0.9,
