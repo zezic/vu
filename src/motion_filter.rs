@@ -29,6 +29,7 @@ impl LowPassFilter {
     }
 
     /// Set the cutoff frequency and update the alpha coefficient
+    #[allow(unused)]
     pub fn set_cutoff(&mut self, cutoff: f32) {
         self.cutoff = cutoff;
         self.update_alpha();
@@ -63,6 +64,7 @@ impl SecondOrderLowPassFilter {
         self.filter2.update_alpha();
     }
 
+    #[allow(unused)]
     pub fn set_cutoff(&mut self, cutoff: f32) {
         self.filter1.set_cutoff(cutoff);
         self.filter2.set_cutoff(cutoff);

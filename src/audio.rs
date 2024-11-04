@@ -1,6 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
-use log::info;
 use std::sync::mpsc::{Receiver, Sender};
 
 use crate::AudioEvent;
@@ -19,6 +18,8 @@ pub fn audio_thread(tx: Sender<AudioEvent>, shutdown_rx: Receiver<()>) -> Result
         .default_input_config()
         .expect("Failed to get default input config");
     println!("Default input config: {:?}", config);
+
+    tx.send(AudioEvent::Config { samplerate: config.sample_rate().0 as usize }).unwrap();
 
     let err_fn = move |err| {
         eprintln!("an error occurred on stream: {}", err);

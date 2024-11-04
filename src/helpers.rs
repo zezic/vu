@@ -14,7 +14,7 @@ use glutin::{
     surface::{SurfaceAttributesBuilder, WindowSurface},
 };
 use glutin_winit::DisplayBuilder;
-use raw_window_handle::HasRawWindowHandle;
+use raw_window_handle::HasWindowHandle;
 use winit::{event_loop::EventLoop, window::Window};
 
 pub fn start(
@@ -62,7 +62,8 @@ pub fn start(
 
         let window = window.unwrap();
 
-        let raw_window_handle = Some(window.raw_window_handle().unwrap());
+        let window_handle = Some(window.window_handle().unwrap());
+        let raw_window_handle = window_handle.map(Into::into);
 
         let gl_display = gl_config.display();
 
@@ -81,7 +82,10 @@ pub fn start(
         });
 
         let (width, height): (u32, u32) = window.inner_size().into();
-        let raw_window_handle = window.raw_window_handle().unwrap();
+        let window_handle = window.window_handle().unwrap();
+
+        let raw_window_handle = window_handle.into();
+
         let attrs = SurfaceAttributesBuilder::<WindowSurface>::new().build(
             raw_window_handle,
             NonZeroU32::new(width).unwrap(),
@@ -138,7 +142,7 @@ impl PerfGraph {
         self.values.iter().sum::<f32>() / self.history_count as f32
     }
 
-    pub fn render<T: Renderer>(&self, canvas: &mut Canvas<T>, x: f32, y: f32) {
+    pub fn _render<T: Renderer>(&self, canvas: &mut Canvas<T>, x: f32, y: f32) {
         let avg = self.get_average();
 
         let w = 200.0;

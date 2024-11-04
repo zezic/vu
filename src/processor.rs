@@ -1,13 +1,8 @@
-use std::{collections::VecDeque, time::UNIX_EPOCH};
+use std::collections::VecDeque;
 
 use instant::Instant;
-use log::info;
 
 use crate::db_to_multiplier;
-
-struct MeanSquare {
-
-}
 
 pub struct Processor {
     squares: VecDeque<[f32; 2]>,
@@ -30,10 +25,6 @@ impl Processor {
 
     pub fn set_samplerate(&mut self, samplerate: usize) {
         self.samplerate = samplerate;
-    }
-
-    pub fn adjust_preamp(&mut self, delta: f32) {
-        self.preamp += delta;
     }
 
     pub fn consume_buf(&mut self, buf: Vec<f32>) {

@@ -1,26 +1,26 @@
-use std::{char::MAX, collections::VecDeque, sync::mpsc::Receiver};
+use std::sync::mpsc::Receiver;
 
 use audio::audio_thread;
-use femtovg::{renderer::OpenGl, Canvas, Color, FillRule, FontId, ImageFlags, Paint, Path};
+use femtovg::{renderer::OpenGl, Canvas, Color, FontId, Paint, Path};
 use glutin::{
     context::PossiblyCurrentContext,
     surface::{Surface, WindowSurface},
 };
 use instant::Instant;
 use log::info;
-use motion_filter::{LowPassFilter, SecondOrderLowPassFilter};
+use motion_filter::SecondOrderLowPassFilter;
 use processor::Processor;
 use resource::resource;
 use scales::{draw_scale, generate_din_scale, Mark};
 use usvg::{
     tiny_skia_path::{PathSegment, Point},
-    Group, Node,
+    Node,
 };
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, Event, KeyEvent, MouseButton, WindowEvent},
+    event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    keyboard::{Key, KeyCode, SmolStr},
+    keyboard::KeyCode,
     window::Window,
 };
 
@@ -61,7 +61,7 @@ struct App {
     surface: Surface<WindowSurface>,
     perf: PerfGraph,
     window: Window,
-    paths: Vec<(Path, Option<Paint>, Option<Paint>)>,
+    _paths: Vec<(Path, Option<Paint>, Option<Paint>)>,
     rx: Receiver<AudioEvent>,
     processor: Processor,
     last_hand_pos: [(f32, f32); 2],
@@ -75,14 +75,14 @@ struct App {
 }
 
 impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+    fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
         info!("resumed... and what?")
     }
 
     fn window_event(
         &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,
-        window_id: winit::window::WindowId,
+        _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
         // info!("{:?}", event);
@@ -299,7 +299,7 @@ impl ApplicationHandler for App {
                         let rms = if rms.is_nan() { 0.0 } else { rms };
 
                         let rms = normalized_to_db(rms, self.negative_db_range);
-                        let rms = rms + self.negative_db_range;
+                        let rms = (rms + self.negative_db_range).max(0.0);
                         let rms = rms / (self.negative_db_range + 6.0);
                         let rms = rms.powf(self.bend);
 
@@ -307,6 +307,9 @@ impl ApplicationHandler for App {
 
                         filter.set_samplerate(fps);
                         let rms = filter.process(rms);
+                        if rms.is_nan() {
+                            info!("rms 5 is nan");
+                        }
 
                         let x_base = VU_WIDTH * idx as f32 + VU_WIDTH / 2.0;
 
@@ -449,7 +452,7 @@ fn run(
         mouse: (mousex, mousey),
         prevt,
         perf,
-        paths,
+        _paths: paths,
         rx,
         processor: Processor::new(),
         last_hand_pos: Default::default(),
@@ -462,7 +465,7 @@ fn run(
         filter: [
             SecondOrderLowPassFilter::new(5.00, 60.0),
             SecondOrderLowPassFilter::new(5.00, 60.0),
-        ]
+        ],
     };
 
     el.run_app(&mut app).unwrap();
