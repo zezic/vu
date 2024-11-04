@@ -240,13 +240,13 @@ impl ApplicationHandler for App {
                 }
 
                 // Filters
-                paint.set_text_align(Align::Left);
-                let lines = format!("{:#?}", self.filter);
-                for (idx, line) in lines.lines().enumerate() {
-                    self.canvas
-                        .fill_text(10.0, 10.0 + idx as f32 * 10.0, line, &paint)
-                        .unwrap();
-                }
+                // paint.set_text_align(Align::Left);
+                // let lines = format!("{:#?}", self.filter);
+                // for (idx, line) in lines.lines().enumerate() {
+                //     self.canvas
+                //         .fill_text(10.0, 10.0 + idx as f32 * 10.0, line, &paint)
+                //         .unwrap();
+                // }
 
                 const MAX_ANGLE: f32 = 47.0;
                 let center_y = 207.0;
