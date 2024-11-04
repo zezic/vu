@@ -51,6 +51,7 @@ pub struct SecondOrderLowPassFilter {
     filter2: LowPassFilter,
 }
 
+#[allow(unused)]
 impl SecondOrderLowPassFilter {
     pub fn new(cutoff: f32, sample_rate: f32) -> Self {
         SecondOrderLowPassFilter {

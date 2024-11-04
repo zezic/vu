@@ -9,7 +9,6 @@ use glutin::{
 };
 use instant::Instant;
 use log::info;
-use motion_filter::SecondOrderLowPassFilter;
 use processor::Processor;
 use resource::resource;
 use scales::{draw_scale, generate_din_scale, Mark};
@@ -24,6 +23,8 @@ use winit::{
     keyboard::KeyCode,
     window::Window,
 };
+
+const MOTION_FILTER_CUTOFF: f32 = 4.0;
 
 mod audio;
 mod helpers;
@@ -327,7 +328,7 @@ impl ApplicationHandler for App {
                         self.canvas.fill_path(&path, &paint);
                     }
 
-                    let fps = (1.0 / self.perf.get_average()) as u32;
+                    let fps = (1.0 / self.perf.get_average()).max(MOTION_FILTER_CUTOFF * 2.0) as u32;
 
                     if fps != self.last_fps {
                         for filter in &mut self.filter {
@@ -335,7 +336,7 @@ impl ApplicationHandler for App {
                                 Coefficients::<f32>::from_params(
                                     biquad::Type::LowPass,
                                     fps.hz(),
-                                    5.hz(),
+                                    MOTION_FILTER_CUTOFF.hz(),
                                     Q_BUTTERWORTH_F32,
                                 )
                                 .unwrap(),
@@ -514,7 +515,7 @@ fn run(
                 Coefficients::<f32>::from_params(
                     biquad::Type::LowPass,
                     60.hz(),
-                    5.hz(),
+                    MOTION_FILTER_CUTOFF.hz(),
                     Q_BUTTERWORTH_F32,
                 )
                 .unwrap(),
@@ -523,7 +524,7 @@ fn run(
                 Coefficients::<f32>::from_params(
                     biquad::Type::LowPass,
                     60.hz(),
-                    5.hz(),
+                    MOTION_FILTER_CUTOFF.hz(),
                     Q_BUTTERWORTH_F32,
                 )
                 .unwrap(),
