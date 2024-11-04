@@ -220,15 +220,11 @@ impl ApplicationHandler for App {
                 let mut paint = Paint::color(Color::rgb(80, 72, 72));
                 paint.set_text_align(Align::Center);
 
-                let stats_start = 120.0;
+                let stats_start = 150.0;
                 for (idx, (label, value)) in [(
                     "PREAMP",
                     format!("{:.1}dB", multiplier_to_db(self.processor.preamp)),
-                ),(
-                    "RMS",
-                    format!("{:.3} {:.3}", rms[0], rms[1])
-                )
-                ]
+                )]
                 .into_iter()
                 .enumerate()
                 {
@@ -350,8 +346,6 @@ impl ApplicationHandler for App {
 
                     // Hands
                     for (idx, rms) in rms.into_iter().enumerate() {
-                        let rms = if rms.is_nan() { 0.0 } else { rms };
-
                         let rms = normalized_to_db(rms, self.negative_db_range);
                         let rms = (rms + self.negative_db_range).max(0.0);
                         let rms = rms / (self.negative_db_range + 6.0);

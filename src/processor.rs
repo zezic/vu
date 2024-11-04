@@ -19,7 +19,7 @@ impl Processor {
             square_sums: VecDeque::new(),
             head_instant: Instant::now(),
             samplerate: 44100,
-            preamp: db_to_multiplier(12.0),
+            preamp: db_to_multiplier(18.0),
         }
     }
 
@@ -76,9 +76,11 @@ impl Processor {
 
         let offset = (instant.duration_since(self.head_instant).as_secs_f32() * (self.samplerate as f32)) as usize;
         let square_sums = self.square_sums.get(offset).unwrap_or(self.square_sums.back().unwrap_or(&[0.0; 2]));
+        let sqrt = (square_sums[0] / window_len).sqrt();
+        let sqrt_2 = (square_sums[1] / window_len).sqrt();
         [
-            (square_sums[0] / window_len).sqrt() * self.preamp,
-            (square_sums[1] / window_len).sqrt() * self.preamp,
+            if sqrt.is_nan() { 0.0 } else { sqrt } * self.preamp,
+            if sqrt_2.is_nan() { 0.0 } else { sqrt } * self.preamp,
         ]
     }
 }
