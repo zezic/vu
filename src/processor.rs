@@ -53,8 +53,8 @@ impl Processor {
             let square_sums = self.square_sums.back().unwrap_or(&[0.0; 2]);
 
             let incoming_squares = [
-                (incoming_pair[0] * self.preamp).powf(2.0),
-                (incoming_pair[1] * self.preamp).powf(2.0),
+                (incoming_pair[0]).clamp(-1.0, 1.0).powf(2.0),
+                (incoming_pair[1]).clamp(-1.0, 1.0).powf(2.0),
             ];
 
             self.squares.push_back(incoming_squares);
@@ -77,8 +77,8 @@ impl Processor {
         let offset = (instant.duration_since(self.head_instant).as_secs_f32() * (self.samplerate as f32)) as usize;
         let square_sums = self.square_sums.get(offset).unwrap_or(self.square_sums.back().unwrap_or(&[0.0; 2]));
         [
-            (square_sums[0] / window_len).sqrt(),
-            (square_sums[1] / window_len).sqrt(),
+            (square_sums[0] / window_len).sqrt() * self.preamp,
+            (square_sums[1] / window_len).sqrt() * self.preamp,
         ]
     }
 }

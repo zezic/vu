@@ -157,6 +157,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "biquad"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "820524f5e3e3add696ddf69f79575772e152c0e78e9f0370b56990a7e808ec3e"
+dependencies = [
+ "libm 0.1.4",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -350,7 +359,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3b02505ccb8c50b0aa21ace0fc08c3e53adebd4e58caa18a36152803c7709a3"
 dependencies = [
- "libm",
+ "libm 0.2.8",
 ]
 
 [[package]]
@@ -864,6 +873,12 @@ dependencies = [
  "cfg-if",
  "windows-targets 0.52.6",
 ]
+
+[[package]]
+name = "libm"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fc7aa29613bd6a620df431842069224d8bc9011086b1db4c0e0cd47fa03ec9a"
 
 [[package]]
 name = "libm"
@@ -1888,6 +1903,7 @@ name = "vu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "biquad",
  "cpal",
  "femtovg",
  "glutin",

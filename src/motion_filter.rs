@@ -1,6 +1,7 @@
 use std::f32::consts::PI;
 
 /// A simple first-order low-pass filter
+#[derive(Debug)]
 pub struct LowPassFilter {
     cutoff: f32,   // Cutoff frequency in Hz
     sample_rate: f32, // Sample rate in Hz
@@ -44,6 +45,7 @@ impl LowPassFilter {
 }
 
 /// A second-order low-pass filter implemented by cascading two first-order filters
+#[derive(Debug)]
 pub struct SecondOrderLowPassFilter {
     filter1: LowPassFilter,
     filter2: LowPassFilter,

@@ -1,7 +1,8 @@
 use std::sync::mpsc::Receiver;
 
 use audio::audio_thread;
-use femtovg::{renderer::OpenGl, Canvas, Color, FontId, Paint, Path};
+use biquad::{Biquad, Coefficients, DirectForm2Transposed, ToHertz, Q_BUTTERWORTH_F32};
+use femtovg::{renderer::OpenGl, Align, Canvas, Color, FontId, Paint, Path};
 use glutin::{
     context::PossiblyCurrentContext,
     surface::{Surface, WindowSurface},
@@ -71,7 +72,8 @@ struct App {
     font_ids: Vec<FontId>,
     marks: Vec<Mark>,
     overload: [f32; 2],
-    filter: [SecondOrderLowPassFilter; 2],
+    filter: [DirectForm2Transposed<f32>; 2],
+    last_fps: u32,
 }
 
 impl ApplicationHandler for App {
@@ -125,13 +127,13 @@ impl ApplicationHandler for App {
                         }
                         KeyCode::KeyZ => {
                             let preamp = multiplier_to_db(self.processor.preamp);
-                            let db = preamp - 6.0;
+                            let db = (preamp - 6.0).clamp(-96.0, 96.0);
                             self.processor.preamp = db_to_multiplier(db);
                             info!("preamp: {}", db);
                         }
                         KeyCode::KeyX => {
                             let preamp = multiplier_to_db(self.processor.preamp);
-                            let db = preamp + 6.0;
+                            let db = (preamp + 6.0).clamp(-96.0, 96.0);
                             self.processor.preamp = db_to_multiplier(db);
                             info!("preamp: {}", db);
                         }
@@ -212,6 +214,44 @@ impl ApplicationHandler for App {
                 self.canvas
                     .clear_rect(0, 0, size.width, size.height, Color::rgb(40, 36, 36));
 
+                let rms = self.processor.get_hands_for_instant(Instant::now());
+
+                // Stats
+                let mut paint = Paint::color(Color::rgb(80, 72, 72));
+                paint.set_text_align(Align::Center);
+
+                let stats_start = 120.0;
+                for (idx, (label, value)) in [(
+                    "PREAMP",
+                    format!("{:.1}dB", multiplier_to_db(self.processor.preamp)),
+                ),(
+                    "RMS",
+                    format!("{:.3} {:.3}", rms[0], rms[1])
+                )
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let stat_y = stats_start + idx as f32 * 30.0;
+                    paint.set_font_size(8.0);
+                    self.canvas
+                        .fill_text(VU_WIDTH, stat_y, label, &paint)
+                        .unwrap();
+                    paint.set_font_size(12.0);
+                    self.canvas
+                        .fill_text(VU_WIDTH, stat_y + 12.0, value, &paint)
+                        .unwrap();
+                }
+
+                // Filters
+                paint.set_text_align(Align::Left);
+                let lines = format!("{:#?}", self.filter);
+                for (idx, line) in lines.lines().enumerate() {
+                    self.canvas
+                        .fill_text(10.0, 10.0 + idx as f32 * 10.0, line, &paint)
+                        .unwrap();
+                }
+
                 const MAX_ANGLE: f32 = 47.0;
                 let center_y = 207.0;
 
@@ -242,7 +282,6 @@ impl ApplicationHandler for App {
                 }
 
                 {
-                    let rms = self.processor.get_hands_for_instant(Instant::now());
                     // Overload
                     for (idx, rms) in rms.into_iter().enumerate() {
                         let overload = rms >= 1.0;
@@ -292,7 +331,22 @@ impl ApplicationHandler for App {
                         self.canvas.fill_path(&path, &paint);
                     }
 
-                    let fps = 1.0 / self.perf.get_average();
+                    let fps = (1.0 / self.perf.get_average()) as u32;
+
+                    if fps != self.last_fps {
+                        for filter in &mut self.filter {
+                            filter.update_coefficients(
+                                Coefficients::<f32>::from_params(
+                                    biquad::Type::LowPass,
+                                    fps.hz(),
+                                    5.hz(),
+                                    Q_BUTTERWORTH_F32,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                    }
+                    self.last_fps = fps;
 
                     // Hands
                     for (idx, rms) in rms.into_iter().enumerate() {
@@ -305,8 +359,7 @@ impl ApplicationHandler for App {
 
                         let filter = &mut self.filter[idx];
 
-                        filter.set_samplerate(fps);
-                        let rms = filter.process(rms);
+                        let rms = filter.run(rms);
                         if rms.is_nan() {
                             info!("rms 5 is nan");
                         }
@@ -463,9 +516,26 @@ fn run(
         marks: generate_din_scale(),
         overload: Default::default(),
         filter: [
-            SecondOrderLowPassFilter::new(5.00, 60.0),
-            SecondOrderLowPassFilter::new(5.00, 60.0),
+            DirectForm2Transposed::<f32>::new(
+                Coefficients::<f32>::from_params(
+                    biquad::Type::LowPass,
+                    60.hz(),
+                    5.hz(),
+                    Q_BUTTERWORTH_F32,
+                )
+                .unwrap(),
+            ),
+            DirectForm2Transposed::<f32>::new(
+                Coefficients::<f32>::from_params(
+                    biquad::Type::LowPass,
+                    60.hz(),
+                    5.hz(),
+                    Q_BUTTERWORTH_F32,
+                )
+                .unwrap(),
+            ),
         ],
+        last_fps: 60,
     };
 
     el.run_app(&mut app).unwrap();
