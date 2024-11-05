@@ -1,12 +1,12 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, ops::Mul};
 
 use instant::Instant;
 
 use crate::db_to_multiplier;
 
 pub struct Processor {
-    squares: VecDeque<[f32; 2]>,
-    square_sums: VecDeque<[f32; 2]>,
+    squares: VecDeque<[i64; 2]>,
+    square_sums: VecDeque<[i64; 2]>,
     head_instant: Instant,
     samplerate: usize,
     pub preamp: f32,
@@ -47,14 +47,14 @@ impl Processor {
             let rms_head_squares = if self.squares.len() >= window_len {
                 self.squares.pop_front().unwrap()
             } else {
-                [0.0; 2]
+                [0; 2]
             };
 
-            let square_sums = self.square_sums.back().unwrap_or(&[0.0; 2]);
+            let square_sums = self.square_sums.back().unwrap_or(&[0; 2]);
 
             let incoming_squares = [
-                (incoming_pair[0]).clamp(-1.0, 1.0).powf(2.0),
-                (incoming_pair[1]).clamp(-1.0, 1.0).powf(2.0),
+                (incoming_pair[0].clamp(-1.0, 1.0).mul(16384.0) as i64).pow(2),
+                (incoming_pair[1].clamp(-1.0, 1.0).mul(16384.0) as i64).pow(2),
             ];
 
             self.squares.push_back(incoming_squares);
@@ -72,12 +72,12 @@ impl Processor {
     }
 
     pub fn get_hands_for_instant(&self, instant: Instant) -> [f32; 2] {
-        let window_len = self.samplerate as f32 * 0.3;
+        let window_len = (self.samplerate as f32 * 0.3) as i64;
 
         let offset = (instant.duration_since(self.head_instant).as_secs_f32() * (self.samplerate as f32)) as usize;
-        let square_sums = self.square_sums.get(offset).unwrap_or(self.square_sums.back().unwrap_or(&[0.0; 2]));
-        let sqrt = (square_sums[0] / window_len).sqrt();
-        let sqrt_2 = (square_sums[1] / window_len).sqrt();
+        let square_sums = self.square_sums.get(offset).unwrap_or(self.square_sums.back().unwrap_or(&[0; 2]));
+        let sqrt = ((square_sums[0] / window_len) as f32).sqrt() / 16384.0;
+        let sqrt_2 = ((square_sums[1] / window_len) as f32).sqrt() / 16384.0;
         [
             if sqrt.is_nan() { 0.0 } else { sqrt } * self.preamp,
             if sqrt_2.is_nan() { 0.0 } else { sqrt } * self.preamp,
