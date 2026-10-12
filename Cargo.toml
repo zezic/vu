@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
-biquad = "0.4.2"
 cpal = "0.18.2"
 directories = "5.0"
 instant = { version = "0.1.13", features = ["now"] }

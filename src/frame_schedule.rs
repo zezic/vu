@@ -21,6 +21,7 @@ const BACKGROUND_INTERVAL: Duration = Duration::from_millis(50);
     serde::Deserialize,
 )]
 pub enum FrameRateLimit {
+    Fps15,
     Fps30,
     Fps48,
     Fps55,
@@ -37,6 +38,7 @@ pub enum FrameRateLimit {
 impl FrameRateLimit {
     fn fps(self) -> Option<u64> {
         Some(match self {
+            Self::Fps15 => 15,
             Self::Fps30 => 30,
             Self::Fps48 => 48,
             Self::Fps55 => 55,
@@ -229,7 +231,7 @@ mod tests {
     fn choices_cycle_in_both_directions_and_leave_vsync_unlimited() {
         let mut choice = FrameRateLimit::Fps30;
         let expected = [
-            "30", "48", "55", "60", "72", "90", "120", "180", "240", "VSync",
+            "15", "30", "48", "55", "60", "72", "90", "120", "180", "240", "VSync",
         ];
         for label in expected {
             assert_eq!(choice.to_string(), label);

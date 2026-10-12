@@ -53,7 +53,6 @@ pub struct Text {
 }
 
 impl Text {
-    #[cfg(test)]
     pub fn width(&self) -> f64 {
         f64::from(self.layout.width())
     }

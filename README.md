@@ -20,6 +20,18 @@ through the frame limits: 30, 48, 55, 60, 72, 90, 120, 180, 240, and VSync.
 VSync is the default and leaves frame pacing to display synchronization. Numeric
 choices apply an additional maximum frame rate using Cordex's deadline-based limiter.
 
+Drag horizontally to adjust the dB range, or vertically to adjust the scale bend.
+The initial drag direction selects the setting for that gesture. Its value fades
+in at the corresponding bottom corner and fades out over about 1.4 seconds after
+release. Double-click to reset both values to the default range (53.4 dB) and bend
+(2.0).
+
+Needle motion uses elapsed time and averages each frame's exposure, with motion
+blur for fast movement at low frame rates. Two triangular wings fade around each
+needle using sweep gradients. The stroke and wings share a radial opacity mask,
+keeping the base bright while the faster-moving tip spreads into the blur.
+At rest the needle stays opaque. Needles stop at the gauge endpoints.
+
 Preamp and frame limit are restored from `vu-config.ron` on launch. Changes are
 saved every two seconds and on exit, using a temporary sibling file and rename.
 The config uses Cordex's RON format and platform directory convention:
@@ -53,3 +65,7 @@ Run the headless Vello rendering test with
 It uses synthetic levels and does not initialize audio capture. Set
 `VU_RENDER_PREVIEW_PATH` to a PNG path to save the horizontal frame and a
 `.vertical.png` companion for the stacked layout.
+
+Gauge faces and their text are rasterized once and retained on the GPU until the
+view or a displayed setting changes. Frames without a visible change reuse the
+last drawable while continuing motion updates and synchronized presentation.

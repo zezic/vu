@@ -1,28 +1,32 @@
 use std::collections::HashMap;
 
-use biquad::{Biquad, Coefficients, DirectForm2Transposed, ToHertz, Q_BUTTERWORTH_F32};
 use instant::Instant;
 use strum::VariantArray;
 use vello::{
-    kurbo::{Affine, BezPath, Circle, Line, Point, Size, Stroke},
-    peniko::{Color, Fill, Gradient},
+    kurbo::{Affine, Circle, Line, Point, Size, Stroke, Triangle},
+    peniko::{Color, Compose, Fill, Gradient},
     Scene,
 };
 
 use crate::{
     config::PreampDb,
     frame_schedule::FrameRateLimit,
-    frame_times::FrameTimes,
     processor::Processor,
-    scales::{draw_scale, generate_din_scale, Mark, Scale},
+    render::Frame,
+    scales::{draw_scale, generate_din_scale, Mark, Scale, ScaleSetting},
     text::{Fonts, Text},
     AudioEvent,
 };
 
-const MOTION_FILTER_CUTOFF: f32 = 4.0;
 const VU_WIDTH: f64 = 320.0;
 const VU_HEIGHT: f64 = 220.0;
 const CENTER_Y: f64 = 207.0;
+const NEEDLE_RADIUS: f64 = 174.0;
+const NEEDLE_WIDTH: f64 = 1.0;
+const NEEDLE_INK: Color = Color::from_rgb8(255, 200, 160);
+
+mod motion;
+use motion::Motion;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layout {
@@ -61,9 +65,11 @@ impl Layout {
 }
 
 /// Keeps the layout and its fitted or user-adjusted transform together.
+#[derive(Clone, Copy, PartialEq)]
 pub struct View {
     layout: Layout,
     transform: Affine,
+    viewport: Size,
 }
 
 impl View {
@@ -84,7 +90,11 @@ impl View {
             (viewport.width - size.width * scale) / 2.0,
             (viewport.height - size.height * scale) / 2.0,
         )) * Affine::scale(scale);
-        Self { layout, transform }
+        Self {
+            layout,
+            transform,
+            viewport,
+        }
     }
 
     pub fn zoom(&mut self, focus: Point, factor: f64) {
@@ -97,10 +107,112 @@ impl View {
 }
 
 struct Needle {
-    previous: Point,
-    older: Point,
     overload: f32,
-    filter: DirectForm2Transposed<f32>,
+    motion: Motion,
+}
+
+struct ScaleReadout {
+    setting: ScaleSetting,
+    value: f32,
+    text: Text,
+    opacity: f32,
+}
+
+impl ScaleReadout {
+    fn new(fonts: &mut Fonts, setting: ScaleSetting, value: f32) -> Self {
+        Self {
+            setting,
+            value,
+            text: Self::text(fonts, setting, value),
+            opacity: 0.0,
+        }
+    }
+
+    fn text(fonts: &mut Fonts, setting: ScaleSetting, value: f32) -> Text {
+        let label = match setting {
+            ScaleSetting::DbRange => format!("RANGE {value:.1} dB"),
+            ScaleSetting::Bend => format!("BEND {value:.2}"),
+        };
+        fonts.layout(&label, 12.0)
+    }
+
+    fn draw(
+        &mut self,
+        fonts: &mut Fonts,
+        scene: &mut Scene,
+        view: &View,
+        scale: &Scale,
+        adjusting: Option<ScaleSetting>,
+        dt: f32,
+    ) {
+        let speed = if adjusting == Some(self.setting) {
+            8.0
+        } else {
+            -0.7
+        };
+        self.opacity = (self.opacity + dt * speed).clamp(0.0, 1.0);
+        if self.opacity == 0.0 {
+            return;
+        }
+        let value = match self.setting {
+            ScaleSetting::DbRange => scale.negative_db_range,
+            ScaleSetting::Bend => scale.bend,
+        };
+        if self.value != value {
+            self.value = value;
+            self.text = Self::text(fonts, self.setting, value);
+        }
+        let width = self.text.width() * 2.0;
+        let x = match self.setting {
+            ScaleSetting::DbRange => 24.0 + width / 2.0,
+            ScaleSetting::Bend => view.viewport.width - 24.0 - width / 2.0,
+        };
+        self.text.draw(
+            scene,
+            Affine::translate((x, view.viewport.height - 24.0)) * Affine::scale(2.0),
+            Color::new([0.75, 0.7, 0.7, self.opacity]),
+        );
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct FaceSettings {
+    view: View,
+    scale: Scale,
+    limit: FrameRateLimit,
+}
+
+#[derive(Clone, Copy)]
+struct NeedleAppearance {
+    tip: Point,
+    smear: [Point; 2],
+    overload: f32,
+}
+
+struct Appearance {
+    needles: [NeedleAppearance; 2],
+    range_opacity: f32,
+    bend_opacity: f32,
+}
+
+impl Appearance {
+    /// Compare with the last frame selected for rasterization so small movements accumulate.
+    fn differs(&self, previous: &Self) -> bool {
+        self.needles
+            .iter()
+            .zip(&previous.needles)
+            .any(|(current, previous)| {
+                current.tip.distance(previous.tip) >= 0.2
+                    || current
+                        .smear
+                        .iter()
+                        .zip(previous.smear)
+                        .any(|(current, previous)| current.distance(previous) >= 0.2)
+                    || (current.overload - previous.overload).abs() >= 1.0 / 1024.0
+            })
+            || (self.range_opacity - previous.range_opacity).abs() >= 1.0 / 255.0
+            || (self.bend_opacity - previous.bend_opacity).abs() >= 1.0 / 255.0
+    }
 }
 
 struct Readout {
@@ -144,25 +256,11 @@ impl Readout {
 #[cfg(test)]
 mod tests;
 
-fn motion_coefficients(fps: u32) -> Coefficients<f32> {
-    Coefficients::<f32>::from_params(
-        biquad::Type::LowPass,
-        fps.hz(),
-        MOTION_FILTER_CUTOFF.hz(),
-        Q_BUTTERWORTH_F32,
-    )
-    .expect("the motion filter cutoff must be below the frame rate's Nyquist frequency")
-}
-
 impl Needle {
     fn new() -> Self {
-        let angle = Scale::angle(0.0);
-        let tip = Point::new(174.0 * angle.cos(), 174.0 * angle.sin());
         Self {
-            previous: tip,
-            older: tip,
             overload: 0.0,
-            filter: DirectForm2Transposed::<f32>::new(motion_coefficients(60)),
+            motion: Motion::new(),
         }
     }
 }
@@ -177,8 +275,11 @@ pub struct Meter {
     frame_readout: Readout,
     frame_values: HashMap<FrameRateLimit, Text>,
     needles: [Needle; 2],
-    frame_times: FrameTimes,
-    last_fps: u32,
+    face: Scene,
+    face_settings: Option<FaceSettings>,
+    range_readout: ScaleReadout,
+    bend_readout: ScaleReadout,
+    appearance: Option<Appearance>,
 }
 
 impl Meter {
@@ -193,9 +294,13 @@ impl Meter {
             .collect();
         let preamp_value = Readout::value(&mut fonts, &format!("{:.1}dB", preamp.db()));
         let marks = generate_din_scale(&mut fonts);
+        let scale = Scale::new();
+        let range_readout =
+            ScaleReadout::new(&mut fonts, ScaleSetting::DbRange, scale.negative_db_range);
+        let bend_readout = ScaleReadout::new(&mut fonts, ScaleSetting::Bend, scale.bend);
         Ok(Self {
             processor,
-            scale: Scale::new(),
+            scale,
             marks,
             fonts,
             preamp_readout,
@@ -203,8 +308,11 @@ impl Meter {
             frame_readout,
             frame_values,
             needles: std::array::from_fn(|_| Needle::new()),
-            frame_times: FrameTimes::new(),
-            last_fps: 60,
+            face: Scene::new(),
+            face_settings: None,
+            range_readout,
+            bend_readout,
+            appearance: None,
         })
     }
 
@@ -218,19 +326,18 @@ impl Meter {
     pub fn set_preamp(&mut self, preamp: PreampDb) {
         self.processor.preamp = preamp.gain();
         self.preamp_value = Readout::value(&mut self.fonts, &format!("{:.1}dB", preamp.db()));
+        self.face_settings = None;
     }
 
-    pub fn draw(&mut self, scene: &mut Scene, view: &View, limit: FrameRateLimit, dt: f32) {
-        self.frame_times.update(dt);
-        let fps = (1.0 / self.frame_times.average()).max(MOTION_FILTER_CUTOFF * 2.0 + 1.0) as u32;
-        if fps != self.last_fps {
-            let coefficients = motion_coefficients(fps);
-            for needle in &mut self.needles {
-                needle.filter.update_coefficients(coefficients);
-            }
-            self.last_fps = fps;
-        }
+    pub fn reset_scale(&mut self) {
+        self.scale = Scale::new();
+        self.range_readout.opacity = 1.0;
+        self.bend_readout.opacity = 1.0;
+    }
 
+    fn draw_face(&mut self, view: &View, limit: FrameRateLimit) {
+        let scene = &mut self.face;
+        scene.reset();
         let [preamp, frame] = view.layout.readouts();
         self.preamp_readout.draw(
             scene,
@@ -246,76 +353,153 @@ impl Meter {
             view.transform * Affine::translate(frame.to_vec2()),
             frame_value,
         );
-        let levels = self.processor.get_hands_for_instant(Instant::now());
-        for ((needle, level), pivot) in self
-            .needles
-            .iter_mut()
-            .zip(levels)
-            .zip(view.layout.pivots())
-        {
+        for pivot in view.layout.pivots() {
             let meter = view.transform * Affine::translate(pivot.to_vec2());
             draw_scale(scene, meter, &self.marks, &self.scale);
-
-            let speed = if level >= 1.0 { 25.0 } else { -5.0 };
-            needle.overload = (needle.overload + dt * speed).clamp(0.0, 1.0);
-            let light = Point::new(0.0, CENTER_Y * -0.4);
             scene.fill(
                 Fill::NonZero,
                 meter,
                 Color::new([0.0, 0.0, 0.0, 0.25]),
                 None,
-                &Circle::new(light, 7.0),
+                &Circle::new((0.0, CENTER_Y * -0.4), 7.0),
             );
-            let strength = needle.overload;
-            let glow = Gradient::new_two_point_radial(light, 5.0, light, 40.0).with_stops([
-                Color::new([
-                    1.0,
-                    strength.powi(2) * 0.2,
-                    strength.powi(4) * 0.1,
-                    strength.powi(2) * 0.2,
-                ]),
-                Color::new([1.0, 0.0, 0.0, 0.0]),
-            ]);
-            scene.fill(Fill::NonZero, meter, &glow, None, &Circle::new(light, 40.0));
-            scene.fill(
-                Fill::NonZero,
-                meter,
-                Color::new([
-                    1.0,
-                    strength.powi(2) * 0.9,
-                    strength.powi(4) * 0.8,
-                    strength,
-                ]),
-                None,
-                &Circle::new(light, 5.0),
-            );
+        }
+    }
 
-            let position = needle.filter.run(self.scale.position(level));
-            let angle = Scale::angle(position);
-            let tip = Point::new(174.0 * angle.cos(), 174.0 * angle.sin());
-            for previous in [needle.older, needle.previous] {
-                let mut trail = BezPath::new();
-                trail.move_to(Point::ORIGIN);
-                trail.line_to(tip);
-                trail.line_to(previous);
-                trail.close_path();
+    pub fn draw(
+        &mut self,
+        scene: &mut Scene,
+        view: &View,
+        limit: FrameRateLimit,
+        adjusting: Option<ScaleSetting>,
+        dt: f32,
+    ) -> Frame<'_> {
+        let settings = FaceSettings {
+            view: *view,
+            scale: self.scale,
+            limit,
+        };
+        let rebuild = self.face_settings != Some(settings);
+        if rebuild {
+            self.draw_face(view, limit);
+            self.face_settings = Some(settings);
+        }
+        self.range_readout
+            .draw(&mut self.fonts, scene, view, &self.scale, adjusting, dt);
+        self.bend_readout
+            .draw(&mut self.fonts, scene, view, &self.scale, adjusting, dt);
+        let levels = self.processor.get_hands_for_instant(Instant::now());
+        let pivots = view.layout.pivots();
+        let needles = std::array::from_fn(|channel| {
+            let needle = &mut self.needles[channel];
+            let level = levels[channel];
+            let pivot = pivots[channel];
+            let meter = view.transform * Affine::translate(pivot.to_vec2());
+            let speed = if level >= 1.0 { 25.0 } else { -5.0 };
+            needle.overload = (needle.overload + dt * speed).clamp(0.0, 1.0);
+            let light = Point::new(0.0, CENTER_Y * -0.4);
+            let strength = needle.overload;
+            if strength > 0.0 {
+                let glow = Gradient::new_two_point_radial(light, 5.0, light, 40.0).with_stops([
+                    Color::new([
+                        1.0,
+                        strength.powi(2) * 0.2,
+                        strength.powi(4) * 0.1,
+                        strength.powi(2) * 0.2,
+                    ]),
+                    Color::new([1.0, 0.0, 0.0, 0.0]),
+                ]);
+                scene.fill(Fill::NonZero, meter, &glow, None, &Circle::new(light, 40.0));
                 scene.fill(
                     Fill::NonZero,
                     meter,
-                    Color::from_rgba8(255, 48, 0, 100),
+                    Color::new([
+                        1.0,
+                        strength.powi(2) * 0.9,
+                        strength.powi(4) * 0.8,
+                        strength,
+                    ]),
                     None,
-                    &trail,
+                    &Circle::new(light, 5.0),
                 );
             }
+
+            let exposure = needle.motion.advance(self.scale.position(level), dt);
+            // Vello evaluates sweep angles in [0, TAU); the gauge stays within one turn.
+            let angle = Scale::angle(exposure.average as f32) + std::f64::consts::TAU;
+            let bounds = [exposure.minimum, exposure.maximum]
+                .map(|position| Scale::angle(position as f32) + std::f64::consts::TAU);
+            let tip = Point::new(NEEDLE_RADIUS * angle.cos(), NEEDLE_RADIUS * angle.sin());
+            let travel = (bounds[1] - bounds[0]) * NEEDLE_RADIUS;
+            // Normalize the triangular opacity profile by the tip's swept distance.
+            let peak = (2.0 * NEEDLE_WIDTH / travel.max(2.0 * NEEDLE_WIDTH)) as f32;
+            let scale = view.transform.as_coeffs()[0].hypot(view.transform.as_coeffs()[1]);
+            // Introduce the wings once their sweep exceeds the visible stroke width.
+            let transition = ((travel * scale / (NEEDLE_WIDTH * scale).max(1.0) - 1.0) / 2.0)
+                .clamp(0.0, 1.0) as f32;
+            let blur = transition * transition * (3.0 - 2.0 * transition);
+            let clip = Circle::new(Point::ORIGIN, NEEDLE_RADIUS + NEEDLE_WIDTH);
+            if peak < 1.0 {
+                scene.push_layer(Fill::NonZero, Compose::SrcOver, 1.0, meter, &clip);
+            }
+            // Merge the physical stroke with the wings before applying their shared opacity.
             scene.stroke(
-                &Stroke::new(1.0),
+                &Stroke::new(NEEDLE_WIDTH),
                 meter,
-                Color::from_rgb8(255, 200, 160),
+                NEEDLE_INK,
                 None,
                 &Line::new(Point::ORIGIN, tip),
             );
-            needle.older = needle.previous;
-            needle.previous = tip;
+            let smear = bounds.map(|edge| {
+                let edge_tip = Point::new(NEEDLE_RADIUS * edge.cos(), NEEDLE_RADIUS * edge.sin());
+                if blur > 0.0 && (edge - angle).abs() * NEEDLE_RADIUS * scale > 0.5 {
+                    let triangle = Triangle::new(Point::ORIGIN, tip, edge_tip);
+                    let gradient = Gradient::new_sweep(Point::ORIGIN, angle as f32, edge as f32)
+                        .with_stops([NEEDLE_INK.with_alpha(blur), NEEDLE_INK.with_alpha(0.0)]);
+                    scene.fill(Fill::NonZero, meter, &gradient, None, &triangle);
+                }
+                meter * edge_tip
+            });
+            if peak < 1.0 {
+                let core = peak.sqrt();
+                let white = Color::from_rgb8(255, 255, 255);
+                let opacity = |coverage| white.with_alpha(1.0 - blur + blur * coverage);
+                let mask = Gradient::new_radial(Point::ORIGIN, NEEDLE_RADIUS as f32).with_stops([
+                    (0.0, white),
+                    (peak, white),
+                    (core, opacity(core)),
+                    (1.0, opacity(peak)),
+                ]);
+                scene.push_layer(Fill::NonZero, Compose::DestIn, 1.0, meter, &clip);
+                scene.fill(Fill::NonZero, meter, &mask, None, &clip);
+                scene.pop_layer();
+                scene.pop_layer();
+            }
+            NeedleAppearance {
+                tip: meter * tip,
+                smear,
+                overload: strength,
+            }
+        });
+        let appearance = Appearance {
+            needles,
+            range_opacity: self.range_readout.opacity,
+            bend_opacity: self.bend_readout.opacity,
+        };
+        let changed = rebuild
+            || self
+                .appearance
+                .as_ref()
+                .is_none_or(|previous| appearance.differs(previous));
+        if changed {
+            self.appearance = Some(appearance);
+        }
+        if rebuild {
+            Frame::Rebuilt(&self.face)
+        } else if changed {
+            Frame::Retained(&self.face)
+        } else {
+            Frame::Unchanged(&self.face)
         }
     }
 }

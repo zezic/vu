@@ -1,4 +1,7 @@
-use std::{sync::mpsc::Receiver, time::Instant};
+use std::{
+    sync::mpsc::Receiver,
+    time::{Duration, Instant},
+};
 
 use audio::capture_stream;
 use config::Config;
@@ -6,6 +9,7 @@ use frame_schedule::{Adjustment, FrameKind, FrameSchedule, Occlusion, RedrawPerm
 use meter::{Meter, View};
 use render::{Presentation, RenderWindow};
 use saved::Saved;
+use scales::ScaleSetting;
 use vello::kurbo::Point;
 use winit::{
     application::ApplicationHandler,
@@ -18,7 +22,6 @@ use winit::{
 mod audio;
 mod config;
 mod frame_schedule;
-mod frame_times;
 mod meter;
 mod processor;
 mod render;
@@ -42,7 +45,29 @@ enum WindowState {
 
 enum DragState {
     Idle,
-    Adjusting,
+    Pending(Point),
+    Adjusting(ScaleSetting),
+}
+
+struct Click {
+    at: Instant,
+    position: Point,
+}
+
+impl Click {
+    fn follows(&self, position: Point, now: Instant) -> bool {
+        now.duration_since(self.at) <= Duration::from_millis(400)
+            && self.position.distance(position) <= 6.0
+    }
+}
+
+impl DragState {
+    fn setting(&self) -> Option<ScaleSetting> {
+        match self {
+            Self::Adjusting(setting) => Some(*setting),
+            _ => None,
+        }
+    }
 }
 
 enum Setting {
@@ -57,6 +82,7 @@ struct App {
     settings: Saved<Config>,
     mouse: Point,
     drag: DragState,
+    last_click: Option<Click>,
     frames: FrameSchedule,
     previous_frame: Instant,
 }
@@ -100,25 +126,60 @@ impl App {
                 state,
                 ..
             } => {
-                self.drag = match state {
-                    ElementState::Pressed => DragState::Adjusting,
-                    ElementState::Released => DragState::Idle,
-                };
+                let now = Instant::now();
+                match state {
+                    ElementState::Pressed => {
+                        if self
+                            .last_click
+                            .take()
+                            .is_some_and(|click| click.follows(self.mouse, now))
+                        {
+                            self.meter.reset_scale();
+                        }
+                        self.drag = DragState::Pending(self.mouse);
+                    }
+                    ElementState::Released => {
+                        if matches!(self.drag, DragState::Pending(_)) {
+                            self.last_click = Some(Click {
+                                at: now,
+                                position: self.mouse,
+                            });
+                        }
+                        self.drag = DragState::Idle;
+                    }
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let position = Point::new(position.x, position.y);
-                if matches!(self.drag, DragState::Adjusting) {
-                    let delta = position - self.mouse;
-                    if delta.x.abs() > delta.y.abs() {
+                let mut delta = position - self.mouse;
+                if let DragState::Pending(origin) = self.drag {
+                    let movement = position - origin;
+                    if movement.hypot() >= 3.0 {
+                        self.drag = DragState::Adjusting(if movement.x.abs() > movement.y.abs() {
+                            ScaleSetting::DbRange
+                        } else {
+                            ScaleSetting::Bend
+                        });
+                        delta = movement;
+                    }
+                }
+                match self.drag.setting() {
+                    Some(ScaleSetting::DbRange) => {
                         self.meter.scale.negative_db_range = (self.meter.scale.negative_db_range
                             + delta.x as f32 * 0.1)
                             .clamp(1.0, 100.0);
-                    } else {
+                    }
+                    Some(ScaleSetting::Bend) => {
                         self.meter.scale.bend =
                             (self.meter.scale.bend * (1.0 + delta.y as f32 * 0.003)).max(0.1);
                     }
+                    None => {}
                 }
                 self.mouse = position;
+            }
+            WindowEvent::Focused(false) => {
+                self.drag = DragState::Idle;
+                self.last_click = None;
             }
             WindowEvent::MouseWheel {
                 delta: MouseScrollDelta::LineDelta(_, y),
@@ -159,9 +220,14 @@ impl App {
                 let dt = (now - self.previous_frame).as_secs_f32();
                 self.previous_frame = now;
                 render.scene.reset();
-                self.meter
-                    .draw(&mut render.scene, view, self.settings.frame_rate_limit, dt);
-                if matches!(render.present()?, Presentation::Unavailable) {
+                let background = self.meter.draw(
+                    &mut render.scene,
+                    view,
+                    self.settings.frame_rate_limit,
+                    self.drag.setting(),
+                    dt,
+                );
+                if matches!(render.present(background)?, Presentation::Unavailable) {
                     self.frames.surface_unavailable(Instant::now());
                 }
             }
@@ -189,6 +255,7 @@ impl ApplicationHandler for App {
                 self.frames.resized(render.window.inner_size().into(), now);
                 self.frames.occlusion_changed(Occlusion::Visible, now);
                 self.drag = DragState::Idle;
+                self.last_click = None;
                 WindowState::Active {
                     render: Box::new(render),
                     view,
@@ -275,6 +342,7 @@ fn main() -> anyhow::Result<()> {
         settings,
         mouse: Point::ORIGIN,
         drag: DragState::Idle,
+        last_click: None,
         frames: FrameSchedule::new(Instant::now()),
         previous_frame: Instant::now(),
     };

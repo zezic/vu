@@ -17,6 +17,13 @@ const BASE_RADIUS: f64 = 164.0;
 const INK: Color = Color::from_rgb8(220, 220, 220);
 const WARNING: Color = Color::from_rgb8(220, 62, 73);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScaleSetting {
+    DbRange,
+    Bend,
+}
+
+#[derive(Clone, Copy, PartialEq)]
 pub struct Scale {
     pub negative_db_range: f32,
     pub bend: f32,
@@ -32,7 +39,8 @@ impl Scale {
 
     pub fn position(&self, value: f32) -> f32 {
         let db = normalized_to_db(value, self.negative_db_range);
-        ((db + self.negative_db_range).max(0.0) / (self.negative_db_range + POSITIVE_DB_RANGE))
+        ((db + self.negative_db_range) / (self.negative_db_range + POSITIVE_DB_RANGE))
+            .clamp(0.0, 1.0)
             .powf(self.bend)
     }
 

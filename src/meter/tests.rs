@@ -10,7 +10,7 @@ use super::{Layout, Meter, View};
 use crate::{
     config::PreampDb,
     frame_schedule::FrameRateLimit,
-    render::{renderer, BACKGROUND},
+    render::{renderer, BackgroundCache, BACKGROUND},
     AudioEvent,
 };
 
@@ -78,6 +78,7 @@ fn renders_stereo_scales_text_needles_and_overload() -> anyhow::Result<()> {
     let id = pollster::block_on(context.device(None)).expect("a compute-capable GPU is required");
     let device = &context.devices[id];
     let mut renderer = renderer(&device.device)?;
+    let mut background = BackgroundCache::new();
     let mut scene = Scene::new();
 
     for (width, height, limit) in [
@@ -87,9 +88,22 @@ fn renders_stereo_scales_text_needles_and_overload() -> anyhow::Result<()> {
         let view = View::fit(Size::new(f64::from(width), f64::from(height)));
         for _ in 0..60 {
             scene.reset();
-            meter.draw(&mut scene, &view, limit, 1.0 / 60.0);
+            meter.draw(&mut scene, &view, limit, None, 1.0 / 60.0);
         }
-        let pixels = render_frame(device, &mut renderer, &scene, width, height)?;
+        let params = RenderParams {
+            base_color: BACKGROUND,
+            width,
+            height,
+            antialiasing_method: AaConfig::Msaa16,
+        };
+        let composite = background.compose(
+            &mut renderer,
+            device,
+            crate::render::Frame::Retained(&meter.face),
+            &scene,
+            &params,
+        )?;
+        let pixels = render_frame(device, &mut renderer, composite, width, height)?;
         let pixel = |point: Point| {
             let (x, y) = (point.x as usize, point.y as usize);
             &pixels[(y * width as usize + x) * 4..][..4]
@@ -174,7 +188,9 @@ fn renders_stereo_scales_text_needles_and_overload() -> anyhow::Result<()> {
                 count_bright(label_region) > 50,
                 "the DIN labels above each arc must render"
             );
-            let tip = meter.needles[channel].previous;
+            let angle =
+                crate::scales::Scale::angle(meter.needles[channel].motion.position() as f32);
+            let tip = Point::new(174.0 * angle.cos(), 174.0 * angle.sin());
             let midpoint = view.transform * (pivot + tip.to_vec2() * 0.5);
             let (x, y) = (midpoint.x as usize, midpoint.y as usize);
             assert!(
