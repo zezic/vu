@@ -2,6 +2,8 @@
 
 A stereo audio meter with VU, quasi-peak PPM, RMS, and sample-peak modes.
 
+![VU stereo audio meter](./assets/screenshot.png)
+
 ## Requirements
 
 - Rust: https://rustup.rs/
