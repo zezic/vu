@@ -191,6 +191,7 @@ impl App {
                     }
                     ElementState::Released => {
                         if matches!(self.drag, DragState::Pending(_)) {
+                            self.meter.repair_needles();
                             self.last_click = Some(Click {
                                 at: now,
                                 position: self.mouse,

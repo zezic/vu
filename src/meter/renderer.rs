@@ -5,7 +5,8 @@ use vello::{
 };
 
 use super::{
-    NeedleAppearance, Overlay, GLOW_RADIUS, LAMP_CENTER, LAMP_RADIUS, NEEDLE_RADIUS, NEEDLE_WIDTH,
+    motion::HINGE_RADIUS, NeedleAppearance, Overlay, BEND_ROUNDING, GLOW_RADIUS, LAMP_CENTER,
+    LAMP_RADIUS, NEEDLE_RADIUS, NEEDLE_WIDTH,
 };
 
 #[repr(C)]
@@ -21,6 +22,8 @@ struct GpuNeedle {
     angles: [f32; 4],
     /// Radius, stroke width, radial opacity peak and overload strength.
     shape: [f32; 4],
+    /// Hinge radius, backward bend, rounding trim and padding.
+    bend: [f32; 4],
 }
 
 impl From<&NeedleAppearance> for GpuNeedle {
@@ -32,6 +35,11 @@ impl From<&NeedleAppearance> for GpuNeedle {
         let bounds = needle
             .screen_edges()
             .into_iter()
+            .chain(
+                [needle.angle, needle.edges[0], needle.edges[1]]
+                    .map(|angle| needle.transform * NeedleAppearance::hinge(angle)),
+            )
+            .chain(needle.screen_sweep_extrema())
             .fold(
                 Rect::from_points(origin, needle.screen_tip()),
                 |bounds, point| bounds.union_pt(point),
@@ -67,6 +75,12 @@ impl From<&NeedleAppearance> for GpuNeedle {
                 needle.edges[0] as f32,
                 needle.edges[1] as f32,
                 needle.blur,
+            ],
+            bend: [
+                HINGE_RADIUS as f32,
+                needle.bend.radians() as f32,
+                BEND_ROUNDING as f32,
+                0.0,
             ],
             shape: [
                 NEEDLE_RADIUS as f32,

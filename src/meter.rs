@@ -24,12 +24,13 @@ const VU_HEIGHT: f64 = 220.0;
 const CENTER_Y: f64 = 207.0;
 const NEEDLE_RADIUS: f64 = 174.0;
 const NEEDLE_WIDTH: f64 = 1.0;
+const BEND_ROUNDING: f64 = 6.0;
 const LAMP_CENTER: Point = Point::new(0.0, CENTER_Y * -0.4);
 const LAMP_RADIUS: f64 = 5.0;
 const GLOW_RADIUS: f64 = 40.0;
 
 mod motion;
-use motion::Motion;
+use motion::{Bend, Motion, HINGE_RADIUS, STOP_RADIUS};
 mod renderer;
 pub use renderer::Renderer;
 
@@ -202,6 +203,7 @@ struct FaceSettings {
 pub(crate) struct NeedleAppearance {
     transform: Affine,
     angle: f64,
+    bend: Bend,
     edges: [f64; 2],
     peak: f32,
     blur: f32,
@@ -213,12 +215,44 @@ impl NeedleAppearance {
         Point::new(NEEDLE_RADIUS * angle.cos(), NEEDLE_RADIUS * angle.sin())
     }
 
+    fn hinge(angle: f64) -> Point {
+        Point::new(HINGE_RADIUS * angle.cos(), HINGE_RADIUS * angle.sin())
+    }
+
+    fn bent_tip(&self, angle: f64) -> Point {
+        let hinge = Self::hinge(angle);
+        let outer_angle = angle - self.bend.radians();
+        hinge
+            + (Self::tip(outer_angle) - Point::ORIGIN)
+                * ((NEEDLE_RADIUS - HINGE_RADIUS) / NEEDLE_RADIUS)
+    }
+
     fn screen_tip(&self) -> Point {
-        self.transform * Self::tip(self.angle)
+        self.transform * self.bent_tip(self.angle)
     }
 
     fn screen_edges(&self) -> [Point; 2] {
-        self.edges.map(|edge| self.transform * Self::tip(edge))
+        self.edges.map(|edge| self.transform * self.bent_tip(edge))
+    }
+
+    fn screen_sweep_extrema(&self) -> impl Iterator<Item = Point> + '_ {
+        [Self::hinge(0.0), self.bent_tip(0.0)]
+            .into_iter()
+            .flat_map(|point| {
+                let [a, b, c, d, ..] = self.transform.as_coeffs();
+                let x_angle = (c * point.x - a * point.y).atan2(a * point.x + c * point.y);
+                let y_angle = (d * point.x - b * point.y).atan2(b * point.x + d * point.y);
+                [
+                    x_angle,
+                    y_angle,
+                    x_angle + std::f64::consts::PI,
+                    y_angle + std::f64::consts::PI,
+                ]
+                .into_iter()
+                .map(move |angle| (point, angle.rem_euclid(std::f64::consts::TAU)))
+            })
+            .filter(|(_, angle)| (self.edges[0]..=self.edges[1]).contains(angle))
+            .map(|(point, angle)| self.transform * (Affine::rotate(angle) * point))
     }
 }
 
@@ -453,6 +487,12 @@ impl Meter {
         self.face_settings = None;
     }
 
+    pub fn repair_needles(&mut self) {
+        for needle in &mut self.needles {
+            needle.motion.repair();
+        }
+    }
+
     pub fn reset_scale(&mut self) {
         self.scale = Scale::new();
         self.range_readout.opacity = 1.0;
@@ -508,6 +548,13 @@ impl Meter {
         for pivot in view.layout.pivots() {
             let meter = view.transform * Affine::translate(pivot.to_vec2());
             draw_scale(scene, meter, &self.marks, &self.scale, colors);
+            scene.fill(
+                Fill::NonZero,
+                meter,
+                colors.needle_stop,
+                None,
+                &Circle::new(motion::stop_center(), STOP_RADIUS),
+            );
             scene.fill(
                 Fill::NonZero,
                 meter,
@@ -572,6 +619,7 @@ impl Meter {
             NeedleAppearance {
                 transform: meter,
                 angle,
+                bend: exposure.bend,
                 edges: bounds,
                 peak,
                 blur,

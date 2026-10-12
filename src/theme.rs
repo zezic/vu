@@ -14,7 +14,7 @@ impl Default for ThemeId {
             registry()
                 .iter()
                 .position(|entry| entry.name == "Srcery")
-                .expect("Aura is bundled"),
+                .expect("Srcery is bundled"),
         )
     }
 }
@@ -59,6 +59,7 @@ pub struct MeterColors {
     pub warning: Color,
     pub warning_dim: Color,
     pub needle: Color,
+    pub needle_stop: Color,
     pub readout: Color,
     pub hint: Color,
     pub lamp_off: Color,
@@ -75,6 +76,7 @@ impl MeterColors {
             warning: hex(&theme.basic[1]),
             warning_dim: mix(hex(&theme.basic[1]), background, 0.35),
             needle: hex(&theme.foreground),
+            needle_stop: mix(background, scale, 0.5),
             readout: mix(background, scale, 0.4),
             hint: mix(background, scale, 0.6),
             lamp_off: mix(background, scale, 0.1),
@@ -89,6 +91,7 @@ impl MeterColors {
             warning: mix(self.warning, target.warning, progress),
             warning_dim: mix(self.warning_dim, target.warning_dim, progress),
             needle: mix(self.needle, target.needle, progress),
+            needle_stop: mix(self.needle_stop, target.needle_stop, progress),
             readout: mix(self.readout, target.readout, progress),
             hint: mix(self.hint, target.hint, progress),
             lamp_off: mix(self.lamp_off, target.lamp_off, progress),

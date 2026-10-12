@@ -38,7 +38,7 @@ impl Scale {
     pub fn position(&self, value: f32) -> f32 {
         let db = normalized_to_db(value, self.negative_db_range);
         ((db + self.negative_db_range) / (self.negative_db_range + POSITIVE_DB_RANGE))
-            .clamp(0.0, 1.0)
+            .max(0.0)
             .powf(self.bend)
     }
 

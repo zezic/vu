@@ -577,6 +577,28 @@ fn overlay_matches_vector_stroke_sweep_mask_and_overload() -> anyhow::Result<()>
         let device = &context.devices[id];
         let mut renderer = renderer(&device.device)?;
         for (name, width, height, dt, steps, zoom, overload, shutter_frames) in [
+            (
+                "bent-rise15",
+                1280,
+                440,
+                1.0 / 15.0,
+                1,
+                1.0,
+                [0.0, 0.0],
+                1.0,
+            ),
+            ("bent-zoom", 1280, 440, 1.0 / 30.0, 2, 1.7, [0.0, 0.0], 1.0),
+            (
+                "bent-shutter2.5",
+                640,
+                960,
+                1.0 / 60.0,
+                4,
+                1.0,
+                [0.0, 0.0],
+                2.5,
+            ),
+            ("bent", 1280, 440, 1.0 / 60.0, 90, 1.0, [0.0, 0.0], 1.0),
             ("rest", 1280, 440, 1.0 / 60.0, 90, 1.0, [0.0, 0.0], 1.0),
             ("rise240", 1280, 440, 1.0 / 240.0, 3, 1.0, [0.0, 0.0], 1.0),
             ("rise15", 1280, 440, 1.0 / 15.0, 1, 1.0, [0.0, 0.0], 1.0),
@@ -619,6 +641,17 @@ fn overlay_matches_vector_stroke_sweep_mask_and_overload() -> anyhow::Result<()>
             let mut needles = meter.appearance.as_ref().unwrap().needles;
             for (needle, overload) in needles.iter_mut().zip(overload) {
                 needle.overload = overload;
+            }
+            if name.starts_with("bent") {
+                let mut motion = super::Motion::new();
+                let exposure = motion.advance(1.2, 1.0, crate::config::ShutterFrames::default());
+                for needle in &mut needles {
+                    needle.bend = exposure.bend;
+                    if name == "bent" {
+                        needle.blur = 0.0;
+                        needle.peak = 1.0;
+                    }
+                }
             }
             let mut reference = Scene::new();
             for needle in &needles {
@@ -719,33 +752,114 @@ fn draw_vector_reference(scene: &mut Scene, needle: &super::NeedleAppearance) {
             &Circle::new(light, LAMP_RADIUS),
         );
     }
-    let clip = Circle::new(Point::ORIGIN, NEEDLE_RADIUS + NEEDLE_WIDTH);
+    let tip = needle.bent_tip(needle.angle);
+    let radius = tip.distance(Point::ORIGIN);
+    let clip = Circle::new(Point::ORIGIN, radius + NEEDLE_WIDTH);
     if needle.peak < 1.0 {
         scene.push_layer(Fill::NonZero, Compose::SrcOver, 1.0, transform, &clip);
     }
-    let tip = super::NeedleAppearance::tip(needle.angle);
-    scene.stroke(
-        &Stroke::new(NEEDLE_WIDTH),
-        transform,
-        ink,
-        None,
-        &Line::new(Point::ORIGIN, tip),
-    );
+    if needle.bend.radians() > 0.0 {
+        let hinge = super::NeedleAppearance::hinge(needle.angle);
+        let trim = super::BEND_ROUNDING;
+        let start = hinge - (hinge - Point::ORIGIN) * (trim / super::HINGE_RADIUS);
+        let end = hinge + (tip - hinge) * (trim / (NEEDLE_RADIUS - super::HINGE_RADIUS));
+        let mut path = vello::kurbo::BezPath::new();
+        path.move_to(Point::ORIGIN);
+        path.line_to(start);
+        path.quad_to(hinge, end);
+        path.line_to(tip);
+        scene.stroke(&Stroke::new(NEEDLE_WIDTH), transform, ink, None, &path);
+    } else {
+        scene.stroke(
+            &Stroke::new(NEEDLE_WIDTH),
+            transform,
+            ink,
+            None,
+            &Line::new(Point::ORIGIN, tip),
+        );
+    }
     let [a, b, ..] = transform.as_coeffs();
     let scale = a.hypot(b);
     for edge in needle.edges {
-        if needle.blur > 0.0 && (edge - needle.angle).abs() * NEEDLE_RADIUS * scale > 0.5 {
-            let triangle = Triangle::new(Point::ORIGIN, tip, super::NeedleAppearance::tip(edge));
-            let gradient = Gradient::new_sweep(Point::ORIGIN, needle.angle as f32, edge as f32)
-                .with_stops([ink.with_alpha(needle.blur), ink.with_alpha(0.0)]);
-            scene.fill(Fill::NonZero, transform, &gradient, None, &triangle);
+        if needle.blur > 0.0 && (edge - needle.angle).abs() * radius * scale > 0.5 {
+            if needle.bend.radians() == 0.0 {
+                let triangle =
+                    Triangle::new(Point::ORIGIN, tip, super::NeedleAppearance::tip(edge));
+                let gradient = Gradient::new_sweep(Point::ORIGIN, needle.angle as f32, edge as f32)
+                    .with_stops([ink.with_alpha(needle.blur), ink.with_alpha(0.0)]);
+                scene.fill(Fill::NonZero, transform, &gradient, None, &triangle);
+            } else {
+                use vello::kurbo::{BezPath, ParamCurve, QuadBez, Shape};
+                let hinge = super::NeedleAppearance::hinge(0.0);
+                let tip = needle.bent_tip(0.0);
+                let start =
+                    hinge - (hinge - Point::ORIGIN) * (super::BEND_ROUNDING / super::HINGE_RADIUS);
+                let end = hinge
+                    + (tip - hinge)
+                        * (super::BEND_ROUNDING / (NEEDLE_RADIUS - super::HINGE_RADIUS));
+                let curve = QuadBez::new(start, hinge, end);
+                let outer = Line::new(end, tip);
+                // Vector annuli approximate the spatial warp, with a sweep gradient in each band.
+                for band in 0..=48 {
+                    let low_radius = if band == 0 {
+                        0.0
+                    } else {
+                        start.x + (radius - start.x) * (band - 1) as f64 / 48.0
+                    };
+                    let high_radius = if band == 0 {
+                        start.x
+                    } else {
+                        start.x + (radius - start.x) * band as f64 / 48.0
+                    };
+                    let mut low = 0.0;
+                    let mut high = 1.0;
+                    let target_radius = (low_radius + high_radius) / 2.0;
+                    for _ in 0..40 {
+                        let fraction = (low + high) / 2.0;
+                        let point = if fraction < 0.5 {
+                            curve.eval(fraction * 2.0)
+                        } else {
+                            outer.eval(fraction * 2.0 - 1.0)
+                        };
+                        if point.distance(Point::ORIGIN) < target_radius {
+                            low = fraction;
+                        } else {
+                            high = fraction;
+                        }
+                    }
+                    let fraction = (low + high) / 2.0;
+                    let point = if fraction < 0.5 {
+                        curve.eval(fraction * 2.0)
+                    } else {
+                        outer.eval(fraction * 2.0 - 1.0)
+                    };
+                    let phase = point.y.atan2(point.x);
+                    let at = |angle: f64| Point::new(radius * angle.cos(), radius * angle.sin());
+                    let triangle =
+                        Triangle::new(Point::ORIGIN, at(needle.angle + phase), at(edge + phase));
+                    let gradient = Gradient::new_sweep(
+                        Point::ORIGIN,
+                        (needle.angle + phase) as f32,
+                        (edge + phase) as f32,
+                    )
+                    .with_stops([ink.with_alpha(needle.blur), ink.with_alpha(0.0)]);
+                    let mut ring = BezPath::new();
+                    ring.extend(Circle::new(Point::ORIGIN, high_radius).path_elements(0.01));
+                    if low_radius > 0.0 {
+                        ring.extend(Circle::new(Point::ORIGIN, low_radius).path_elements(0.01));
+                    }
+                    scene.push_layer(Fill::EvenOdd, Compose::SrcOver, 1.0, transform, &ring);
+                    scene.fill(Fill::NonZero, transform, &gradient, None, &triangle);
+                    scene.pop_layer();
+                }
+            }
         }
     }
     if needle.peak < 1.0 {
         let core = needle.peak.sqrt();
         let white = Color::from_rgb8(255, 255, 255);
         let opacity = |coverage| white.with_alpha(1.0 - needle.blur + needle.blur * coverage);
-        let mask = Gradient::new_radial(Point::ORIGIN, NEEDLE_RADIUS as f32).with_stops([
+        let mask = Gradient::new_radial(Point::ORIGIN, radius as f32).with_stops([
             (0.0, white),
             (needle.peak, white),
             (core, opacity(core)),
