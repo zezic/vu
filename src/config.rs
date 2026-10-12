@@ -13,9 +13,15 @@ use crate::{
 #[serde(try_from = "f32", into = "f32")]
 pub struct PreampDb(f32);
 
+#[derive(Clone, Copy)]
+pub enum PreampStep {
+    Coarse,
+    Fine,
+}
+
 impl Default for PreampDb {
     fn default() -> Self {
-        Self(18.0)
+        Self(12.0)
     }
 }
 
@@ -47,10 +53,14 @@ impl PreampDb {
     }
 
     #[must_use]
-    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+    pub fn adjusted(self, adjustment: Adjustment, step: PreampStep) -> Self {
+        let magnitude = match step {
+            PreampStep::Coarse => 6.0,
+            PreampStep::Fine => 1.0,
+        };
         let delta = match adjustment {
-            Adjustment::Decrease => -6.0,
-            Adjustment::Increase => 6.0,
+            Adjustment::Decrease => -magnitude,
+            Adjustment::Increase => magnitude,
         };
         Self((self.0 + delta).clamp(-96.0, 96.0))
     }

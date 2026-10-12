@@ -4,7 +4,7 @@ use std::{
 };
 
 use audio::capture_stream;
-use config::Config;
+use config::{Config, PreampStep};
 use frame_schedule::{Adjustment, FrameKind, FrameSchedule, Occlusion, RedrawPermit, SurfaceArea};
 use meter::{Meter, View};
 use render::{Presentation, RenderWindow};
@@ -15,7 +15,7 @@ use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
+    keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::WindowId,
 };
 
@@ -106,6 +106,7 @@ struct App {
     mouse: Point,
     drag: DragState,
     last_click: Option<Click>,
+    modifiers: ModifiersState,
     frames: FrameSchedule,
     previous_frame: Instant,
     profile: Option<profile::Run>,
@@ -141,7 +142,12 @@ impl App {
                 self.meter.set_theme(settings.theme);
             }
             Setting::Preamp => {
-                settings.preamp_db = settings.preamp_db.adjusted(adjustment);
+                let step = if self.modifiers.shift_key() {
+                    PreampStep::Fine
+                } else {
+                    PreampStep::Coarse
+                };
+                settings.preamp_db = settings.preamp_db.adjusted(adjustment, step);
                 self.meter.set_preamp(settings.preamp_db);
             }
             Setting::FrameRate => {
@@ -243,8 +249,12 @@ impl App {
                 self.mouse = position;
             }
             WindowEvent::Focused(false) => {
+                self.modifiers = ModifiersState::empty();
                 self.drag = DragState::Idle;
                 self.last_click = None;
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
             }
             WindowEvent::MouseWheel {
                 delta: MouseScrollDelta::LineDelta(_, y),
@@ -373,6 +383,7 @@ impl ApplicationHandler for App {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.modifiers = ModifiersState::empty();
         if matches!(self.state, WindowState::Active(_)) {
             self.state = WindowState::Suspended;
             self.frames.resized(SurfaceArea::Empty, Instant::now());
@@ -463,6 +474,7 @@ fn main() -> anyhow::Result<()> {
         mouse: Point::ORIGIN,
         drag: DragState::Idle,
         last_click: None,
+        modifiers: ModifiersState::empty(),
         frames: FrameSchedule::new(Instant::now()),
         previous_frame: Instant::now(),
         profile,
