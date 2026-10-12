@@ -21,7 +21,7 @@ pub enum PreampStep {
 
 impl Default for PreampDb {
     fn default() -> Self {
-        Self(12.0)
+        Self(18.0)
     }
 }
 

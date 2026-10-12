@@ -1,6 +1,10 @@
 use std::{collections::VecDeque, f64::consts::TAU};
 
-use crate::{config::ShutterFrames, measurement::Mode};
+use crate::{
+    audio::timeline::{AudioInterval, AudioTime},
+    config::ShutterFrames,
+    measurement::Mode,
+};
 
 use super::{NEEDLE_RADIUS, NEEDLE_WIDTH};
 use crate::scales::{Scale, MAX_ANGLE};
@@ -256,18 +260,36 @@ impl Segment {
     }
 }
 
-struct FramePath {
-    segments: Vec<Segment>,
-    duration: f64,
+/// History is retained by audio duration, independently of display cadence.
+const HISTORY_SECONDS: f64 = 2.0;
+
+struct TimedSegment {
+    start: AudioTime,
+    segment: Segment,
 }
 
-/// Damped free motion and velocity-driven plastic deformation at the stop.
-pub(super) struct Motion {
+impl TimedSegment {
+    fn end(&self) -> AudioTime {
+        self.start.shifted(self.segment.duration)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Mechanics {
     state: State,
     response: Response,
     bend: Bend,
     movement: Movement,
-    history: VecDeque<FramePath>,
+}
+
+/// Confirmed sample-time mechanics and a bounded path for shutter integration.
+/// Previewing copies only Mechanics and reuses scratch storage.
+pub(super) struct Motion {
+    mechanics: Mechanics,
+    at: AudioTime,
+    history: VecDeque<TimedSegment>,
+    preview: Vec<TimedSegment>,
+    frames: VecDeque<f64>,
 }
 
 pub(super) struct Exposure {
@@ -277,35 +299,315 @@ pub(super) struct Exposure {
     pub bend: Bend,
 }
 
+impl Mechanics {
+    fn advance(&mut self, target: f32, dt: f64, mut record: impl FnMut(Segment)) {
+        assert!(
+            dt.is_finite() && dt >= 0.0,
+            "drive duration must be finite and nonnegative"
+        );
+        assert!(
+            target.is_finite() && target >= 0.0,
+            "needle target must be finite and nonnegative"
+        );
+        let target = f64::from(target);
+        let mut remaining = dt;
+        while remaining > 0.0 {
+            let mut contact = None;
+            let (movement, elapsed) = if matches!(self.movement, Movement::Yielding) {
+                let distance = Bend(MAX_BEND).limit() - self.state.position;
+                let stop_time = self.state.velocity / BENDING_RESISTANCE;
+                let energy = self.state.velocity * self.state.velocity;
+                let cap_time = if 2.0 * BENDING_RESISTANCE * distance < energy {
+                    2.0 * distance
+                        / (self.state.velocity
+                            + (energy - 2.0 * BENDING_RESISTANCE * distance).sqrt())
+                } else {
+                    stop_time
+                };
+                (Movement::Yielding, remaining.min(cap_time))
+            } else {
+                let limit = self.bend.limit();
+                if (self.state.position >= limit && target >= limit)
+                    || (self.state.position == target && self.state.velocity == 0.0)
+                {
+                    (Movement::Rest, remaining)
+                } else {
+                    let mut previous = 0.0;
+                    let mut elapsed = remaining;
+                    for time in self
+                        .response
+                        .turning_times(self.state, target, remaining)
+                        .chain(std::iter::once(remaining))
+                    {
+                        let position = self.state.at(target, time, self.response).position;
+                        let boundary = if position > limit {
+                            Some(Stop::Upper)
+                        } else if position < 0.0 {
+                            Some(Stop::Lower)
+                        } else {
+                            None
+                        };
+                        if let Some(boundary) = boundary {
+                            let mut low = previous;
+                            let mut high = time;
+                            for _ in 0..40 {
+                                let middle = (low + high) / 2.0;
+                                let position =
+                                    self.state.at(target, middle, self.response).position;
+                                let before = match boundary {
+                                    Stop::Lower => position > 0.0,
+                                    Stop::Upper => position < limit,
+                                };
+                                if before {
+                                    low = middle;
+                                } else {
+                                    high = middle;
+                                }
+                            }
+                            elapsed = high;
+                            contact = Some(boundary);
+                            break;
+                        }
+                        previous = time;
+                    }
+                    (
+                        Movement::Driven {
+                            target,
+                            response: self.response,
+                        },
+                        elapsed,
+                    )
+                }
+            };
+            if matches!(movement, Movement::Rest) {
+                self.state.velocity = 0.0;
+            }
+            let segment = Segment {
+                start: self.state,
+                movement,
+                duration: elapsed,
+                bend: self.bend,
+            };
+            self.state = segment.at(elapsed);
+            self.bend = segment.bend_at(elapsed);
+            remaining = (remaining - elapsed).max(0.0);
+            record(segment);
+            self.movement = match contact {
+                Some(Stop::Lower) => {
+                    self.state.position = 0.0;
+                    self.state.velocity = 0.0;
+                    Movement::Rest
+                }
+                Some(Stop::Upper) => {
+                    self.state.position = self.bend.limit();
+                    if self.state.velocity >= IMPACT_SPEED && self.bend.0 < MAX_BEND {
+                        Movement::Yielding
+                    } else {
+                        self.state.velocity = 0.0;
+                        Movement::Rest
+                    }
+                }
+                None => match movement {
+                    Movement::Yielding
+                        if remaining > 0.0
+                            || self.state.velocity <= 0.0
+                            || self.state.position >= Bend(MAX_BEND).limit() =>
+                    {
+                        self.state.velocity = 0.0;
+                        Movement::Rest
+                    }
+                    other => other,
+                },
+            };
+        }
+    }
+}
+
 impl Motion {
     #[cfg(test)]
     pub fn position(&self) -> f64 {
-        self.state.position
+        self.mechanics.state.position
     }
 
-    pub fn new(mode: Mode, peak_movement: PeakMovement) -> Self {
+    #[cfg(test)]
+    pub fn confirmed_state(&self) -> (AudioTime, f64, f64, Bend) {
+        (
+            self.at,
+            self.mechanics.state.position,
+            self.mechanics.state.velocity,
+            self.mechanics.bend,
+        )
+    }
+
+    pub fn new(mode: Mode, peak_movement: PeakMovement, at: AudioTime) -> Self {
         Self {
-            response: Response::for_mode(mode, peak_movement),
-            state: State {
-                position: 0.0,
-                velocity: 0.0,
+            mechanics: Mechanics {
+                response: Response::for_mode(mode, peak_movement),
+                state: State {
+                    position: 0.0,
+                    velocity: 0.0,
+                },
+                bend: Bend::default(),
+                movement: Movement::Rest,
             },
-            bend: Bend::default(),
-            movement: Movement::Rest,
-            history: VecDeque::with_capacity(ShutterFrames::MAX as usize),
+            at,
+            history: VecDeque::with_capacity(2048),
+            preview: Vec::with_capacity(6),
+            frames: VecDeque::with_capacity(ShutterFrames::MAX as usize),
         }
     }
 
     pub fn set_peak_movement(&mut self, movement: PeakMovement) {
-        self.response = Response::for_peak_movement(movement);
+        self.mechanics.response = Response::for_peak_movement(movement);
     }
 
     pub fn repair(&mut self) {
-        self.bend = Bend::default();
-        self.state.position = self.state.position.min(self.bend.limit());
-        self.state.velocity = 0.0;
-        self.movement = Movement::Rest;
+        self.mechanics.bend = Bend::default();
+        self.mechanics.state.position = self
+            .mechanics
+            .state
+            .position
+            .min(self.mechanics.bend.limit());
+        self.mechanics.state.velocity = 0.0;
+        self.mechanics.movement = Movement::Rest;
         self.history.clear();
+        self.frames.clear();
+    }
+
+    /// Commit one drive on the sample grid. This is never called by rendering.
+    pub fn consume(&mut self, target: f32, interval: AudioInterval) {
+        assert_eq!(
+            interval.start(),
+            self.at,
+            "confirmed drives must be contiguous"
+        );
+        let history = &mut self.history;
+        let mut at = interval.start();
+        self.mechanics
+            .advance(target, interval.seconds(), |segment| {
+                let start = at;
+                at = at.shifted(segment.duration);
+                history.push_back(TimedSegment { start, segment });
+            });
+        self.at = interval.end();
+        let oldest = self.at.shifted(-HISTORY_SECONDS);
+        while self
+            .history
+            .front()
+            .is_some_and(|segment| segment.end() <= oldest)
+        {
+            self.history.pop_front();
+        }
+    }
+
+    /// Predict only the unconfirmed tail, then integrate the requested shutter.
+    /// Neither mechanics, confirmed time, nor confirmed history is modified.
+    pub fn expose(
+        &mut self,
+        frame: AudioInterval,
+        shutter: ShutterFrames,
+        partial: Option<(f32, AudioInterval)>,
+        last_target: f32,
+    ) -> Exposure {
+        self.preview.clear();
+        let mut mechanics = self.mechanics;
+        let mut at = self.at;
+        let preview = &mut self.preview;
+        let mut advance = |target: f32, end: AudioTime| {
+            if end > at {
+                mechanics.advance(target, end.seconds_since(at), |segment| {
+                    let start = at;
+                    at = at.shifted(segment.duration);
+                    preview.push(TimedSegment { start, segment });
+                });
+                at = end;
+            }
+        };
+        if let Some((target, interval)) = partial {
+            assert_eq!(
+                interval.start(),
+                self.at,
+                "partial bin follows confirmed audio"
+            );
+            advance(target, interval.end().min(frame.end()));
+        }
+        advance(last_target, frame.end());
+
+        if frame.seconds() > 0.0 {
+            if self.frames.len() == ShutterFrames::MAX as usize {
+                self.frames.pop_front();
+            }
+            self.frames.push_back(frame.seconds().min(HISTORY_SECONDS));
+        }
+        let mut frames = f64::from(shutter.frames());
+        let seconds: f64 = self
+            .frames
+            .iter()
+            .rev()
+            .map(|seconds| {
+                let fraction = frames.min(1.0);
+                frames -= fraction;
+                seconds * fraction
+            })
+            .sum();
+        let start = if frame.seconds() == 0.0 {
+            frame.end()
+        } else {
+            frame.end().shifted(-seconds.min(HISTORY_SECONDS))
+        };
+        let mut minimum = f64::INFINITY;
+        let mut maximum = f64::NEG_INFINITY;
+        let mut integral = 0.0;
+        let mut bend_integral = 0.0;
+        let mut elapsed = 0.0;
+        for timed in self.preview.iter().rev().chain(self.history.iter().rev()) {
+            if timed.end() < start {
+                break;
+            }
+            let from = timed.start.max(start);
+            let to = timed.end().min(frame.end());
+            if to > from {
+                let duration = to.seconds_since(from);
+                let exposure = timed.segment.exposure(
+                    from.seconds_since(timed.start),
+                    to.seconds_since(timed.start).min(timed.segment.duration),
+                );
+                minimum = minimum.min(exposure.minimum);
+                maximum = maximum.max(exposure.maximum);
+                integral += exposure.average * duration;
+                bend_integral += exposure.bend.0 * duration;
+                elapsed += duration;
+            }
+        }
+        if elapsed > 0.0 {
+            Exposure {
+                minimum,
+                maximum,
+                average: (integral / elapsed).clamp(minimum, maximum),
+                bend: Bend(bend_integral / elapsed),
+            }
+        } else {
+            let state = self
+                .preview
+                .iter()
+                .rev()
+                .chain(self.history.iter().rev())
+                .find(|segment| segment.start <= frame.end())
+                .map(|timed| {
+                    let dt = frame
+                        .end()
+                        .seconds_since(timed.start)
+                        .min(timed.segment.duration);
+                    (timed.segment.at(dt), timed.segment.bend_at(dt))
+                })
+                .unwrap_or((mechanics.state, mechanics.bend));
+            Exposure {
+                minimum: state.0.position,
+                maximum: state.0.position,
+                average: state.0.position,
+                bend: state.1,
+            }
+        }
     }
 
     #[cfg(test)]
@@ -313,203 +615,71 @@ impl Motion {
         self.advance_path(std::iter::once((target, f64::from(dt))), shutter)
     }
 
-    /// One frame can contain many audio-time drives; its history remains one exposure.
+    #[cfg(test)]
     pub fn advance_path(
         &mut self,
         drives: impl Iterator<Item = (f32, f64)>,
         shutter: ShutterFrames,
     ) -> Exposure {
-        let mut drives = drives
-            .filter(|&(target, dt)| {
-                assert!(
-                    dt.is_finite() && dt >= 0.0,
-                    "drive duration must be finite and nonnegative"
-                );
-                assert!(
-                    target.is_finite() && target >= 0.0,
-                    "needle target must be finite and nonnegative"
-                );
-                dt > 0.0
-            })
-            .peekable();
-        if drives.peek().is_none() {
-            return Exposure {
-                minimum: self.state.position,
-                average: self.state.position,
-                maximum: self.state.position,
-                bend: self.bend,
-            };
+        let start = self.at;
+        let mut last = 0.0;
+        for (target, dt) in drives {
+            self.consume(target, AudioInterval::new(self.at, self.at.shifted(dt)));
+            last = target;
         }
-        let mut duration = 0.0;
-        let mut segments = if self.history.len() == ShutterFrames::MAX as usize {
-            self.history
-                .pop_front()
-                .expect("full history has a first frame")
-                .segments
-        } else {
-            Vec::with_capacity(3)
-        };
-        segments.clear();
-        while let Some((target, mut dt)) = drives.next() {
-            while let Some(&(next_target, next_dt)) = drives.peek() {
-                if next_target != target {
-                    break;
-                }
-                dt += next_dt;
-                drives.next();
-            }
-            let target = f64::from(target);
-            duration += dt;
-            let mut remaining = dt;
-            while remaining > 0.0 {
-                let mut contact = None;
-                let (movement, elapsed) = if matches!(self.movement, Movement::Yielding) {
-                    let distance = Bend(MAX_BEND).limit() - self.state.position;
-                    let stop_time = self.state.velocity / BENDING_RESISTANCE;
-                    let energy = self.state.velocity * self.state.velocity;
-                    let cap_time = if 2.0 * BENDING_RESISTANCE * distance < energy {
-                        2.0 * distance
-                            / (self.state.velocity
-                                + (energy - 2.0 * BENDING_RESISTANCE * distance).sqrt())
-                    } else {
-                        stop_time
-                    };
-                    (Movement::Yielding, remaining.min(cap_time))
-                } else {
-                    let limit = self.bend.limit();
-                    if (self.state.position >= limit && target >= limit)
-                        || (self.state.position == target && self.state.velocity == 0.0)
-                    {
-                        (Movement::Rest, remaining)
-                    } else {
-                        let mut previous = 0.0;
-                        let mut elapsed = remaining;
-                        for time in self
-                            .response
-                            .turning_times(self.state, target, remaining)
-                            .chain(std::iter::once(remaining))
-                        {
-                            let position = self.state.at(target, time, self.response).position;
-                            let boundary = if position > limit {
-                                Some(Stop::Upper)
-                            } else if position < 0.0 {
-                                Some(Stop::Lower)
-                            } else {
-                                None
-                            };
-                            if let Some(boundary) = boundary {
-                                let mut low = previous;
-                                let mut high = time;
-                                for _ in 0..40 {
-                                    let middle = (low + high) / 2.0;
-                                    let position =
-                                        self.state.at(target, middle, self.response).position;
-                                    let before = match boundary {
-                                        Stop::Lower => position > 0.0,
-                                        Stop::Upper => position < limit,
-                                    };
-                                    if before {
-                                        low = middle;
-                                    } else {
-                                        high = middle;
-                                    }
-                                }
-                                elapsed = high;
-                                contact = Some(boundary);
-                                break;
-                            }
-                            previous = time;
-                        }
-                        (
-                            Movement::Driven {
-                                target,
-                                response: self.response,
-                            },
-                            elapsed,
-                        )
-                    }
-                };
-                if matches!(movement, Movement::Rest) {
-                    self.state.velocity = 0.0;
-                }
-                let segment = Segment {
-                    start: self.state,
-                    movement,
-                    duration: elapsed,
-                    bend: self.bend,
-                };
-                self.state = segment.at(elapsed);
-                self.bend = segment.bend_at(elapsed);
-                remaining = (remaining - elapsed).max(0.0);
-                segments.push(segment);
-                self.movement = match contact {
-                    Some(Stop::Lower) => {
-                        self.state.position = 0.0;
-                        self.state.velocity = 0.0;
-                        Movement::Rest
-                    }
-                    Some(Stop::Upper) => {
-                        self.state.position = self.bend.limit();
-                        if self.state.velocity >= IMPACT_SPEED && self.bend.0 < MAX_BEND {
-                            Movement::Yielding
-                        } else {
-                            self.state.velocity = 0.0;
-                            Movement::Rest
-                        }
-                    }
-                    None => match movement {
-                        Movement::Yielding
-                            if remaining > 0.0
-                                || self.state.velocity <= 0.0
-                                || self.state.position >= Bend(MAX_BEND).limit() =>
-                        {
-                            self.state.velocity = 0.0;
-                            Movement::Rest
-                        }
-                        other => other,
-                    },
-                };
-            }
-        }
-        self.history.push_back(FramePath { segments, duration });
-        let mut frames = f64::from(shutter.frames());
-        let mut minimum = self.state.position;
-        let mut maximum = self.state.position;
-        let mut integral = 0.0;
-        let mut bend_integral = 0.0;
-        let mut elapsed = 0.0;
-        for frame in self.history.iter().rev() {
-            let fraction = frames.min(1.0);
-            let mut skip = frame.duration * (1.0 - fraction);
-            for segment in &frame.segments {
-                let from = skip.min(segment.duration);
-                skip -= from;
-                let duration = segment.duration - from;
-                if duration > 0.0 {
-                    let exposure = segment.exposure(from, segment.duration);
-                    minimum = minimum.min(exposure.minimum);
-                    maximum = maximum.max(exposure.maximum);
-                    integral += exposure.average * duration;
-                    bend_integral += exposure.bend.0 * duration;
-                    elapsed += duration;
-                }
-            }
-            frames -= fraction;
-            if frames == 0.0 {
-                break;
-            }
-        }
-        Exposure {
-            minimum,
-            average: (integral / elapsed).clamp(minimum, maximum),
-            maximum,
-            bend: Bend(bend_integral / elapsed),
-        }
+        self.expose(AudioInterval::new(start, self.at), shutter, None, last)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speculative_stop_damage_is_discarded_when_actual_audio_arrives() {
+        let mut motion = Motion::new(Mode::Rms, PeakMovement::default(), AudioTime::ZERO);
+        let first = AudioTime::from_samples(480, 48000);
+        motion.consume(1.2, AudioInterval::new(AudioTime::ZERO, first));
+        let confirmed = motion.confirmed_state();
+        let end = AudioTime::from_samples(14400, 48000);
+        let preview = motion.expose(
+            AudioInterval::new(first, end),
+            ShutterFrames::default(),
+            None,
+            1.2,
+        );
+        assert!(
+            preview.bend.0 > 0.0,
+            "the preview must actually strike the stop"
+        );
+        assert_eq!(confirmed, motion.confirmed_state());
+        motion.consume(0.0, AudioInterval::new(first, end));
+        assert_eq!(motion.mechanics.bend, Bend::default());
+    }
+
+    #[test]
+    fn confirmed_history_is_bounded_even_without_redraws() {
+        let mut motion = Motion::new(Mode::Rms, PeakMovement::default(), AudioTime::ZERO);
+        for millisecond in 0..6000 {
+            motion.consume(
+                0.5,
+                AudioInterval::new(
+                    AudioTime::from_samples(millisecond * 48, 48000),
+                    AudioTime::from_samples((millisecond + 1) * 48, 48000),
+                ),
+            );
+        }
+        assert!(motion.history.len() <= 2001);
+        assert!(motion.frames.is_empty());
+        let exposure = motion.expose(
+            AudioInterval::new(motion.at.shifted(-1.0 / 240.0), motion.at),
+            ShutterFrames::default(),
+            None,
+            0.5,
+        );
+        near(exposure.minimum, 0.5);
+        near(exposure.maximum, 0.5);
+    }
 
     fn run(motion: &mut Motion, target: f32, seconds: f64, fps: u32) {
         for _ in 0..(seconds * f64::from(fps)).round() as u32 {
@@ -519,27 +689,35 @@ mod tests {
 
     #[test]
     fn vu_step_has_specified_rise_overshoot_and_continuous_velocity() {
-        let mut motion = Motion::new(Mode::Vu, PeakMovement::default());
+        let mut motion = Motion::new(
+            Mode::Vu,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         motion.advance(0.5, 0.3, ShutterFrames::default());
-        assert!((motion.state.position / 0.5 - 0.99).abs() < 1e-7);
-        let velocity = motion.state.velocity;
+        assert!((motion.mechanics.state.position / 0.5 - 0.99).abs() < 1e-7);
+        let velocity = motion.mechanics.state.velocity;
         let exposure = motion.advance(0.5, 0.3, ShutterFrames::default());
         assert!((exposure.maximum / 0.5 - 1.0125).abs() < 1e-7);
         motion.advance(0.0, 0.0, ShutterFrames::default());
         assert!(velocity > 0.0);
-        let before = motion.state;
+        let before = motion.mechanics.state;
         motion.advance(0.0, 0.00001, ShutterFrames::default());
-        assert!((motion.state.position - before.position).abs() < 1e-4);
-        assert!((motion.state.velocity - before.velocity).abs() < 0.01);
+        assert!((motion.mechanics.state.position - before.position).abs() < 1e-4);
+        assert!((motion.mechanics.state.velocity - before.velocity).abs() < 0.01);
         run(&mut motion, 0.0, 1.0, 60);
-        assert!(motion.state.position >= 0.0);
+        assert!(motion.mechanics.state.position >= 0.0);
     }
 
     fn tone_response(mode: Mode, samplerate: usize, fps: usize, burst_seconds: f64) -> (f64, f64) {
         let scale = Scale::new();
         let mut processor = crate::processor::Processor::new(1.0, mode);
         processor.set_samplerate(samplerate);
-        let mut motion = Motion::new(mode, PeakMovement::default());
+        let mut motion = Motion::new(
+            mode,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         let mut maximum: f64 = 0.0;
         for frame in 0..fps * 4 {
             let input: Vec<_> = (frame * samplerate / fps..(frame + 1) * samplerate / fps)
@@ -553,17 +731,20 @@ mod tests {
                     [value as f32; 2]
                 })
                 .collect();
-            processor.consume_buf(&input);
-            let drives = processor.frame_drives(1.0 / fps as f64);
+            let at = std::time::Instant::now();
+            let drives = processor.consume_buf(&input, at);
             let exposure = motion.advance_path(
-                drives
-                    .iter()
-                    .map(|drive| (mode.position(&scale, drive.levels[0]), drive.seconds)),
+                drives.iter().map(|drive| {
+                    (
+                        mode.position(&scale, drive.levels[0]),
+                        drive.interval.seconds(),
+                    )
+                }),
                 ShutterFrames::try_from(1.0).unwrap(),
             );
             maximum = maximum.max(exposure.maximum);
         }
-        (maximum, motion.state.position)
+        (maximum, motion.mechanics.state.position)
     }
 
     fn db_from_position(position: f64) -> f64 {
@@ -610,11 +791,12 @@ mod tests {
         ];
         for (movement, reference, tolerance) in curves {
             for mode in [Mode::Ppm, Mode::SamplePeak] {
-                let mut motion = Motion::new(mode, movement);
+                let mut motion =
+                    Motion::new(mode, movement, crate::audio::timeline::AudioTime::ZERO);
                 let mut previous = 0.0;
                 for (time, deflection) in reference {
                     motion.advance(0.5, (time - previous) as f32, ShutterFrames::default());
-                    let actual = motion.state.position / 0.5;
+                    let actual = motion.mechanics.state.position / 0.5;
                     assert!(
                         (actual - deflection).abs() < tolerance,
                         "{mode:?}/{movement:?} at {time}s: {actual} vs {deflection}"
@@ -627,20 +809,24 @@ mod tests {
 
     #[test]
     fn switching_peak_movements_preserves_pose_momentum_and_exposure() {
-        let mut motion = Motion::new(Mode::Ppm, PeakMovement::FullSpec);
+        let mut motion = Motion::new(
+            Mode::Ppm,
+            PeakMovement::FullSpec,
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         motion.advance(0.5, 0.04, ShutterFrames::default());
-        let before = motion.state;
+        let before = motion.mechanics.state;
         motion.set_peak_movement(PeakMovement::VintageFr);
-        assert_eq!(motion.state.position, before.position);
-        assert_eq!(motion.state.velocity, before.velocity);
+        assert_eq!(motion.mechanics.state.position, before.position);
+        assert_eq!(motion.mechanics.state.velocity, before.velocity);
         let exposure = motion.advance(0.5, 0.001, ShutterFrames::default());
-        assert!(motion.state.position > before.position);
-        assert!((motion.state.position - before.position).abs() < 0.01);
+        assert!(motion.mechanics.state.position > before.position);
+        assert!((motion.mechanics.state.position - before.position).abs() < 0.01);
         assert_eq!(
             exposure.minimum, 0.0,
             "shutter still includes the first drive's motion"
         );
-        assert_eq!(motion.bend, Bend::default());
+        assert_eq!(motion.mechanics.bend, Bend::default());
     }
 
     #[test]
@@ -688,58 +874,81 @@ mod tests {
 
     #[test]
     fn hard_hits_yield_over_time_and_repeated_hits_accumulate_damage() {
-        let mut motion = Motion::new(Mode::Rms, PeakMovement::default());
+        let mut motion = Motion::new(
+            Mode::Rms,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         let dt = 1.0 / 240.0;
         for _ in 0..240 {
             motion.advance(1.2, dt, ShutterFrames::default());
-            if motion.bend != Bend::default() {
+            if motion.mechanics.bend != Bend::default() {
                 break;
             }
         }
-        assert!(motion.bend.0 > 0.0);
-        let first = motion.bend;
-        assert!(motion.state.position > 1.0);
-        assert!(motion.state.velocity > 0.0);
+        assert!(motion.mechanics.bend.0 > 0.0);
+        let first = motion.mechanics.bend;
+        assert!(motion.mechanics.state.position > 1.0);
+        assert!(motion.mechanics.state.velocity > 0.0);
         motion.advance(1.2, dt, ShutterFrames::default());
-        assert!(motion.bend.0 > first.0);
+        assert!(motion.mechanics.bend.0 > first.0);
         run(&mut motion, 1.2, 1.0, 240);
-        let settled = motion.bend;
+        let settled = motion.mechanics.bend;
         run(&mut motion, 1.2, 1.0, 240);
         assert_eq!(
-            motion.bend, settled,
+            motion.mechanics.bend, settled,
             "static pressure does not bend the needle"
         );
         run(&mut motion, 0.0, 1.0, 240);
         run(&mut motion, 1.2, 1.0, 240);
-        assert!(motion.bend.0 > settled.0);
-        assert!(motion.bend.0 <= MAX_BEND);
+        assert!(motion.mechanics.bend.0 > settled.0);
+        assert!(motion.mechanics.bend.0 <= MAX_BEND);
         motion.repair();
-        assert_eq!(motion.bend, Bend::default());
-        assert!(motion.state.position <= 1.0);
-        assert_eq!(motion.state.velocity, 0.0);
+        assert_eq!(motion.mechanics.bend, Bend::default());
+        assert!(motion.mechanics.state.position <= 1.0);
+        assert_eq!(motion.mechanics.state.velocity, 0.0);
         assert!(motion.history.is_empty());
     }
 
     #[test]
     fn slow_contact_stays_straight_and_fast_hits_agree_across_frame_rates() {
-        let mut gentle = Motion::new(Mode::Rms, PeakMovement::default());
+        let mut gentle = Motion::new(
+            Mode::Rms,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         for step in 0..3000 {
             gentle.advance(step as f32 / 2500.0, 1.0 / 240.0, ShutterFrames::default());
         }
-        assert_eq!(gentle.bend, Bend::default());
-        near(gentle.state.position, 1.0);
-        let mut reference = Motion::new(Mode::Rms, PeakMovement::default());
+        assert_eq!(gentle.mechanics.bend, Bend::default());
+        near(gentle.mechanics.state.position, 1.0);
+        let mut reference = Motion::new(
+            Mode::Rms,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         run(&mut reference, 1.2, 1.0, 240);
         for fps in [15, 30, 60, 120] {
-            let mut motion = Motion::new(Mode::Rms, PeakMovement::default());
+            let mut motion = Motion::new(
+                Mode::Rms,
+                PeakMovement::default(),
+                crate::audio::timeline::AudioTime::ZERO,
+            );
             run(&mut motion, 1.2, 1.0, fps);
-            near(motion.bend.0, reference.bend.0);
-            near(motion.state.position, reference.state.position);
+            near(motion.mechanics.bend.0, reference.mechanics.bend.0);
+            near(
+                motion.mechanics.state.position,
+                reference.mechanics.state.position,
+            );
         }
-        let mut extreme = Motion::new(Mode::Rms, PeakMovement::default());
+        let mut extreme = Motion::new(
+            Mode::Rms,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         run(&mut extreme, 100.0, 1.0, 15);
-        near(extreme.bend.0, MAX_BEND);
-        near(extreme.state.position, Bend(MAX_BEND).limit());
+        near(extreme.mechanics.bend.0, MAX_BEND);
+        near(extreme.mechanics.state.position, Bend(MAX_BEND).limit());
     }
 
     #[test]
@@ -751,22 +960,28 @@ mod tests {
                 &[PeakMovement::FullSpec]
             };
             for &movement in movements {
-                let mut reference = Motion::new(mode, movement);
+                let mut reference =
+                    Motion::new(mode, movement, crate::audio::timeline::AudioTime::ZERO);
                 run(&mut reference, 1.2, 1.0, 240);
                 for fps in [15, 30, 60, 120] {
-                    let mut motion = Motion::new(mode, movement);
+                    let mut motion =
+                        Motion::new(mode, movement, crate::audio::timeline::AudioTime::ZERO);
                     run(&mut motion, 1.2, 1.0, fps);
-                    near(motion.bend.0, reference.bend.0);
-                    near(motion.state.position, reference.state.position);
+                    near(motion.mechanics.bend.0, reference.mechanics.bend.0);
+                    near(
+                        motion.mechanics.state.position,
+                        reference.mechanics.state.position,
+                    );
                 }
-                let mut motion = Motion::new(mode, movement);
+                let mut motion =
+                    Motion::new(mode, movement, crate::audio::timeline::AudioTime::ZERO);
                 let exposure = motion.advance(0.5, 1.0, ShutterFrames::default());
                 assert!(exposure.maximum > 0.5);
                 assert!(exposure.minimum >= 0.0);
                 assert!((exposure.minimum..=exposure.maximum).contains(&exposure.average));
                 let return_exposure = motion.advance(0.0, 1.0, ShutterFrames::default());
                 assert!(return_exposure.minimum >= -1e-12);
-                assert!(motion.state.position >= 0.0);
+                assert!(motion.mechanics.state.position >= 0.0);
             }
         }
     }
@@ -792,17 +1007,35 @@ mod tests {
 
     #[test]
     fn longer_shutter_integrates_the_same_path_without_changing_motion() {
-        let mut one_frame = Motion::new(Mode::Rms, PeakMovement::default());
-        let mut two_frames = Motion::new(Mode::Rms, PeakMovement::default());
+        let mut one_frame = Motion::new(
+            Mode::Rms,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
+        let mut two_frames = Motion::new(
+            Mode::Rms,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         let shutter = ShutterFrames::try_from(2.0).unwrap();
         one_frame.advance(1.0, 0.01, ShutterFrames::try_from(1.0).unwrap());
         two_frames.advance(1.0, 0.01, shutter);
         let short = one_frame.advance(1.0, 0.02, ShutterFrames::try_from(1.0).unwrap());
         let long = two_frames.advance(1.0, 0.02, shutter);
-        let mut uninterrupted = Motion::new(Mode::Rms, PeakMovement::default());
+        let mut uninterrupted = Motion::new(
+            Mode::Rms,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         let expected = uninterrupted.advance(1.0, 0.03, ShutterFrames::try_from(1.0).unwrap());
-        near(one_frame.state.position, two_frames.state.position);
-        near(one_frame.state.velocity, two_frames.state.velocity);
+        near(
+            one_frame.mechanics.state.position,
+            two_frames.mechanics.state.position,
+        );
+        near(
+            one_frame.mechanics.state.velocity,
+            two_frames.mechanics.state.velocity,
+        );
         near(long.minimum, expected.minimum);
         near(long.maximum, expected.maximum);
         near(long.average, expected.average);
@@ -811,12 +1044,20 @@ mod tests {
 
     #[test]
     fn fractional_shutter_uses_the_tail_of_the_oldest_frame() {
-        let mut motion = Motion::new(Mode::Rms, PeakMovement::default());
+        let mut motion = Motion::new(
+            Mode::Rms,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         for _ in 0..3 {
             motion.advance(1.0, 0.01, ShutterFrames::try_from(1.0).unwrap());
         }
         let actual = motion.advance(1.0, 0.01, ShutterFrames::try_from(2.5).unwrap());
-        let mut expected_motion = Motion::new(Mode::Rms, PeakMovement::default());
+        let mut expected_motion = Motion::new(
+            Mode::Rms,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         expected_motion.advance(1.0, 0.015, ShutterFrames::try_from(1.0).unwrap());
         let expected = expected_motion.advance(1.0, 0.025, ShutterFrames::try_from(1.0).unwrap());
         near(actual.minimum, expected.minimum);
@@ -826,7 +1067,11 @@ mod tests {
 
     #[test]
     fn shutter_keeps_reversals_and_expires_old_motion() {
-        let mut motion = Motion::new(Mode::Rms, PeakMovement::default());
+        let mut motion = Motion::new(
+            Mode::Rms,
+            PeakMovement::default(),
+            crate::audio::timeline::AudioTime::ZERO,
+        );
         let shutter = ShutterFrames::try_from(2.0).unwrap();
         let rising = motion.advance(1.0, 0.1, shutter);
         let turning = motion.advance(0.0, 0.1, shutter);
@@ -840,9 +1085,9 @@ mod tests {
         }
         let settled = motion.advance(0.0, 0.1, shutter);
         assert!(settled.maximum - settled.minimum < 1e-10);
-        assert_eq!(motion.history.len(), ShutterFrames::MAX as usize);
+        assert_eq!(motion.frames.len(), ShutterFrames::MAX as usize);
         let paused = motion.advance(0.0, 0.0, shutter);
         near(paused.minimum, paused.maximum);
-        near(paused.average, motion.state.position);
+        near(paused.average, motion.mechanics.state.position);
     }
 }

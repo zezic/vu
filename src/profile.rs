@@ -83,6 +83,8 @@ impl Run {
         // Deliver only new samples, including when presentation limits the cadence.
         meter.audio_event(AudioEvent::Buffer {
             buf: vec![levels(elapsed); due - self.audio_frames],
+            captured_at: start
+                + Duration::from_secs_f64(self.audio_frames as f64 / SAMPLE_RATE as f64),
         });
         self.audio_frames = due;
         Ok(())

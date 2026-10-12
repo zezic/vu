@@ -52,6 +52,22 @@ and stop-contact mechanics. Detector drive spans are retained at approximately
 screen refreshes still acts on the needle. Samples are not clamped to full scale.
 RMS accumulates floating-point power instead of quantized integer squares.
 
+Capture timestamps are mapped from the native stream clock to the application's
+monotonic clock before capture starts. Sample counts define a separate audio
+timeline; each buffer correlates its sample endpoint with its capture time.
+Detector bins stay on that sample grid across buffer and display intervals.
+Audio delivery advances confirmed detector, needle, damage, and lamp state once.
+
+Rendering integrates timed needle segments over the current shutter interval.
+It predicts the unconfirmed tail from a copy of the mechanical state, including
+any partial detector bin, without committing predicted motion or lamp changes.
+Actual samples replace that prediction when delivered. Startup processing and
+display stalls therefore do not become extra latency or an extended shutter.
+At most two seconds of confirmed path and sixteen frame durations are retained;
+exposure is clipped to two seconds. Prediction stops 100 ms beyond the latest
+captured samples if capture stalls. Capture timestamp discontinuities exceeding
+2 ms start a fresh measurement timeline through the existing configuration event.
+
 | Mode | Detector | Movement | Units |
 | --- | --- | --- | --- |
 | VU | Rectified amplitude, sine calibration `pi/(2*sqrt(2))` | Underdamped; 99% step response at 300 ms, 1.25% overshoot | VU |

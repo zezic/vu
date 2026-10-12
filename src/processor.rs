@@ -1,4 +1,9 @@
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
+
+use crate::audio::timeline::{AudioClock, AudioInterval, AudioTime};
 
 use crate::measurement::Mode;
 
@@ -6,7 +11,7 @@ use crate::measurement::Mode;
 #[derive(Clone, Copy)]
 pub struct Drive {
     pub levels: [f32; 2],
-    pub seconds: f64,
+    pub interval: AudioInterval,
 }
 
 enum Detector {
@@ -130,8 +135,9 @@ pub struct Processor {
     samplerate: usize,
     bin_sum: [f64; 2],
     bin_count: usize,
-    pending: VecDeque<Drive>,
-    frame: Vec<Drive>,
+    drives: Vec<Drive>,
+    samples: u64,
+    clock: Option<AudioClock>,
     last_levels: [f32; 2],
     pub preamp: f32,
 }
@@ -144,8 +150,9 @@ impl Processor {
             samplerate: 44100,
             bin_sum: [0.0; 2],
             bin_count: 0,
-            pending: VecDeque::new(),
-            frame: Vec::new(),
+            drives: Vec::new(),
+            samples: 0,
+            clock: None,
             last_levels: [0.0; 2],
             preamp,
         }
@@ -155,8 +162,7 @@ impl Processor {
         self.detector = Detector::new(self.mode, self.samplerate);
         self.bin_sum = [0.0; 2];
         self.bin_count = 0;
-        self.pending.clear();
-        self.frame.clear();
+        self.drives.clear();
         self.last_levels = [0.0; 2];
     }
 
@@ -168,23 +174,45 @@ impl Processor {
     pub fn set_samplerate(&mut self, samplerate: usize) {
         assert!(samplerate > 0, "sample rate must be positive");
         self.samplerate = samplerate;
+        self.samples = 0;
+        self.clock = None;
         self.reset();
     }
 
-    fn flush_bin(&mut self) {
-        assert!(
-            self.bin_count > 0,
-            "only a populated drive bin can be flushed"
-        );
-        self.pending.push_back(Drive {
-            levels: self.bin_sum.map(|sum| (sum / self.bin_count as f64) as f32),
-            seconds: self.bin_count as f64 / self.samplerate as f64,
-        });
-        self.bin_sum = [0.0; 2];
-        self.bin_count = 0;
+    pub fn audio_time(&self) -> AudioTime {
+        AudioTime::from_samples(self.samples, self.samplerate)
     }
 
-    pub fn consume_buf(&mut self, buf: &[[f32; 2]]) {
+    pub fn position_at(&self, now: Instant) -> Option<AudioTime> {
+        self.clock.map(|clock| clock.position_at(now))
+    }
+
+    pub fn partial_drive(&self) -> Option<Drive> {
+        (self.bin_count > 0).then(|| Drive {
+            levels: self
+                .bin_sum
+                .map(|sum| (sum / self.bin_count as f64) as f32 * self.preamp),
+            interval: AudioInterval::new(
+                AudioTime::from_samples(self.samples - self.bin_count as u64, self.samplerate),
+                self.audio_time(),
+            ),
+        })
+    }
+
+    pub fn latest_levels(&self) -> [f32; 2] {
+        self.partial_drive().map_or_else(
+            || self.last_levels.map(|level| level * self.preamp),
+            |drive| drive.levels,
+        )
+    }
+
+    /// Each sample advances the detector once. Bins stay on the sample grid across
+    /// capture buffers; drawing never flushes or consumes a partial bin.
+    pub fn consume_buf(&mut self, buf: &[[f32; 2]], captured_at: Instant) -> &[Drive] {
+        self.drives.clear();
+        if buf.is_empty() {
+            return &self.drives;
+        }
         let bin_samples = (self.samplerate / 1000).max(1);
         for pair in buf {
             assert!(
@@ -196,50 +224,20 @@ impl Processor {
                 *sum += level;
             }
             self.bin_count += 1;
+            self.samples += 1;
             if self.bin_count == bin_samples {
-                self.flush_bin();
+                let drive = self.partial_drive().expect("a full bin has a drive");
+                self.last_levels = self.bin_sum.map(|sum| (sum / self.bin_count as f64) as f32);
+                self.drives.push(drive);
+                self.bin_sum = [0.0; 2];
+                self.bin_count = 0;
             }
         }
-        // A paused display resumes with recent audio rather than replaying a backlog.
-        let capacity = (self.samplerate as f64 * 0.3 / bin_samples as f64).ceil() as usize;
-        while self.pending.len() > capacity {
-            self.pending.pop_front();
-        }
-    }
-
-    /// Consume audio-time drives for one display frame, retaining fractional bins.
-    /// The latest drive covers any gap between delivery of capture buffers.
-    pub fn frame_drives(&mut self, seconds: f64) -> &[Drive] {
-        assert!(
-            seconds.is_finite() && seconds >= 0.0,
-            "frame duration must be finite and nonnegative"
-        );
-        self.frame.clear();
-        if seconds > 0.0 && self.bin_count > 0 {
-            self.flush_bin();
-        }
-        let mut remaining = seconds;
-        while remaining > 0.0 {
-            let Some(drive) = self.pending.front_mut() else {
-                self.frame.push(Drive {
-                    levels: self.last_levels.map(|level| level * self.preamp),
-                    seconds: remaining,
-                });
-                break;
-            };
-            let elapsed = remaining.min(drive.seconds);
-            self.last_levels = drive.levels;
-            self.frame.push(Drive {
-                levels: drive.levels.map(|level| level * self.preamp),
-                seconds: elapsed,
-            });
-            drive.seconds -= elapsed;
-            remaining -= elapsed;
-            if drive.seconds == 0.0 {
-                self.pending.pop_front();
-            }
-        }
-        &self.frame
+        self.clock = Some(AudioClock {
+            position: self.audio_time(),
+            at: captured_at + Duration::from_secs_f64(buf.len() as f64 / self.samplerate as f64),
+        });
+        &self.drives
     }
 }
 
@@ -247,19 +245,20 @@ impl Processor {
 mod tests {
     use super::*;
 
-    fn last(processor: &mut Processor, seconds: f64) -> [f32; 2] {
-        processor.frame_drives(seconds).last().unwrap().levels
+    fn consume(processor: &mut Processor, buf: &[[f32; 2]]) -> Vec<Drive> {
+        let at = processor.clock.map_or_else(Instant::now, |clock| clock.at);
+        processor.consume_buf(buf, at).to_vec()
     }
 
     #[test]
     fn meters_stereo_channels_independently_and_resets_on_sample_rate_change() {
         let mut processor = Processor::new(1.0, Mode::Rms);
         processor.set_samplerate(100);
-        processor.consume_buf(&[[2.0, -1.5]; 60]);
-        assert_eq!(last(&mut processor, 1.0), [2.0, 1.5]);
+        consume(&mut processor, &[[2.0, -1.5]; 60]);
+        assert_eq!(processor.latest_levels(), [2.0, 1.5]);
         processor.set_samplerate(50);
-        processor.consume_buf(&[[0.0, 0.5]; 15]);
-        assert_eq!(last(&mut processor, 1.0), [0.0, 0.5]);
+        consume(&mut processor, &[[0.0, 0.5]; 15]);
+        assert_eq!(processor.latest_levels(), [0.0, 0.5]);
     }
 
     #[test]
@@ -271,10 +270,10 @@ mod tests {
             let samples: Vec<_> = (0..28800)
                 .map(|n| [if n % 2 == 0 { 2.0 } else { 0.0 }, -0.5])
                 .collect();
-            processor.consume_buf(&samples);
+            consume(processor, &samples);
         }
-        let rms = last(&mut rms, 0.3);
-        let vu = last(&mut vu, 0.3);
+        let rms = rms.latest_levels();
+        let vu = vu.latest_levels();
         assert!((rms[0] - 2.0_f32.sqrt()).abs() < 1e-6);
         assert!((vu[0] - std::f32::consts::PI / (2.0 * 2.0_f32.sqrt())).abs() < 1e-6);
         assert!(vu[0] < rms[0]);
@@ -314,12 +313,11 @@ mod tests {
     fn sample_peak_retains_single_sample_and_then_returns_at_twenty_db_per_second() {
         let mut processor = Processor::new(1.0, Mode::SamplePeak);
         processor.set_samplerate(48000);
-        processor.consume_buf(&[[2.0, 0.0]]);
-        processor.consume_buf(&[[0.0; 2]; 4799]);
-        assert_eq!(last(&mut processor, 0.1), [2.0, 0.0]);
+        consume(&mut processor, &[[2.0, 0.0]]);
+        consume(&mut processor, &[[0.0; 2]; 4799]);
+        assert_eq!(processor.latest_levels(), [2.0, 0.0]);
         for _ in 0..10 {
-            processor.consume_buf(&[[0.0; 2]; 4800]);
-            processor.frame_drives(0.1);
+            consume(&mut processor, &[[0.0; 2]; 4800]);
         }
         assert!((processor.last_levels[0] - 0.2).abs() < 0.001);
     }
@@ -328,15 +326,45 @@ mod tests {
     fn preserves_a_short_vu_drive_between_display_frames_and_resets_on_mode_change() {
         let mut processor = Processor::new(1.0, Mode::Vu);
         processor.set_samplerate(48000);
-        processor.consume_buf(&[[1.0, 0.0]; 48]);
-        processor.consume_buf(&[[0.0; 2]; 4752]);
-        let drives = processor.frame_drives(0.1);
+        let mut drives = consume(&mut processor, &[[1.0, 0.0]; 48]);
+        drives.extend(consume(&mut processor, &[[0.0; 2]; 4752]));
         let area: f64 = drives
             .iter()
-            .map(|drive| f64::from(drive.levels[0]) * drive.seconds)
+            .map(|drive| f64::from(drive.levels[0]) * drive.interval.seconds())
             .sum();
         assert!((area - 0.001 * std::f64::consts::PI / (2.0 * 2.0_f64.sqrt())).abs() < 1e-9);
         processor.set_mode(Mode::SamplePeak);
-        assert_eq!(last(&mut processor, 0.1), [0.0; 2]);
+        assert_eq!(processor.latest_levels(), [0.0; 2]);
+    }
+
+    #[test]
+    fn bins_are_independent_of_buffer_boundaries_and_empty_deliveries() {
+        let start = Instant::now();
+        for rate in [44100, 48000, 96000] {
+            let input: Vec<_> = (0..rate / 10)
+                .map(|n| [(n as f32 * 0.123).sin(), 0.5])
+                .collect();
+            let mut whole = Processor::new(1.0, Mode::Rms);
+            whole.set_samplerate(rate);
+            let expected = whole.consume_buf(&input, start).to_vec();
+            let mut split = Processor::new(1.0, Mode::Rms);
+            split.set_samplerate(rate);
+            let mut actual = Vec::new();
+            let mut samples = 0;
+            for chunk in input.chunks(137) {
+                let at = start + Duration::from_secs_f64(samples as f64 / rate as f64);
+                actual.extend_from_slice(split.consume_buf(chunk, at));
+                assert!(split.consume_buf(&[], at).is_empty());
+                samples += chunk.len();
+            }
+            assert_eq!(expected.len(), actual.len());
+            for (expected, actual) in expected.iter().zip(&actual) {
+                assert_eq!(expected.levels, actual.levels);
+                assert_eq!(expected.interval.start(), actual.interval.start());
+                assert_eq!(expected.interval.end(), actual.interval.end());
+            }
+            assert_eq!(whole.audio_time(), split.audio_time());
+            assert_eq!(whole.position_at(start), split.position_at(start));
+        }
     }
 }

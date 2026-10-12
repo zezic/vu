@@ -5,7 +5,9 @@ use std::{
 
 use audio::capture_stream;
 use config::{Config, PreampStep};
-use frame_schedule::{Adjustment, FrameKind, FrameSchedule, Occlusion, RedrawPermit, SurfaceArea};
+use frame_schedule::{
+    Adjustment, FrameKind, FrameSchedule, FrameTime, Occlusion, RedrawPermit, SurfaceArea,
+};
 use meter::{Meter, View};
 use render::{Presentation, RenderWindow};
 use saved::Saved;
@@ -33,8 +35,13 @@ mod text;
 mod theme;
 
 enum AudioEvent {
-    Config { samplerate: usize },
-    Buffer { buf: Vec<[f32; 2]> },
+    Config {
+        samplerate: usize,
+    },
+    Buffer {
+        buf: Vec<[f32; 2]>,
+        captured_at: Instant,
+    },
 }
 
 enum WindowState {
@@ -310,16 +317,20 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
-                let dt = (now - self.previous_frame).as_secs_f32();
+                let frame_time = FrameTime::new(self.previous_frame, now);
                 self.previous_frame = now;
                 if let Some(profile) = &mut self.profile {
                     profile.feed(&mut self.meter, now)?;
                 }
                 let before_draw = Instant::now();
                 render.scene.reset();
-                let frame =
-                    self.meter
-                        .draw(&mut render.scene, view, limit, self.drag.setting(), dt);
+                let frame = self.meter.draw(
+                    &mut render.scene,
+                    view,
+                    limit,
+                    self.drag.setting(),
+                    frame_time,
+                );
                 let after_draw = Instant::now();
                 let changed = !matches!(frame.background, render::Frame::Unchanged(_));
                 let viewport = render.viewport();

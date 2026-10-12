@@ -3,7 +3,13 @@ use anyhow::{bail, Context};
 use cpal::traits::HostTrait;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
-use std::sync::mpsc::Sender;
+use std::{
+    sync::{mpsc::Sender, Arc, OnceLock},
+    time::Instant,
+};
+
+pub mod timeline;
+use timeline::{CaptureClock, CaptureContinuity, CaptureSequence};
 
 use crate::AudioEvent;
 
@@ -91,16 +97,45 @@ where
     f32: FromSample<T>,
 {
     let channels = usize::from(config.channels());
-    device.build_input_stream(
+    let samplerate = config.sample_rate() as usize;
+    let mut sequence = CaptureSequence::default();
+    let clock = Arc::new(OnceLock::<CaptureClock>::new());
+    let callback_clock = Arc::clone(&clock);
+    let stream = device.build_input_stream(
         config.into(),
-        move |input: &[T], _| {
-            let buf = stereo_frames(input, channels).collect();
+        move |input: &[T], info| {
+            if input.is_empty() {
+                return;
+            }
+            let timestamp = info.timestamp();
+            let clock = callback_clock
+                .get()
+                .expect("capture clock is initialized before playback");
+            let captured_at = clock.capture_at(timestamp);
+            let buf: Vec<_> = stereo_frames(input, channels).collect();
+            if matches!(
+                sequence.observe(timestamp.capture, buf.len(), samplerate),
+                CaptureContinuity::Discontinuous
+            ) {
+                // Missing samples have no trustworthy detector or mechanical
+                // history. Begin a fresh sample timeline through the config path.
+                let _ = tx.send(AudioEvent::Config { samplerate });
+            }
             // The receiver is dropped when the window closes, before the stream is dropped.
-            let _ = tx.send(AudioEvent::Buffer { buf });
+            let _ = tx.send(AudioEvent::Buffer { buf, captured_at });
         },
         |err| log::error!("Audio capture: {err}"),
         None,
-    )
+    )?;
+    // StreamInstant and Instant need not share an origin. Correlate with the
+    // stream's current native clock, rather than a scheduled callback timestamp.
+    let before = Instant::now();
+    let native = stream.now();
+    let after = Instant::now();
+    clock
+        .set(CaptureClock::new(native, before + (after - before) / 2))
+        .expect("capture clock is initialized once");
+    Ok(stream)
 }
 
 /// Mono feeds both needles; multichannel output uses the first left/right pair.
@@ -125,6 +160,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::stereo_frames;
+
+    #[test]
+    #[ignore = "requires desktop audio capture permission and an active audio device"]
+    fn native_capture_timestamps_track_sample_time() -> anyhow::Result<()> {
+        use crate::AudioEvent;
+        use std::{
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let _stream = super::capture_stream(tx)?;
+        let AudioEvent::Config { samplerate } = rx.recv_timeout(Duration::from_secs(3))? else {
+            panic!("capture must configure the sample rate before delivering samples");
+        };
+        let mut end = None;
+        let mut buffers = 0;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            let AudioEvent::Buffer { buf, captured_at } =
+                rx.recv_timeout(Duration::from_secs(3))?
+            else {
+                panic!("continuous capture must not repeatedly restart its timeline");
+            };
+            let duration = Duration::from_secs_f64(buf.len() as f64 / samplerate as f64);
+            if let Some(previous) = end {
+                assert!(
+                    captured_at
+                        .max(previous)
+                        .duration_since(captured_at.min(previous))
+                        <= Duration::from_millis(2)
+                );
+            }
+            end = Some(captured_at + duration);
+            assert!(
+                end.unwrap() <= Instant::now() + Duration::from_millis(2),
+                "capture must describe samples already delivered"
+            );
+            buffers += 1;
+        }
+        assert!(buffers > 0);
+        eprintln!("Native capture: {buffers} continuous buffers at {samplerate} Hz");
+        Ok(())
+    }
 
     #[test]
     fn converts_mono_stereo_and_multichannel_to_meter_frames() {

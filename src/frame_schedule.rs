@@ -8,6 +8,32 @@ use winit::dpi::PhysicalSize;
 
 const BACKGROUND_INTERVAL: Duration = Duration::from_millis(50);
 
+/// The actual wall-clock interval of a displayed frame.
+#[derive(Clone, Copy)]
+pub struct FrameTime {
+    start: Instant,
+    end: Instant,
+}
+
+impl FrameTime {
+    pub fn new(start: Instant, end: Instant) -> Self {
+        assert!(end >= start, "display frame must be ordered");
+        Self { start, end }
+    }
+
+    pub fn start(self) -> Instant {
+        self.start
+    }
+
+    pub fn end(self) -> Instant {
+        self.end
+    }
+
+    pub fn seconds(self) -> f32 {
+        (self.end - self.start).as_secs_f32()
+    }
+}
+
 #[derive(
     Clone,
     Copy,

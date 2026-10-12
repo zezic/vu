@@ -8,8 +8,9 @@ use vello::{
 };
 
 use crate::{
+    audio::timeline::{AudioInterval, AudioTime},
     config::{Config, PreampDb, ShutterFrames},
-    frame_schedule::FrameRateLimit,
+    frame_schedule::{FrameRateLimit, FrameTime},
     measurement::Mode,
     processor::Processor,
     render::Frame,
@@ -111,6 +112,11 @@ impl View {
             * Affine::scale(factor)
             * Affine::translate(-point.to_vec2());
     }
+}
+
+fn lamp_at(strength: f32, level: f32, seconds: f64) -> f32 {
+    let speed = if level >= 1.0 { 25.0 } else { -5.0 };
+    (strength + seconds as f32 * speed).clamp(0.0, 1.0)
 }
 
 struct Needle {
@@ -386,10 +392,10 @@ impl Readout {
 mod tests;
 
 impl Needle {
-    fn new(mode: Mode, peak_movement: PeakMovement) -> Self {
+    fn new(mode: Mode, peak_movement: PeakMovement, at: AudioTime) -> Self {
         Self {
             overload: 0.0,
-            motion: Motion::new(mode, peak_movement),
+            motion: Motion::new(mode, peak_movement, at),
         }
     }
 }
@@ -476,7 +482,9 @@ impl Meter {
             preamp_value,
             frame_readout,
             frame_values,
-            needles: std::array::from_fn(|_| Needle::new(config.mode, config.peak_movement)),
+            needles: std::array::from_fn(|_| {
+                Needle::new(config.mode, config.peak_movement, AudioTime::ZERO)
+            }),
             face: Scene::new(),
             face_settings: None,
             range_readout,
@@ -487,15 +495,36 @@ impl Meter {
 
     pub fn audio_event(&mut self, event: AudioEvent) {
         match event {
-            AudioEvent::Config { samplerate } => self.processor.set_samplerate(samplerate),
-            AudioEvent::Buffer { buf } => self.processor.consume_buf(&buf),
+            AudioEvent::Config { samplerate } => {
+                self.processor.set_samplerate(samplerate);
+                self.needles = std::array::from_fn(|_| {
+                    Needle::new(self.mode, self.peak_movement, AudioTime::ZERO)
+                });
+            }
+            AudioEvent::Buffer { buf, captured_at } => {
+                for drive in self.processor.consume_buf(&buf, captured_at) {
+                    for (channel, needle) in self.needles.iter_mut().enumerate() {
+                        needle.motion.consume(
+                            self.mode.position(&self.scale, drive.levels[channel]),
+                            drive.interval,
+                        );
+                        needle.overload = lamp_at(
+                            needle.overload,
+                            drive.levels[channel],
+                            drive.interval.seconds(),
+                        );
+                    }
+                }
+            }
         }
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
         self.processor.set_mode(mode);
-        self.needles = std::array::from_fn(|_| Needle::new(mode, self.peak_movement));
+        self.needles = std::array::from_fn(|_| {
+            Needle::new(mode, self.peak_movement, self.processor.audio_time())
+        });
         self.mode_value = Readout::value(&mut self.fonts, mode.name());
         self.units = self.fonts.layout(mode.units(), 14.0);
         self.marks = generate_scale(&mut self.fonts, mode);
@@ -643,8 +672,9 @@ impl Meter {
         view: &View,
         limit: FrameRateLimit,
         adjusting: Option<ScaleSetting>,
-        dt: f32,
+        frame_time: FrameTime,
     ) -> MeterFrame<'_> {
+        let dt = frame_time.seconds();
         self.theme.advance(dt);
         let settings = FaceSettings {
             view: *view,
@@ -661,30 +691,42 @@ impl Meter {
             readout.advance(&mut self.fonts, &self.scale, adjusting, dt);
             readout.draw(scene, view, &self.theme.colors);
         }
-        let drives = self.processor.frame_drives(f64::from(dt));
+        let frame = AudioInterval::new(
+            self.processor
+                .position_at(frame_time.start())
+                .unwrap_or(AudioTime::ZERO),
+            self.processor
+                .position_at(frame_time.end())
+                .unwrap_or(AudioTime::ZERO),
+        );
+        let partial = self.processor.partial_drive();
+        let levels = self.processor.latest_levels();
+        let confirmed = partial.map_or(self.processor.audio_time(), |drive| drive.interval.start());
         let pivots = view.layout.pivots();
         let needles = std::array::from_fn(|channel| {
             let needle = &mut self.needles[channel];
             let pivot = pivots[channel];
             let meter = view.transform * Affine::translate(pivot.to_vec2());
-            for drive in drives {
-                let speed = if drive.levels[channel] >= 1.0 {
-                    25.0
-                } else {
-                    -5.0
-                };
-                needle.overload = (needle.overload + drive.seconds as f32 * speed).clamp(0.0, 1.0);
+            let mut strength = needle.overload;
+            let mut at = confirmed;
+            if let Some(drive) = partial {
+                let end = drive.interval.end().min(frame.end()).max(at);
+                strength = lamp_at(strength, drive.levels[channel], end.seconds_since(at));
+                at = end;
             }
-            let strength = needle.overload;
-
-            let exposure = needle.motion.advance_path(
-                drives.iter().map(|drive| {
+            if frame.end() > at {
+                strength = lamp_at(strength, levels[channel], frame.end().seconds_since(at));
+            }
+            let exposure = needle.motion.expose(
+                frame,
+                self.shutter_frames,
+                partial.map(|drive| {
                     (
                         self.mode.position(&self.scale, drive.levels[channel]),
-                        drive.seconds,
+                        drive.interval,
                     )
                 }),
-                self.shutter_frames,
+                self.mode.position(&self.scale, levels[channel]),
             );
             // Keep angular gradients within one positive turn.
             let angle = Scale::angle(exposure.average as f32) + std::f64::consts::TAU;
