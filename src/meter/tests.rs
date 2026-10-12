@@ -10,7 +10,7 @@ use super::{Layout, Meter, View};
 use crate::{
     config::PreampDb,
     frame_schedule::FrameRateLimit,
-    render::{prepare_device, renderer, BackgroundCache, ANTIALIASING, BACKGROUND},
+    render::{prepare_device, renderer, BackgroundCache, ANTIALIASING},
     AudioEvent,
 };
 
@@ -82,7 +82,7 @@ fn profiles_moving_needles_at_240_fps() -> anyhow::Result<()> {
             Ok(budget)
         })
         .transpose()?;
-    let mut meter = Meter::new(PreampDb::try_from(0.0)?)?;
+    let mut meter = Meter::new(PreampDb::try_from(0.0)?, crate::theme::ThemeId::default())?;
     meter.audio_event(AudioEvent::Config { samplerate: 48000 });
     let mut context = RenderContext::new();
     let id = pollster::block_on(prepare_device(
@@ -111,7 +111,9 @@ fn profiles_moving_needles_at_240_fps() -> anyhow::Result<()> {
     });
     let target = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let params = RenderParams {
-        base_color: BACKGROUND,
+        base_color: crate::theme::Theme::new(crate::theme::ThemeId::default())
+            .colors
+            .background,
         width: 1280,
         height: 440,
         antialiasing_method: ANTIALIASING,
@@ -170,7 +172,7 @@ fn profiles_moving_needles_at_240_fps() -> anyhow::Result<()> {
             &target,
             &output_view,
             Size::new(1280.0, 440.0),
-            frame_kind.needles,
+            &frame_kind.overlay,
         );
         device.queue.submit([encoder.finish()]);
         if frame >= FPS {
@@ -202,7 +204,7 @@ fn profiles_moving_needles_at_240_fps() -> anyhow::Result<()> {
 
 #[test]
 fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Result<()> {
-    let mut meter = Meter::new(PreampDb::try_from(0.0)?)?;
+    let mut meter = Meter::new(PreampDb::try_from(0.0)?, crate::theme::ThemeId::default())?;
     meter.processor.set_samplerate(48000);
     for _ in 0..2 {
         meter.processor.consume_buf(&[[0.1, 0.5]; 14400]);
@@ -211,14 +213,14 @@ fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Resu
     let mut scene = Scene::new();
     let first = meter.draw(&mut scene, &view, FrameRateLimit::Fps240, None, 1.0 / 240.0);
     assert!(matches!(first.background, crate::render::Frame::Rebuilt(_)));
-    let first_tip = first.needles[0].screen_tip();
+    let first_tip = first.overlay.needles[0].screen_tip();
     scene.reset();
     let moving = meter.draw(&mut scene, &view, FrameRateLimit::Fps240, None, 1.0 / 240.0);
     assert!(matches!(
         moving.background,
         crate::render::Frame::Unchanged(_)
     ));
-    assert!(moving.needles[0].screen_tip().distance(first_tip) > 0.2);
+    assert!(moving.overlay.needles[0].screen_tip().distance(first_tip) > 0.2);
     scene.reset();
     let shown = meter.draw(
         &mut scene,
@@ -237,13 +239,33 @@ fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Resu
         fading.background,
         crate::render::Frame::Retained(_)
     ));
+    meter.set_theme(
+        crate::theme::ThemeId::default().adjusted(crate::frame_schedule::Adjustment::Increase),
+    );
+    for dt in [0.05, 0.05, 0.1] {
+        scene.reset();
+        let frame = meter.draw(&mut scene, &view, FrameRateLimit::Fps240, None, dt);
+        assert!(matches!(frame.background, crate::render::Frame::Rebuilt(_)));
+    }
+    scene.reset();
+    let settled = meter.draw(&mut scene, &view, FrameRateLimit::Fps240, None, 2.0);
+    assert!(matches!(
+        settled.background,
+        crate::render::Frame::Retained(_)
+    ));
+    scene.reset();
+    let cached = meter.draw(&mut scene, &view, FrameRateLimit::Fps240, None, 0.1);
+    assert!(matches!(
+        cached.background,
+        crate::render::Frame::Unchanged(_)
+    ));
     Ok(())
 }
 
 #[test]
 #[ignore = "requires a compute-capable GPU"]
 fn renders_stereo_scales_text_needles_and_overload() -> anyhow::Result<()> {
-    let mut meter = Meter::new(PreampDb::try_from(0.0)?)?;
+    let mut meter = Meter::new(PreampDb::try_from(0.0)?, crate::theme::ThemeId::default())?;
     meter.audio_event(AudioEvent::Config { samplerate: 48000 });
     // Fill the RMS window, then deliver a buffer whose first frame has a full window.
     for _ in 0..2 {
@@ -268,7 +290,9 @@ fn renders_stereo_scales_text_needles_and_overload() -> anyhow::Result<()> {
             meter.draw(&mut scene, &view, limit, None, 1.0 / 60.0);
         }
         let params = RenderParams {
-            base_color: BACKGROUND,
+            base_color: crate::theme::Theme::new(crate::theme::ThemeId::default())
+                .colors
+                .background,
             width,
             height,
             antialiasing_method: ANTIALIASING,
@@ -437,7 +461,9 @@ fn render_frame(
         scene,
         &texture.create_view(&wgpu::TextureViewDescriptor::default()),
         &RenderParams {
-            base_color: BACKGROUND,
+            base_color: crate::theme::Theme::new(crate::theme::ThemeId::default())
+                .colors
+                .background,
             width,
             height,
             antialiasing_method: ANTIALIASING,
@@ -466,7 +492,10 @@ fn render_frame(
             &texture.create_view(&wgpu::TextureViewDescriptor::default()),
             &output.create_view(&wgpu::TextureViewDescriptor::default()),
             Size::new(f64::from(width), f64::from(height)),
-            needles,
+            &super::Overlay {
+                needles,
+                colors: crate::theme::Theme::new(crate::theme::ThemeId::default()).colors,
+            },
         );
         output
     });
@@ -536,7 +565,7 @@ fn overlay_matches_vector_stroke_sweep_mask_and_overload() -> anyhow::Result<()>
             ("subpixel", 320, 220, 1.0 / 60.0, 90, 1.0, [0.0, 0.0]),
             ("overload", 1280, 440, 1.0 / 60.0, 90, 1.0, [0.45, 1.0]),
         ] {
-            let mut meter = Meter::new(PreampDb::try_from(0.0)?)?;
+            let mut meter = Meter::new(PreampDb::try_from(0.0)?, crate::theme::ThemeId::default())?;
             meter.audio_event(AudioEvent::Config { samplerate: 48000 });
             for _ in 0..2 {
                 meter.processor.consume_buf(&[[0.1, 1.0]; 14400]);
@@ -580,7 +609,13 @@ fn overlay_matches_vector_stroke_sweep_mask_and_overload() -> anyhow::Result<()>
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .flat_map(|pixel| pixel[..3].iter().zip([40, 36, 36]))
+                .flat_map(|pixel| {
+                    pixel[..3].iter().zip(
+                        meter.theme.colors.background.components[..3]
+                            .iter()
+                            .map(|value| (value * 255.0).round() as u8),
+                    )
+                })
                 .map(|(pixel, background)| u64::from(pixel.abs_diff(background)))
                 .sum();
             let relative_error = error as f64 / ink as f64;
@@ -610,26 +645,28 @@ fn overlay_matches_vector_stroke_sweep_mask_and_overload() -> anyhow::Result<()>
 }
 
 fn draw_vector_reference(scene: &mut Scene, needle: &super::NeedleAppearance) {
-    use super::{GLOW_RADIUS, LAMP_CENTER, LAMP_RADIUS, NEEDLE_INK, NEEDLE_RADIUS, NEEDLE_WIDTH};
+    use super::{GLOW_RADIUS, LAMP_CENTER, LAMP_RADIUS, NEEDLE_RADIUS, NEEDLE_WIDTH};
     use vello::{
         kurbo::{Circle, Line, Stroke, Triangle},
         peniko::{Color, Compose, Fill, Gradient},
     };
+    let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
+    let ink = colors.needle;
     let transform = needle.transform;
     let strength = needle.overload;
     let light = LAMP_CENTER;
     if strength > 0.0 {
+        let glow_color = crate::theme::mix(colors.warning, colors.lamp_hot, strength.powi(4) * 0.1);
+        let stops: [(f32, Color); 17] = std::array::from_fn(|index| {
+            let position = index as f32 / 16.0;
+            (
+                position,
+                glow_color.with_alpha(strength.powi(2) * 0.2 * (1.0 - position).powi(3)),
+            )
+        });
         let glow =
             Gradient::new_two_point_radial(light, LAMP_RADIUS as f32, light, GLOW_RADIUS as f32)
-                .with_stops([
-                    Color::new([
-                        1.0,
-                        strength.powi(2) * 0.2,
-                        strength.powi(4) * 0.1,
-                        strength.powi(2) * 0.2,
-                    ]),
-                    Color::new([1.0, 0.0, 0.0, 0.0]),
-                ]);
+                .with_stops(stops);
         scene.fill(
             Fill::NonZero,
             transform,
@@ -640,12 +677,8 @@ fn draw_vector_reference(scene: &mut Scene, needle: &super::NeedleAppearance) {
         scene.fill(
             Fill::NonZero,
             transform,
-            Color::new([
-                1.0,
-                strength.powi(2) * 0.9,
-                strength.powi(4) * 0.8,
-                strength,
-            ]),
+            crate::theme::mix(colors.warning, colors.lamp_hot, strength.powi(2))
+                .with_alpha(strength),
             None,
             &Circle::new(light, LAMP_RADIUS),
         );
@@ -658,7 +691,7 @@ fn draw_vector_reference(scene: &mut Scene, needle: &super::NeedleAppearance) {
     scene.stroke(
         &Stroke::new(NEEDLE_WIDTH),
         transform,
-        NEEDLE_INK,
+        ink,
         None,
         &Line::new(Point::ORIGIN, tip),
     );
@@ -668,10 +701,7 @@ fn draw_vector_reference(scene: &mut Scene, needle: &super::NeedleAppearance) {
         if needle.blur > 0.0 && (edge - needle.angle).abs() * NEEDLE_RADIUS * scale > 0.5 {
             let triangle = Triangle::new(Point::ORIGIN, tip, super::NeedleAppearance::tip(edge));
             let gradient = Gradient::new_sweep(Point::ORIGIN, needle.angle as f32, edge as f32)
-                .with_stops([
-                    NEEDLE_INK.with_alpha(needle.blur),
-                    NEEDLE_INK.with_alpha(0.0),
-                ]);
+                .with_stops([ink.with_alpha(needle.blur), ink.with_alpha(0.0)]);
             scene.fill(Fill::NonZero, transform, &gradient, None, &triangle);
         }
     }

@@ -9,7 +9,6 @@ use vello::{
 };
 use winit::{dpi::PhysicalSize, event_loop::ActiveEventLoop, window::Window};
 
-pub const BACKGROUND: Color = Color::from_rgb8(40, 36, 36);
 pub const ANTIALIASING: AaConfig = AaConfig::Msaa16;
 
 pub enum Presentation {
@@ -233,7 +232,7 @@ impl RenderWindow {
         completed(Stage::Acquire);
         let device = &self.context.devices[self.surface.dev_id];
         let params = RenderParams {
-            base_color: BACKGROUND,
+            base_color: Color::TRANSPARENT,
             width: self.surface.config.width,
             height: self.surface.config.height,
             antialiasing_method: ANTIALIASING,

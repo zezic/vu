@@ -2,20 +2,18 @@ use std::collections::HashMap;
 
 use vello::{
     kurbo::{Affine, Arc, Cap, Line, Stroke},
-    peniko::Color,
     Scene,
 };
 
 use crate::{
     db_to_normalized, normalized_to_db,
     text::{Fonts, Text},
+    theme::MeterColors,
 };
 
 pub const MAX_ANGLE: f32 = 47.0;
 const POSITIVE_DB_RANGE: f32 = 6.0;
 const BASE_RADIUS: f64 = 164.0;
-const INK: Color = Color::from_rgb8(220, 220, 220);
-const WARNING: Color = Color::from_rgb8(220, 62, 73);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScaleSetting {
@@ -121,7 +119,13 @@ pub fn generate_din_scale(fonts: &mut Fonts) -> Vec<Mark> {
     marks
 }
 
-pub fn draw_scale(scene: &mut Scene, transform: Affine, marks: &[Mark], scale: &Scale) {
+pub fn draw_scale(
+    scene: &mut Scene,
+    transform: Affine,
+    marks: &[Mark],
+    scale: &Scale,
+    colors: &MeterColors,
+) {
     let start = Scale::angle(0.0);
     let end = Scale::angle(1.0);
     let zero = Scale::angle(scale.position(1.0));
@@ -135,7 +139,7 @@ pub fn draw_scale(scene: &mut Scene, transform: Affine, marks: &[Mark], scale: &
     scene.stroke(
         &Stroke::new(7.5).with_caps(Cap::Butt),
         transform,
-        WARNING,
+        colors.warning_dim,
         None,
         &warning_arc,
     );
@@ -146,7 +150,7 @@ pub fn draw_scale(scene: &mut Scene, transform: Affine, marks: &[Mark], scale: &
         end - start,
         0.0,
     );
-    scene.stroke(&Stroke::new(1.0), transform, INK, None, &arc);
+    scene.stroke(&Stroke::new(1.0), transform, colors.scale, None, &arc);
 
     let mut previous_labels: HashMap<MarkStyle, f32> = HashMap::new();
     for mark in marks {
@@ -169,9 +173,9 @@ pub fn draw_scale(scene: &mut Scene, transform: Affine, marks: &[Mark], scale: &
                 .is_none_or(|previous| (previous - position).abs() > 0.075)
             {
                 let color = if mark.style == MarkStyle::UnderWarn {
-                    WARNING
+                    colors.warning
                 } else {
-                    INK
+                    colors.scale
                 };
                 label.draw(
                     scene,
@@ -182,8 +186,8 @@ pub fn draw_scale(scene: &mut Scene, transform: Affine, marks: &[Mark], scale: &
             }
         }
         let color = match mark.style {
-            MarkStyle::Medium | MarkStyle::UnderWarn => WARNING,
-            _ => INK,
+            MarkStyle::Medium | MarkStyle::UnderWarn => colors.warning,
+            _ => colors.scale,
         };
         scene.stroke(
             &Stroke::new(1.0),

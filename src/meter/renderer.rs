@@ -5,8 +5,7 @@ use vello::{
 };
 
 use super::{
-    NeedleAppearance, GLOW_RADIUS, LAMP_CENTER, LAMP_RADIUS, NEEDLE_INK, NEEDLE_RADIUS,
-    NEEDLE_WIDTH,
+    NeedleAppearance, Overlay, GLOW_RADIUS, LAMP_CENTER, LAMP_RADIUS, NEEDLE_RADIUS, NEEDLE_WIDTH,
 };
 
 #[repr(C)]
@@ -85,6 +84,8 @@ struct Uniforms {
     viewport: [f32; 4],
     ink: [f32; 4],
     light: [f32; 4],
+    warning: [f32; 4],
+    hot: [f32; 4],
     needles: [GpuNeedle; 2],
 }
 
@@ -308,7 +309,7 @@ impl Renderer {
         background: &wgpu::TextureView,
         target: &wgpu::TextureView,
         viewport: Size,
-        needles: &[NeedleAppearance; 2],
+        overlay: &Overlay<'_>,
     ) {
         if self
             .background
@@ -321,9 +322,12 @@ impl Renderer {
                 background,
             ));
         }
+        let Overlay { needles, colors } = overlay;
         let uniforms = Uniforms {
             viewport: [viewport.width as f32, viewport.height as f32, 0.0, 0.0],
-            ink: NEEDLE_INK.components,
+            ink: colors.needle.components,
+            warning: colors.warning.components,
+            hot: colors.lamp_hot.components,
             light: [
                 LAMP_CENTER.x as f32,
                 LAMP_CENTER.y as f32,

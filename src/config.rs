@@ -59,6 +59,7 @@ impl PreampDb {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub theme: crate::theme::ThemeId,
     pub preamp_db: PreampDb,
     pub frame_rate_limit: FrameRateLimit,
 }

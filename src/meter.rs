@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use instant::Instant;
 use strum::VariantArray;
 use vello::{
-    kurbo::{Affine, Circle, Point, Size},
-    peniko::{Color, Fill},
+    kurbo::{Affine, Circle, Point, Rect, Size},
+    peniko::Fill,
     Scene,
 };
 
@@ -15,6 +15,7 @@ use crate::{
     render::Frame,
     scales::{draw_scale, generate_din_scale, Mark, Scale, ScaleSetting},
     text::{Fonts, Text},
+    theme::{MeterColors, Theme, ThemeId},
     AudioEvent,
 };
 
@@ -23,7 +24,6 @@ const VU_HEIGHT: f64 = 220.0;
 const CENTER_Y: f64 = 207.0;
 const NEEDLE_RADIUS: f64 = 174.0;
 const NEEDLE_WIDTH: f64 = 1.0;
-const NEEDLE_INK: Color = Color::from_rgb8(255, 200, 160);
 const LAMP_CENTER: Point = Point::new(0.0, CENTER_Y * -0.4);
 const LAMP_RADIUS: f64 = 5.0;
 const GLOW_RADIUS: f64 = 40.0;
@@ -141,11 +141,9 @@ impl ScaleReadout {
         fonts.layout(&label, 12.0)
     }
 
-    fn draw(
+    fn advance(
         &mut self,
         fonts: &mut Fonts,
-        scene: &mut Scene,
-        view: &View,
         scale: &Scale,
         adjusting: Option<ScaleSetting>,
         dt: f32,
@@ -167,6 +165,12 @@ impl ScaleReadout {
             self.value = value;
             self.text = Self::text(fonts, self.setting, value);
         }
+    }
+
+    fn draw(&self, scene: &mut Scene, view: &View, colors: &MeterColors) {
+        if self.opacity == 0.0 {
+            return;
+        }
         let width = self.text.width() * 2.0;
         let x = match self.setting {
             ScaleSetting::DbRange => 24.0 + width / 2.0,
@@ -174,8 +178,17 @@ impl ScaleReadout {
         };
         self.text.draw(
             scene,
-            Affine::translate((x, view.viewport.height - 24.0)) * Affine::scale(2.0),
-            Color::new([0.75, 0.7, 0.7, self.opacity]),
+            Affine::translate((
+                x,
+                view.viewport.height
+                    - if self.setting == ScaleSetting::DbRange {
+                        let [a, b, ..] = view.transform.as_coeffs();
+                        24.0 + 28.0 * a.hypot(b)
+                    } else {
+                        24.0
+                    },
+            )) * Affine::scale(2.0),
+            colors.scale.with_alpha(self.opacity),
         );
     }
 }
@@ -185,6 +198,7 @@ struct FaceSettings {
     view: View,
     scale: Scale,
     limit: FrameRateLimit,
+    colors: MeterColors,
 }
 
 #[derive(Clone, Copy)]
@@ -213,7 +227,12 @@ impl NeedleAppearance {
 
 pub struct MeterFrame<'a> {
     pub background: Frame<'a>,
+    pub overlay: Overlay<'a>,
+}
+
+pub struct Overlay<'a> {
     pub needles: &'a [NeedleAppearance; 2],
+    pub colors: MeterColors,
 }
 
 struct Appearance {
@@ -241,7 +260,7 @@ impl Appearance {
 }
 
 struct Readout {
-    caption: Text,
+    caption: Option<Text>,
     hints: [Text; 2],
 }
 
@@ -254,26 +273,45 @@ impl Readout {
 
     fn new(fonts: &mut Fonts, caption: &str, hints: [&str; 2]) -> Self {
         Self {
-            caption: fonts.layout(caption, 8.0),
+            caption: Some(fonts.layout(caption, 8.0)),
             hints: hints.map(|hint| fonts.layout(hint, 10.0)),
         }
     }
 
-    fn draw(&self, scene: &mut Scene, transform: Affine, value: &Text) {
-        let ink = Color::from_rgb8(80, 72, 72);
-        self.caption.draw(scene, transform, ink);
+    fn inline(fonts: &mut Fonts, hints: [&str; 2]) -> Self {
+        Self {
+            caption: None,
+            hints: hints.map(|hint| fonts.layout(hint, 10.0)),
+        }
+    }
+
+    fn hint_offset(value: &Text) -> f64 {
+        Self::HINT_OFFSET.max(value.width() / 2.0 + 16.0)
+    }
+
+    fn draw(&self, scene: &mut Scene, transform: Affine, value: &Text, colors: &MeterColors) {
         let baseline = transform * Affine::translate((0.0, 12.0));
-        value.draw(scene, baseline, ink);
-        for (hint, x) in self
-            .hints
-            .iter()
-            .zip([-Self::HINT_OFFSET, Self::HINT_OFFSET])
-        {
-            hint.draw(
-                scene,
-                baseline * Affine::translate((x, 0.0)),
-                Color::from_rgb8(100, 90, 90),
-            );
+        match &self.caption {
+            Some(caption) => {
+                caption.draw(scene, transform, colors.readout);
+                value.draw(scene, baseline, colors.readout);
+                let offset = Self::hint_offset(value);
+                for (hint, x) in self.hints.iter().zip([-offset, offset]) {
+                    hint.draw(scene, baseline * Affine::translate((x, 0.0)), colors.hint);
+                }
+            }
+            None => {
+                let mut x = 0.0;
+                for hint in &self.hints {
+                    hint.draw_left(scene, transform * Affine::translate((x, 0.0)), colors.hint);
+                    x += hint.width() + 8.0;
+                }
+                value.draw_left(
+                    scene,
+                    transform * Affine::translate((x, 0.0)),
+                    colors.readout,
+                );
+            }
         }
     }
 }
@@ -291,6 +329,9 @@ impl Needle {
 }
 
 pub struct Meter {
+    theme: Theme,
+    theme_readout: Readout,
+    theme_value: Text,
     processor: Processor,
     pub scale: Scale,
     marks: Vec<Mark>,
@@ -308,11 +349,13 @@ pub struct Meter {
 }
 
 impl Meter {
-    pub fn new(preamp: PreampDb) -> anyhow::Result<Self> {
+    pub fn new(preamp: PreampDb, selected: ThemeId) -> anyhow::Result<Self> {
         let processor = Processor::new(preamp.gain());
         let mut fonts = Fonts::new()?;
-        let preamp_readout = Readout::new(&mut fonts, "PREAMP", ["[Z]", "[X]"]);
-        let frame_readout = Readout::new(&mut fonts, "FPS LIMIT", ["[Q]", "[W]"]);
+        let theme_readout = Readout::inline(&mut fonts, ["[A]", "[S]"]);
+        let theme_value = Readout::value(&mut fonts, selected.name());
+        let preamp_readout = Readout::new(&mut fonts, "Preamp", ["[Z]", "[X]"]);
+        let frame_readout = Readout::new(&mut fonts, "FPS Limit", ["[Q]", "[W]"]);
         let frame_values = FrameRateLimit::VARIANTS
             .iter()
             .map(|&limit| (limit, Readout::value(&mut fonts, &limit.to_string())))
@@ -324,6 +367,9 @@ impl Meter {
             ScaleReadout::new(&mut fonts, ScaleSetting::DbRange, scale.negative_db_range);
         let bend_readout = ScaleReadout::new(&mut fonts, ScaleSetting::Bend, scale.bend);
         Ok(Self {
+            theme: Theme::new(selected),
+            theme_readout,
+            theme_value,
             processor,
             scale,
             marks,
@@ -348,6 +394,12 @@ impl Meter {
         }
     }
 
+    pub fn set_theme(&mut self, selected: ThemeId) {
+        self.theme.select(selected);
+        self.theme_value = Readout::value(&mut self.fonts, selected.name());
+        self.face_settings = None;
+    }
+
     pub fn set_preamp(&mut self, preamp: PreampDb) {
         self.processor.preamp = preamp.gain();
         self.preamp_value = Readout::value(&mut self.fonts, &format!("{:.1}dB", preamp.db()));
@@ -363,11 +415,26 @@ impl Meter {
     fn draw_face(&mut self, view: &View, limit: FrameRateLimit) {
         let scene = &mut self.face;
         scene.reset();
+        let colors = &self.theme.colors;
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            colors.background,
+            None,
+            &Rect::from_origin_size(Point::ORIGIN, view.viewport),
+        );
+        let [a, b, ..] = view.transform.as_coeffs();
+        let theme_scale = a.hypot(b);
+        let theme_transform =
+            Affine::translate((24.0, view.viewport.height - 24.0)) * Affine::scale(theme_scale);
+        self.theme_readout
+            .draw(scene, theme_transform, &self.theme_value, colors);
         let [preamp, frame] = view.layout.readouts();
         self.preamp_readout.draw(
             scene,
             view.transform * Affine::translate(preamp.to_vec2()),
             &self.preamp_value,
+            colors,
         );
         let frame_value = self
             .frame_values
@@ -377,14 +444,15 @@ impl Meter {
             scene,
             view.transform * Affine::translate(frame.to_vec2()),
             frame_value,
+            colors,
         );
         for pivot in view.layout.pivots() {
             let meter = view.transform * Affine::translate(pivot.to_vec2());
-            draw_scale(scene, meter, &self.marks, &self.scale);
+            draw_scale(scene, meter, &self.marks, &self.scale, colors);
             scene.fill(
                 Fill::NonZero,
                 meter,
-                Color::new([0.0, 0.0, 0.0, 0.25]),
+                colors.lamp_off,
                 None,
                 &Circle::new(LAMP_CENTER, 7.0),
             );
@@ -399,20 +467,22 @@ impl Meter {
         adjusting: Option<ScaleSetting>,
         dt: f32,
     ) -> MeterFrame<'_> {
+        self.theme.advance(dt);
         let settings = FaceSettings {
             view: *view,
             scale: self.scale,
             limit,
+            colors: self.theme.colors,
         };
         let rebuild = self.face_settings != Some(settings);
         if rebuild {
             self.draw_face(view, limit);
             self.face_settings = Some(settings);
         }
-        self.range_readout
-            .draw(&mut self.fonts, scene, view, &self.scale, adjusting, dt);
-        self.bend_readout
-            .draw(&mut self.fonts, scene, view, &self.scale, adjusting, dt);
+        for readout in [&mut self.range_readout, &mut self.bend_readout] {
+            readout.advance(&mut self.fonts, &self.scale, adjusting, dt);
+            readout.draw(scene, view, &self.theme.colors);
+        }
         let levels = self.processor.get_hands_for_instant(Instant::now());
         let pivots = view.layout.pivots();
         let needles = std::array::from_fn(|channel| {
@@ -473,11 +543,14 @@ impl Meter {
         };
         MeterFrame {
             background,
-            needles: &self
-                .appearance
-                .as_ref()
-                .expect("the first frame prepares the needles")
-                .needles,
+            overlay: Overlay {
+                colors: self.theme.colors,
+                needles: &self
+                    .appearance
+                    .as_ref()
+                    .expect("the first frame prepares the needles")
+                    .needles,
+            },
         }
     }
 }

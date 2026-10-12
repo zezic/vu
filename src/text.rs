@@ -57,6 +57,15 @@ impl Text {
         f64::from(self.layout.width())
     }
 
+    /// Draws a single-line label with its left edge and baseline at the origin.
+    pub fn draw_left(&self, scene: &mut Scene, transform: Affine, color: Color) {
+        self.draw(
+            scene,
+            transform * Affine::translate((self.width() / 2.0, 0.0)),
+            color,
+        );
+    }
+
     /// Draws a single-line label centered horizontally at the transform's origin,
     /// with its alphabetic baseline at y = 0.
     pub fn draw(&self, scene: &mut Scene, transform: Affine, color: Color) {

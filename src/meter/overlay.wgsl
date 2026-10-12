@@ -11,6 +11,8 @@ struct Uniforms {
     viewport: vec4<f32>,
     ink: vec4<f32>,
     light: vec4<f32>,
+    warning: vec4<f32>,
+    hot: vec4<f32>,
     needles: array<Needle, 2>,
 }
 
@@ -146,10 +148,10 @@ fn glow_fragment(vertex: Vertex) -> @location(0) vec4<f32> {
     let squared = strength * strength;
     let fourth = squared * squared;
     let fade = 1.0 - clamp((radius - data.light.z) / (data.light.w - data.light.z), 0.0, 1.0);
-    let glow_alpha = squared * 0.2 * fade;
-    let glow_rgb = vec3(1.0, squared * 0.2, fourth * 0.1) * glow_alpha;
+    let glow_alpha = squared * 0.2 * fade * fade * fade;
+    let glow_rgb = mix(data.warning.rgb, data.hot.rgb, fourth * 0.1) * glow_alpha;
     let lamp_alpha = strength * coverage(data.light.z - radius, needle.inverse_x.w);
-    let lamp_rgb = vec3(1.0, squared * 0.9, fourth * 0.8) * lamp_alpha;
+    let lamp_rgb = mix(data.warning.rgb, data.hot.rgb, squared) * lamp_alpha;
     let alpha = lamp_alpha + glow_alpha * (1.0 - lamp_alpha);
     return vec4(lamp_rgb + glow_rgb * (1.0 - lamp_alpha), alpha);
 }

@@ -29,6 +29,7 @@ mod render;
 mod saved;
 mod scales;
 mod text;
+mod theme;
 
 enum AudioEvent {
     Config { samplerate: usize },
@@ -88,6 +89,7 @@ impl DragState {
 }
 
 enum Setting {
+    Theme,
     Preamp,
     FrameRate,
 }
@@ -117,6 +119,10 @@ impl App {
     fn adjust_setting(&mut self, setting: Setting, adjustment: Adjustment) {
         let settings = self.settings.edit();
         match setting {
+            Setting::Theme => {
+                settings.theme = settings.theme.adjusted(adjustment);
+                self.meter.set_theme(settings.theme);
+            }
             Setting::Preamp => {
                 settings.preamp_db = settings.preamp_db.adjusted(adjustment);
                 self.meter.set_preamp(settings.preamp_db);
@@ -243,6 +249,8 @@ impl App {
                             self.meter.scale.bend = (self.meter.scale.bend - 0.1).max(0.1)
                         }
                         KeyCode::BracketRight => self.meter.scale.bend += 0.1,
+                        KeyCode::KeyA => self.adjust_setting(Setting::Theme, Adjustment::Decrease),
+                        KeyCode::KeyS => self.adjust_setting(Setting::Theme, Adjustment::Increase),
                         KeyCode::KeyZ => self.adjust_setting(Setting::Preamp, Adjustment::Decrease),
                         KeyCode::KeyX => self.adjust_setting(Setting::Preamp, Adjustment::Increase),
                         KeyCode::KeyQ => {
@@ -280,7 +288,7 @@ impl App {
                         background,
                         target,
                         viewport,
-                        frame.needles,
+                        &frame.overlay,
                     );
                 };
                 let presentation = if let Some(profile) = &mut self.profile {
@@ -400,7 +408,7 @@ fn main() -> anyhow::Result<()> {
     pretty_env_logger::init();
     let profile = profile::Run::from_args()?;
     let settings = Saved::<Config>::load(config::config_file()?)?;
-    let mut meter = Meter::new(settings.preamp_db)?;
+    let mut meter = Meter::new(settings.preamp_db, settings.theme)?;
     let (tx, rx) = std::sync::mpsc::channel();
     let _stream = if profile.is_some() {
         meter.set_preamp(config::PreampDb::try_from(0.0)?);

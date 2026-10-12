@@ -15,6 +15,11 @@ The meters switch between side-by-side and stacked layouts as you resize the win
 choosing the larger fitted scales and centering the pair. In the stacked layout,
 the left channel is above the right channel.
 
+`A` / `S` cycle backward or forward through Cordex's 41 selected Gogh themes.
+Aura is the default. Colors crossfade over 200 ms, including needles and overload
+lamps. The theme readout sits at the bottom-left in both layouts, with `[A] [S] Theme Name`
+on one left-aligned line and the range popup above the selector.
+
 `Z` / `X` decrease or increase preamp by 6 dB. `Q` / `W` cycle backward or forward
 through the frame limits: 30, 48, 55, 60, 72, 90, 120, 180, 240, and VSync.
 VSync is the default and leaves frame pacing to display synchronization. Numeric
@@ -32,7 +37,7 @@ needle using sweep gradients. The stroke and wings share a radial opacity mask,
 keeping the base bright while the faster-moving tip spreads into the blur.
 At rest the needle stays opaque. Needles stop at the gauge endpoints.
 
-Preamp and frame limit are restored from `vu-config.ron` on launch. Changes are
+Theme, preamp, and frame limit are restored from `vu-config.ron` on launch. Changes are
 saved every two seconds and on exit, using a temporary sibling file and rename.
 The config uses Cordex's RON format and platform directory convention:
 

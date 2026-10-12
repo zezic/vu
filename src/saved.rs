@@ -107,6 +107,9 @@ mod tests {
         assert!(!path.exists());
         config.edit().preamp_db = PreampDb::try_from(-12.0)?;
         config.edit().frame_rate_limit = FrameRateLimit::Fps55;
+        config.edit().theme = config
+            .theme
+            .adjusted(crate::frame_schedule::Adjustment::Increase);
         config.flush_if_due(config.last_write + SAVE_INTERVAL - Duration::from_millis(1))?;
         assert!(!path.exists());
         config.flush_if_due(config.last_write + SAVE_INTERVAL)?;
@@ -130,6 +133,7 @@ mod tests {
             "(preamp_db: 97.0)",
             "(preamp_db: NaN)",
             "(frame_rate_limit: Fps99)",
+            "(theme: \"Unknown theme\")",
         ] {
             fs::write(&path, text)?;
             assert!(Saved::<Config>::load(path.clone()).is_err());
