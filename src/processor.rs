@@ -138,7 +138,6 @@ pub struct Processor {
     drives: Vec<Drive>,
     samples: u64,
     clock: Option<AudioClock>,
-    last_levels: [f32; 2],
     pub preamp: f32,
 }
 
@@ -153,7 +152,6 @@ impl Processor {
             drives: Vec::new(),
             samples: 0,
             clock: None,
-            last_levels: [0.0; 2],
             preamp,
         }
     }
@@ -163,7 +161,6 @@ impl Processor {
         self.bin_sum = [0.0; 2];
         self.bin_count = 0;
         self.drives.clear();
-        self.last_levels = [0.0; 2];
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
@@ -183,11 +180,22 @@ impl Processor {
         AudioTime::from_samples(self.samples, self.samplerate)
     }
 
+    /// Completed bins from the most recent capture block. A sub-bin block
+    /// uses the latest complete bin as its available read-ahead span.
+    pub fn available_interval(&self) -> AudioInterval {
+        let end = AudioTime::from_samples(self.samples - self.bin_count as u64, self.samplerate);
+        let start = self.drives.first().map_or_else(
+            || end.shifted(-((self.samplerate / 1000).max(1) as f64 / self.samplerate as f64)),
+            |drive| drive.interval.start(),
+        );
+        AudioInterval::new(start, end)
+    }
+
     pub fn position_at(&self, now: Instant) -> Option<AudioTime> {
         self.clock.map(|clock| clock.position_at(now))
     }
 
-    pub fn partial_drive(&self) -> Option<Drive> {
+    fn partial_drive(&self) -> Option<Drive> {
         (self.bin_count > 0).then(|| Drive {
             levels: self
                 .bin_sum
@@ -199,11 +207,11 @@ impl Processor {
         })
     }
 
+    #[cfg(test)]
     pub fn latest_levels(&self) -> [f32; 2] {
-        self.partial_drive().map_or_else(
-            || self.last_levels.map(|level| level * self.preamp),
-            |drive| drive.levels,
-        )
+        self.partial_drive()
+            .or_else(|| self.drives.last().copied())
+            .map_or([0.0; 2], |drive| drive.levels)
     }
 
     /// Each sample advances the detector once. Bins stay on the sample grid across
@@ -227,7 +235,6 @@ impl Processor {
             self.samples += 1;
             if self.bin_count == bin_samples {
                 let drive = self.partial_drive().expect("a full bin has a drive");
-                self.last_levels = self.bin_sum.map(|sum| (sum / self.bin_count as f64) as f32);
                 self.drives.push(drive);
                 self.bin_sum = [0.0; 2];
                 self.bin_count = 0;
@@ -319,7 +326,7 @@ mod tests {
         for _ in 0..10 {
             consume(&mut processor, &[[0.0; 2]; 4800]);
         }
-        assert!((processor.last_levels[0] - 0.2).abs() < 0.001);
+        assert!((processor.latest_levels()[0] - 0.2).abs() < 0.001);
     }
 
     #[test]

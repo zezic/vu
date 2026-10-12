@@ -316,6 +316,9 @@ impl App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                while let Ok(event) = self.rx.try_recv() {
+                    self.meter.audio_event(event);
+                }
                 let now = Instant::now();
                 let frame_time = FrameTime::new(self.previous_frame, now);
                 self.previous_frame = now;

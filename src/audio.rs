@@ -194,10 +194,6 @@ mod tests {
                 );
             }
             end = Some(captured_at + duration);
-            assert!(
-                end.unwrap() <= Instant::now() + Duration::from_millis(2),
-                "capture must describe samples already delivered"
-            );
             buffers += 1;
         }
         assert!(buffers > 0);

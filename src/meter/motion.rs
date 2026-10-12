@@ -6,7 +6,7 @@ use crate::{
     measurement::Mode,
 };
 
-use super::{NEEDLE_RADIUS, NEEDLE_WIDTH};
+use super::{HISTORY_SECONDS, NEEDLE_RADIUS, NEEDLE_WIDTH};
 use crate::scales::{Scale, MAX_ANGLE};
 
 /// Sifam's two published peak-meter movement curves.
@@ -260,9 +260,6 @@ impl Segment {
     }
 }
 
-/// History is retained by audio duration, independently of display cadence.
-const HISTORY_SECONDS: f64 = 2.0;
-
 struct TimedSegment {
     start: AudioTime,
     segment: Segment,
@@ -274,7 +271,6 @@ impl TimedSegment {
     }
 }
 
-#[derive(Clone, Copy)]
 struct Mechanics {
     state: State,
     response: Response,
@@ -283,12 +279,10 @@ struct Mechanics {
 }
 
 /// Confirmed sample-time mechanics and a bounded path for shutter integration.
-/// Previewing copies only Mechanics and reuses scratch storage.
 pub(super) struct Motion {
     mechanics: Mechanics,
     at: AudioTime,
     history: VecDeque<TimedSegment>,
-    preview: Vec<TimedSegment>,
     frames: VecDeque<f64>,
 }
 
@@ -452,7 +446,6 @@ impl Motion {
             },
             at,
             history: VecDeque::with_capacity(2048),
-            preview: Vec::with_capacity(6),
             frames: VecDeque::with_capacity(ShutterFrames::MAX as usize),
         }
     }
@@ -500,39 +493,14 @@ impl Motion {
         }
     }
 
-    /// Predict only the unconfirmed tail, then integrate the requested shutter.
-    /// Neither mechanics, confirmed time, nor confirmed history is modified.
-    pub fn expose(
-        &mut self,
-        frame: AudioInterval,
-        shutter: ShutterFrames,
-        partial: Option<(f32, AudioInterval)>,
-        last_target: f32,
-    ) -> Exposure {
-        self.preview.clear();
-        let mut mechanics = self.mechanics;
-        let mut at = self.at;
-        let preview = &mut self.preview;
-        let mut advance = |target: f32, end: AudioTime| {
-            if end > at {
-                mechanics.advance(target, end.seconds_since(at), |segment| {
-                    let start = at;
-                    at = at.shifted(segment.duration);
-                    preview.push(TimedSegment { start, segment });
-                });
-                at = end;
-            }
-        };
-        if let Some((target, interval)) = partial {
-            assert_eq!(
-                interval.start(),
-                self.at,
-                "partial bin follows confirmed audio"
-            );
-            advance(target, interval.end().min(frame.end()));
-        }
-        advance(last_target, frame.end());
-
+    /// Integrate the requested shutter interval from recorded motion. The read
+    /// cursor supplies covered frames and a point interval when audio stalls.
+    pub fn expose(&mut self, frame: AudioInterval, shutter: ShutterFrames) -> Exposure {
+        assert!(
+            frame.end() <= self.at,
+            "display cursor must stay within recorded audio"
+        );
+        let end = frame.end();
         if frame.seconds() > 0.0 {
             if self.frames.len() == ShutterFrames::MAX as usize {
                 self.frames.pop_front();
@@ -551,7 +519,7 @@ impl Motion {
             })
             .sum();
         let start = if frame.seconds() == 0.0 {
-            frame.end()
+            end
         } else {
             frame.end().shifted(-seconds.min(HISTORY_SECONDS))
         };
@@ -560,12 +528,12 @@ impl Motion {
         let mut integral = 0.0;
         let mut bend_integral = 0.0;
         let mut elapsed = 0.0;
-        for timed in self.preview.iter().rev().chain(self.history.iter().rev()) {
+        for timed in self.history.iter().rev() {
             if timed.end() < start {
                 break;
             }
             let from = timed.start.max(start);
-            let to = timed.end().min(frame.end());
+            let to = timed.end().min(end);
             if to > from {
                 let duration = to.seconds_since(from);
                 let exposure = timed.segment.exposure(
@@ -588,19 +556,21 @@ impl Motion {
             }
         } else {
             let state = self
-                .preview
+                .history
                 .iter()
                 .rev()
-                .chain(self.history.iter().rev())
-                .find(|segment| segment.start <= frame.end())
+                .find(|segment| segment.start <= end)
                 .map(|timed| {
-                    let dt = frame
-                        .end()
-                        .seconds_since(timed.start)
-                        .min(timed.segment.duration);
+                    let dt = end.seconds_since(timed.start).min(timed.segment.duration);
                     (timed.segment.at(dt), timed.segment.bend_at(dt))
                 })
-                .unwrap_or((mechanics.state, mechanics.bend));
+                .unwrap_or_else(|| {
+                    self.history
+                        .front()
+                        .map_or((self.mechanics.state, self.mechanics.bend), |timed| {
+                            (timed.segment.start, timed.segment.bend)
+                        })
+                });
             Exposure {
                 minimum: state.0.position,
                 maximum: state.0.position,
@@ -622,40 +592,16 @@ impl Motion {
         shutter: ShutterFrames,
     ) -> Exposure {
         let start = self.at;
-        let mut last = 0.0;
         for (target, dt) in drives {
             self.consume(target, AudioInterval::new(self.at, self.at.shifted(dt)));
-            last = target;
         }
-        self.expose(AudioInterval::new(start, self.at), shutter, None, last)
+        self.expose(AudioInterval::new(start, self.at), shutter)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn speculative_stop_damage_is_discarded_when_actual_audio_arrives() {
-        let mut motion = Motion::new(Mode::Rms, PeakMovement::default(), AudioTime::ZERO);
-        let first = AudioTime::from_samples(480, 48000);
-        motion.consume(1.2, AudioInterval::new(AudioTime::ZERO, first));
-        let confirmed = motion.confirmed_state();
-        let end = AudioTime::from_samples(14400, 48000);
-        let preview = motion.expose(
-            AudioInterval::new(first, end),
-            ShutterFrames::default(),
-            None,
-            1.2,
-        );
-        assert!(
-            preview.bend.0 > 0.0,
-            "the preview must actually strike the stop"
-        );
-        assert_eq!(confirmed, motion.confirmed_state());
-        motion.consume(0.0, AudioInterval::new(first, end));
-        assert_eq!(motion.mechanics.bend, Bend::default());
-    }
 
     #[test]
     fn confirmed_history_is_bounded_even_without_redraws() {
@@ -674,8 +620,6 @@ mod tests {
         let exposure = motion.expose(
             AudioInterval::new(motion.at.shifted(-1.0 / 240.0), motion.at),
             ShutterFrames::default(),
-            None,
-            0.5,
         );
         near(exposure.minimum, 0.5);
         near(exposure.maximum, 0.5);

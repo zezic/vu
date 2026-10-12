@@ -58,14 +58,17 @@ timeline; each buffer correlates its sample endpoint with its capture time.
 Detector bins stay on that sample grid across buffer and display intervals.
 Audio delivery advances confirmed detector, needle, damage, and lamp state once.
 
-Rendering integrates timed needle segments over the current shutter interval.
-It predicts the unconfirmed tail from a copy of the mechanical state, including
-any partial detector bin, without committing predicted motion or lamp changes.
-Actual samples replace that prediction when delivered. Startup processing and
-display stalls therefore do not become extra latency or an extended shutter.
-At most two seconds of confirmed path and sixteen frame durations are retained;
-exposure is clipped to two seconds. Prediction stops 100 ms beyond the latest
-captured samples if capture stalls. Capture timestamp discontinuities exceeding
+Rendering reads recorded needle and lamp paths through a continuous sample-time
+cursor. When timestamps provide data for a displayed frame, that frame is read
+directly. If they do not, the cursor starts at the newest capture block and keeps
+one block of measured data in reserve. It advances by display-frame time between
+callbacks, preserving complete fractional-bin intervals and the full shutter
+length. Genuine capture stalls hold a measured point; resumption and excess
+backlog rejoin recent data. No sample levels or needle motion are extrapolated.
+Available audio is consumed before drawing; window initialization does not leave
+an accumulated playback backlog.
+At most two seconds of recorded path and sixteen frame durations are retained;
+exposure is clipped to two seconds. Capture timestamp discontinuities exceeding
 2 ms start a fresh measurement timeline through the existing configuration event.
 
 | Mode | Detector | Movement | Units |

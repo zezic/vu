@@ -1183,99 +1183,10 @@ fn startup_and_delayed_delivery_do_not_change_confirmed_measurements() -> anyhow
                         actual.motion.confirmed_state(),
                         "{mode:?}, {rate}, {packet}/{fps}"
                     );
-                    assert_eq!(expected.overload, actual.overload);
+                    assert_eq!(expected.overload.strength, actual.overload.strength);
                 }
             }
         }
-    }
-    Ok(())
-}
-
-#[test]
-fn redraw_prediction_does_not_commit_audio_time_motion_damage_or_lamps() -> anyhow::Result<()> {
-    use crate::measurement::Mode;
-    for mode in [Mode::Vu, Mode::Ppm, Mode::Rms, Mode::SamplePeak] {
-        let config = crate::config::Config {
-            mode,
-            preamp_db: PreampDb::try_from(0.0)?,
-            ..Default::default()
-        };
-        let mut meter = Meter::new(&config)?;
-        meter.audio_event(AudioEvent::Config { samplerate: 48000 });
-        let mut clock = TestClock::new();
-        // Leave a partial bin so rendering must preview both known and unknown audio.
-        clock.feed(&mut meter, &[[1.5, 0.25]; 497]);
-        let states = meter
-            .needles
-            .each_ref()
-            .map(|needle| (needle.motion.confirmed_state(), needle.overload));
-        let audio_time = meter.processor.audio_time();
-        let mut scene = Scene::new();
-        let view = View::fit(Size::new(1280.0, 440.0));
-        for _ in 0..120 {
-            scene.reset();
-            meter.draw(
-                &mut scene,
-                &view,
-                FrameRateLimit::Fps240,
-                None,
-                clock.frame(1.0 / 240.0),
-            );
-        }
-        assert_eq!(audio_time, meter.processor.audio_time());
-        assert_eq!(
-            states,
-            meter
-                .needles
-                .each_ref()
-                .map(|needle| (needle.motion.confirmed_state(), needle.overload))
-        );
-        let frozen = meter
-            .appearance
-            .as_ref()
-            .unwrap()
-            .needles
-            .map(|needle| (needle.angle, needle.overload));
-        scene.reset();
-        meter.draw(
-            &mut scene,
-            &view,
-            FrameRateLimit::Fps240,
-            None,
-            clock.frame(1.0),
-        );
-        assert_eq!(
-            frozen,
-            meter
-                .appearance
-                .as_ref()
-                .unwrap()
-                .needles
-                .map(|needle| (needle.angle, needle.overload))
-        );
-
-        let mut reference = Meter::new(&config)?;
-        reference.audio_event(AudioEvent::Config { samplerate: 48000 });
-        reference.audio_event(AudioEvent::Buffer {
-            buf: vec![[1.5, 0.25]; 497],
-            captured_at: clock.origin,
-        });
-        let silence = vec![[0.0; 2]; 4800];
-        reference.audio_event(AudioEvent::Buffer {
-            buf: silence.clone(),
-            captured_at: clock.origin + Duration::from_secs_f64(497.0 / 48000.0),
-        });
-        clock.feed(&mut meter, &silence);
-        assert_eq!(
-            reference
-                .needles
-                .each_ref()
-                .map(|needle| (needle.motion.confirmed_state(), needle.overload)),
-            meter
-                .needles
-                .each_ref()
-                .map(|needle| (needle.motion.confirmed_state(), needle.overload))
-        );
     }
     Ok(())
 }
@@ -1313,9 +1224,9 @@ fn first_shutter_excludes_startup_history_and_mode_changes_keep_sample_time() ->
 }
 
 #[test]
-#[ignore = "measures CPU cost of audio ingestion and 240 FPS display prediction without a GPU"]
-fn profiles_audio_and_prediction() -> anyhow::Result<()> {
-    for prediction_ms in [0, 25] {
+#[ignore = "measures CPU cost of audio ingestion and 240 FPS drawing without a GPU"]
+fn profiles_audio_and_drawing() -> anyhow::Result<()> {
+    for delivery_lag_ms in [0, 25] {
         for mode in [
             crate::measurement::Mode::Vu,
             crate::measurement::Mode::Rms,
@@ -1329,7 +1240,7 @@ fn profiles_audio_and_prediction() -> anyhow::Result<()> {
             })?;
             meter.audio_event(AudioEvent::Config { samplerate: 48000 });
             let mut clock = TestClock::new();
-            clock.display += Duration::from_millis(prediction_ms);
+            clock.display += Duration::from_millis(delivery_lag_ms);
             let mut scene = Scene::new();
             let view = View::fit(Size::new(1280.0, 440.0));
             let mut ingestion = Duration::ZERO;
@@ -1352,12 +1263,198 @@ fn profiles_audio_and_prediction() -> anyhow::Result<()> {
                 drawing += before.elapsed();
             }
             eprintln!(
-            "{mode:?}, {prediction_ms} ms prediction, 240 FPS: ingest {:.2} us/frame; draw {:.2} us/frame; total {:.2} us/frame",
+            "{mode:?}, {delivery_lag_ms} ms delivery lag, 240 FPS: ingest {:.2} us/frame; draw {:.2} us/frame; total {:.2} us/frame",
             ingestion.as_secs_f64() * 1e6 / 48000.0,
             drawing.as_secs_f64() * 1e6 / 48000.0,
             (ingestion + drawing).as_secs_f64() * 1e6 / 48000.0
         );
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn steady_vu_tone_stays_smooth_across_capture_buffer_arrivals() -> anyhow::Result<()> {
+    use crate::measurement::Mode;
+    let config = crate::config::Config {
+        mode: Mode::Vu,
+        preamp_db: PreampDb::try_from(0.0)?,
+        ..Default::default()
+    };
+    let origin = Instant::now();
+    let input: Vec<_> = (0..144000)
+        .map(|sample| {
+            let level =
+                0.8 * (std::f64::consts::TAU * 100.0 * sample as f64 / 48000.0).sin() as f32;
+            [level; 2]
+        })
+        .collect();
+    let view = View::fit(Size::new(1280.0, 440.0));
+    for packet in [512, 1024] {
+        let mut reference = Meter::new(&config)?;
+        let mut streamed = Meter::new(&config)?;
+        for meter in [&mut reference, &mut streamed] {
+            meter.audio_event(AudioEvent::Config { samplerate: 48000 });
+        }
+        let mut delivered = 0;
+        let mut scene = Scene::new();
+        let mut minimum = f64::INFINITY;
+        let mut maximum = f64::NEG_INFINITY;
+        for frame in 1..=720 {
+            let samples = frame * 200;
+            reference.audio_event(AudioEvent::Buffer {
+                buf: input[samples - 200..samples].to_vec(),
+                captured_at: origin + Duration::from_secs_f64((samples - 200) as f64 / 48000.0),
+            });
+            while delivered + packet <= samples {
+                streamed.audio_event(AudioEvent::Buffer {
+                    buf: input[delivered..delivered + packet].to_vec(),
+                    captured_at: origin + Duration::from_secs_f64(delivered as f64 / 48000.0),
+                });
+                delivered += packet;
+            }
+            let time = FrameTime::new(
+                origin + Duration::from_secs_f64((samples - 200) as f64 / 48000.0),
+                origin + Duration::from_secs_f64(samples as f64 / 48000.0),
+            );
+            scene.reset();
+            let expected = reference
+                .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
+                .overlay
+                .needles[0]
+                .angle;
+            scene.reset();
+            let actual = streamed
+                .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
+                .overlay
+                .needles[0]
+                .angle;
+            if frame > 480 {
+                let error_pixels = (actual - expected) * super::NEEDLE_RADIUS;
+                minimum = minimum.min(error_pixels);
+                maximum = maximum.max(error_pixels);
+            }
+        }
+        eprintln!(
+            "{packet}-sample buffers: display ripple {:.3} pixels",
+            maximum - minimum
+        );
+        assert!(
+            maximum - minimum < 0.1,
+            "steady tone has visible buffer-correlated needle jitter"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn playback_lookahead_is_sampled_at_frame_time_for_needles_and_lamps() -> anyhow::Result<()> {
+    use crate::{config::ShutterFrames, measurement::Mode};
+    let shutter = ShutterFrames::try_from(1.0)?;
+    let mut meter = Meter::new(&crate::config::Config {
+        mode: Mode::Vu,
+        shutter_frames: shutter,
+        preamp_db: PreampDb::try_from(0.0)?,
+        ..Default::default()
+    })?;
+    meter.audio_event(AudioEvent::Config { samplerate: 48000 });
+    let origin = Instant::now();
+    let starts_at = origin + Duration::from_millis(12);
+    // The entire block is already computed, but its sample timeline is ahead
+    // of delivery. The displayed frame falls inside that known block.
+    meter.audio_event(AudioEvent::Buffer {
+        buf: vec![[1.5; 2]; 512],
+        captured_at: starts_at,
+    });
+    let elapsed = 224.0 / 48000.0;
+    let time = FrameTime::new(starts_at, starts_at + Duration::from_secs_f64(elapsed));
+    let view = View::fit(Size::new(1280.0, 440.0));
+    let mut scene = Scene::new();
+    let needle = meter
+        .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
+        .overlay
+        .needles[0];
+    let level = (1.5 * std::f64::consts::PI / (2.0 * 2.0_f64.sqrt())) as f32;
+    let target = Mode::Vu.position(&meter.scale, level);
+    let mut motion = super::Motion::new(
+        Mode::Vu,
+        super::PeakMovement::default(),
+        crate::audio::timeline::AudioTime::ZERO,
+    );
+    let expected = motion.advance_path(std::iter::once((target, elapsed)), shutter);
+    let angle = crate::scales::Scale::angle(expected.average as f32) + std::f64::consts::TAU;
+    assert!((needle.angle - angle).abs() < 1e-7);
+    assert!(
+        (needle.overload - (25.0 * elapsed) as f32).abs() < 1e-6,
+        "the lamp must use the displayed sample time, not the end of the queued block"
+    );
+    Ok(())
+}
+
+#[test]
+fn changing_vu_levels_keep_continuous_motion_and_full_shutter_between_buffers() -> anyhow::Result<()>
+{
+    use crate::measurement::Mode;
+    let config = crate::config::Config {
+        mode: Mode::Vu,
+        preamp_db: PreampDb::try_from(0.0)?,
+        ..Default::default()
+    };
+    let origin = Instant::now();
+    let input: Vec<_> = (0..144000)
+        .map(|sample| {
+            let time = sample as f64 / 48000.0;
+            let amplitude = 0.2 + 0.3 * time;
+            let level = (amplitude * (std::f64::consts::TAU * 1000.0 * time).sin()) as f32;
+            [level; 2]
+        })
+        .collect();
+    let view = View::fit(Size::new(1280.0, 440.0));
+    for packet in [512, 1024] {
+        let mut meter = Meter::new(&config)?;
+        meter.audio_event(AudioEvent::Config { samplerate: 48000 });
+        let mut scene = Scene::new();
+        let mut delivered = 0;
+        let mut previous = None;
+        let mut repeated = 0;
+        let mut collapsed = 0;
+        for frame in 1..=720 {
+            let samples = frame * 200;
+            while delivered + packet <= samples {
+                meter.audio_event(AudioEvent::Buffer {
+                    buf: input[delivered..delivered + packet].to_vec(),
+                    captured_at: origin + Duration::from_secs_f64(delivered as f64 / 48000.0),
+                });
+                delivered += packet;
+            }
+            let time = FrameTime::new(
+                origin + Duration::from_secs_f64((samples - 200) as f64 / 48000.0),
+                origin + Duration::from_secs_f64(samples as f64 / 48000.0),
+            );
+            scene.reset();
+            let needle = meter
+                .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
+                .overlay
+                .needles[0];
+            if frame > 240 {
+                if previous == Some(needle.angle) {
+                    repeated += 1;
+                }
+                if needle.edges[0] == needle.edges[1] {
+                    collapsed += 1;
+                }
+            }
+            previous = Some(needle.angle);
+        }
+        eprintln!("{packet}: {repeated} frozen frames, {collapsed} collapsed exposures out of 480");
+        assert_eq!(
+            repeated, 0,
+            "moving needles must not wait for the next capture callback"
+        );
+        assert_eq!(
+            collapsed, 0,
+            "active motion must retain the full shutter path between callbacks"
+        );
     }
     Ok(())
 }

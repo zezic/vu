@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use strum::VariantArray;
 use vello::{
@@ -8,7 +8,7 @@ use vello::{
 };
 
 use crate::{
-    audio::timeline::{AudioInterval, AudioTime},
+    audio::timeline::{AudioClock, AudioInterval, AudioTime},
     config::{Config, PreampDb, ShutterFrames},
     frame_schedule::{FrameRateLimit, FrameTime},
     measurement::Mode,
@@ -114,13 +114,167 @@ impl View {
     }
 }
 
-fn lamp_at(strength: f32, level: f32, seconds: f64) -> f32 {
-    let speed = if level >= 1.0 { 25.0 } else { -5.0 };
-    (strength + seconds as f32 * speed).clamp(0.0, 1.0)
+const HISTORY_SECONDS: f64 = 2.0;
+
+/// Continuous presentation of recorded audio. Buffering starts only when the
+/// source timestamps cannot supply the requested frame; ready future data is
+/// sampled directly. A buffered cursor keeps one capture block in reserve.
+#[derive(Default)]
+enum AudioReadCursor {
+    #[default]
+    Uninitialized,
+    FollowingSource,
+    Buffered(AudioClock),
+    Waiting(AudioTime),
+}
+
+impl AudioReadCursor {
+    fn frame(
+        &mut self,
+        time: FrameTime,
+        requested: AudioInterval,
+        available: AudioInterval,
+    ) -> AudioInterval {
+        match *self {
+            Self::Uninitialized if available.end() == AudioTime::ZERO => {
+                AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO)
+            }
+            Self::Uninitialized if requested.end() <= available.end() => {
+                *self = Self::FollowingSource;
+                requested
+            }
+            Self::Uninitialized => {
+                let clock = AudioClock {
+                    position: available.start(),
+                    at: time.end(),
+                };
+                *self = Self::Buffered(clock);
+                AudioInterval::new(clock.position_at(time.start()), clock.position)
+            }
+            Self::FollowingSource if requested.end() <= available.end() => requested,
+            Self::FollowingSource => {
+                *self = Self::Waiting(available.end());
+                AudioInterval::new(available.end(), available.end())
+            }
+            Self::Buffered(mut clock) => {
+                let end = clock.position_at(time.end());
+                if end > available.end() {
+                    *self = Self::Waiting(available.end());
+                    return AudioInterval::new(available.end(), available.end());
+                }
+                // Keep capture/host clock drift or a stalled UI from growing
+                // into a replay backlog. Rejoin the newest buffered block.
+                if available.start() > end
+                    && available.start().seconds_since(end)
+                        > available.seconds() + f64::from(time.seconds())
+                {
+                    clock = AudioClock {
+                        position: available.start(),
+                        at: time.end(),
+                    };
+                    *self = Self::Buffered(clock);
+                }
+                AudioInterval::new(
+                    clock.position_at(time.start()),
+                    clock.position_at(time.end()),
+                )
+            }
+            Self::Waiting(at) if available.end() <= at => AudioInterval::new(at, at),
+            Self::Waiting(at) => {
+                let position = available.start().max(at);
+                *self = Self::Buffered(AudioClock {
+                    position,
+                    at: time.end(),
+                });
+                AudioInterval::new(position, position)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LampDrive {
+    Charging,
+    Releasing,
+}
+
+impl LampDrive {
+    fn speed(self) -> f32 {
+        match self {
+            Self::Charging => 25.0,
+            Self::Releasing => -5.0,
+        }
+    }
+}
+
+struct LampSegment {
+    interval: AudioInterval,
+    strength: f32,
+    drive: LampDrive,
+}
+
+impl LampSegment {
+    fn value_at(&self, at: AudioTime) -> f32 {
+        let seconds = at
+            .min(self.interval.end())
+            .seconds_since(self.interval.start());
+        (self.strength + seconds as f32 * self.drive.speed()).clamp(0.0, 1.0)
+    }
+}
+
+struct Lamp {
+    strength: f32,
+    at: AudioTime,
+    history: VecDeque<LampSegment>,
+}
+
+impl Lamp {
+    fn new(at: AudioTime) -> Self {
+        Self {
+            strength: 0.0,
+            at,
+            history: VecDeque::with_capacity(2048),
+        }
+    }
+
+    fn consume(&mut self, level: f32, interval: AudioInterval) {
+        assert_eq!(self.at, interval.start(), "lamp drives must be contiguous");
+        let segment = LampSegment {
+            interval,
+            strength: self.strength,
+            drive: if level >= 1.0 {
+                LampDrive::Charging
+            } else {
+                LampDrive::Releasing
+            },
+        };
+        self.at = interval.end();
+        self.strength = segment.value_at(self.at);
+        self.history.push_back(segment);
+        let oldest = self.at.shifted(-HISTORY_SECONDS);
+        while self
+            .history
+            .front()
+            .is_some_and(|segment| segment.interval.end() <= oldest)
+        {
+            self.history.pop_front();
+        }
+    }
+
+    fn value_at(&self, at: AudioTime) -> f32 {
+        if at >= self.at {
+            return self.strength;
+        }
+        self.history
+            .iter()
+            .rev()
+            .find(|segment| segment.interval.start() <= at)
+            .map_or(0.0, |segment| segment.value_at(at))
+    }
 }
 
 struct Needle {
-    overload: f32,
+    overload: Lamp,
     motion: Motion,
 }
 
@@ -394,9 +548,14 @@ mod tests;
 impl Needle {
     fn new(mode: Mode, peak_movement: PeakMovement, at: AudioTime) -> Self {
         Self {
-            overload: 0.0,
+            overload: Lamp::new(at),
             motion: Motion::new(mode, peak_movement, at),
         }
+    }
+
+    fn consume(&mut self, mode: Mode, scale: &Scale, level: f32, interval: AudioInterval) {
+        self.motion.consume(mode.position(scale, level), interval);
+        self.overload.consume(level, interval);
     }
 }
 
@@ -415,6 +574,7 @@ pub struct Meter {
     shutter_readout: Readout,
     shutter_value: Text,
     processor: Processor,
+    audio_cursor: AudioReadCursor,
     pub scale: Scale,
     marks: Vec<Mark>,
     fonts: Fonts,
@@ -475,6 +635,7 @@ impl Meter {
             shutter_readout,
             shutter_value,
             processor,
+            audio_cursor: AudioReadCursor::default(),
             scale,
             marks,
             fonts,
@@ -497,6 +658,7 @@ impl Meter {
         match event {
             AudioEvent::Config { samplerate } => {
                 self.processor.set_samplerate(samplerate);
+                self.audio_cursor = AudioReadCursor::default();
                 self.needles = std::array::from_fn(|_| {
                     Needle::new(self.mode, self.peak_movement, AudioTime::ZERO)
                 });
@@ -504,14 +666,11 @@ impl Meter {
             AudioEvent::Buffer { buf, captured_at } => {
                 for drive in self.processor.consume_buf(&buf, captured_at) {
                     for (channel, needle) in self.needles.iter_mut().enumerate() {
-                        needle.motion.consume(
-                            self.mode.position(&self.scale, drive.levels[channel]),
-                            drive.interval,
-                        );
-                        needle.overload = lamp_at(
-                            needle.overload,
+                        needle.consume(
+                            self.mode,
+                            &self.scale,
                             drive.levels[channel],
-                            drive.interval.seconds(),
+                            drive.interval,
                         );
                     }
                 }
@@ -691,7 +850,7 @@ impl Meter {
             readout.advance(&mut self.fonts, &self.scale, adjusting, dt);
             readout.draw(scene, view, &self.theme.colors);
         }
-        let frame = AudioInterval::new(
+        let requested = AudioInterval::new(
             self.processor
                 .position_at(frame_time.start())
                 .unwrap_or(AudioTime::ZERO),
@@ -699,35 +858,16 @@ impl Meter {
                 .position_at(frame_time.end())
                 .unwrap_or(AudioTime::ZERO),
         );
-        let partial = self.processor.partial_drive();
-        let levels = self.processor.latest_levels();
-        let confirmed = partial.map_or(self.processor.audio_time(), |drive| drive.interval.start());
+        let frame =
+            self.audio_cursor
+                .frame(frame_time, requested, self.processor.available_interval());
         let pivots = view.layout.pivots();
         let needles = std::array::from_fn(|channel| {
             let needle = &mut self.needles[channel];
             let pivot = pivots[channel];
             let meter = view.transform * Affine::translate(pivot.to_vec2());
-            let mut strength = needle.overload;
-            let mut at = confirmed;
-            if let Some(drive) = partial {
-                let end = drive.interval.end().min(frame.end()).max(at);
-                strength = lamp_at(strength, drive.levels[channel], end.seconds_since(at));
-                at = end;
-            }
-            if frame.end() > at {
-                strength = lamp_at(strength, levels[channel], frame.end().seconds_since(at));
-            }
-            let exposure = needle.motion.expose(
-                frame,
-                self.shutter_frames,
-                partial.map(|drive| {
-                    (
-                        self.mode.position(&self.scale, drive.levels[channel]),
-                        drive.interval,
-                    )
-                }),
-                self.mode.position(&self.scale, levels[channel]),
-            );
+            let strength = needle.overload.value_at(frame.end());
+            let exposure = needle.motion.expose(frame, self.shutter_frames);
             // Keep angular gradients within one positive turn.
             let angle = Scale::angle(exposure.average as f32) + std::f64::consts::TAU;
             let bounds = [exposure.minimum, exposure.maximum]
