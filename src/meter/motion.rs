@@ -7,7 +7,7 @@ use crate::scales::{Scale, MAX_ANGLE};
 
 const RESPONSE: f64 = TAU * 4.0;
 const IMPACT_SPEED: f64 = 0.8;
-const BENDING_RESISTANCE: f64 = 400.0;
+const BENDING_RESISTANCE: f64 = 600.0;
 const MAX_BEND: f64 = 1.3;
 pub(super) const HINGE_RADIUS: f64 = NEEDLE_RADIUS * 2.0 / 3.0;
 pub(super) const STOP_RADIUS: f64 = 2.5;
