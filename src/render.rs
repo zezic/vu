@@ -10,19 +10,27 @@ use vello::{
 use winit::{dpi::PhysicalSize, event_loop::ActiveEventLoop, window::Window};
 
 pub const BACKGROUND: Color = Color::from_rgb8(40, 36, 36);
+pub const ANTIALIASING: AaConfig = AaConfig::Msaa16;
 
 pub enum Presentation {
     Presented,
     Unavailable,
 }
 
-/// Identifies which retained layers need rerendering for this frame.
+/// Completed stages of a presentation, including stages that reuse cached work.
+pub enum Stage {
+    Acquire,
+    Rasterize,
+    Submit,
+}
+
+/// Identifies which retained scene layers need rasterization.
 pub enum Frame<'a> {
     /// The background and foreground have changed.
     Rebuilt(&'a Scene),
     /// Only the foreground has changed.
     Retained(&'a Scene),
-    /// Both layers can reuse the last drawable.
+    /// Both scene layers can reuse the cached raster.
     Unchanged(&'a Scene),
 }
 
@@ -117,13 +125,21 @@ pub fn renderer(device: &wgpu::Device) -> anyhow::Result<Renderer> {
     Ok(Renderer::new(
         device,
         RendererOptions {
-            antialiasing_support: [AaConfig::Msaa16].into_iter().collect(),
+            antialiasing_support: [ANTIALIASING].into_iter().collect(),
             ..Default::default()
         },
     )?)
 }
 
 impl RenderWindow {
+    pub fn device(&self) -> &DeviceHandle {
+        &self.context.devices[self.surface.dev_id]
+    }
+
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.surface.format
+    }
+
     /// The current drawable extent, retaining the last size while minimized.
     pub fn viewport(&self) -> Size {
         Size::new(
@@ -132,7 +148,10 @@ impl RenderWindow {
         )
     }
 
-    pub fn new(event_loop: &ActiveEventLoop) -> anyhow::Result<Self> {
+    pub fn new(
+        event_loop: &ActiveEventLoop,
+        preferences: wgpu::DeviceDescriptor<'_>,
+    ) -> anyhow::Result<Self> {
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
@@ -142,9 +161,11 @@ impl RenderWindow {
         );
         let size = window.inner_size();
         let mut context = RenderContext::new();
+        let surface = context.instance.create_surface(window.clone())?;
+        pollster::block_on(prepare_device(&mut context, Some(&surface), preferences))?;
         // Owning the Arc in the surface gives it a safe 'static lifetime.
-        let surface = pollster::block_on(context.create_surface(
-            window.clone(),
+        let surface = pollster::block_on(context.create_render_surface(
+            surface,
             size.width.max(1),
             size.height.max(1),
             wgpu::PresentMode::AutoVsync,
@@ -171,7 +192,17 @@ impl RenderWindow {
         }
     }
 
-    pub fn present(&mut self, background: Frame<'_>) -> anyhow::Result<Presentation> {
+    pub fn present(
+        &mut self,
+        background: Frame<'_>,
+        mut completed: impl FnMut(Stage),
+        paint: impl FnOnce(
+            &DeviceHandle,
+            &mut wgpu::CommandEncoder,
+            &wgpu::TextureView,
+            &wgpu::TextureView,
+        ),
+    ) -> anyhow::Result<Presentation> {
         use wgpu::CurrentSurfaceTexture;
         if !matches!(background, Frame::Unchanged(_)) {
             self.target = TargetState::Dirty;
@@ -199,12 +230,13 @@ impl RenderWindow {
                 bail!("Failed to acquire the Vello surface: {state:?}")
             }
         };
+        completed(Stage::Acquire);
         let device = &self.context.devices[self.surface.dev_id];
         let params = RenderParams {
             base_color: BACKGROUND,
             width: self.surface.config.width,
             height: self.surface.config.height,
-            antialiasing_method: AaConfig::Msaa16,
+            antialiasing_method: ANTIALIASING,
         };
         if matches!(self.target, TargetState::Dirty) {
             let scene = self.background.compose(
@@ -223,24 +255,62 @@ impl RenderWindow {
             )?;
             self.target = TargetState::Ready;
         }
+        completed(Stage::Rasterize);
         let view = texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = device
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        self.surface.blitter.copy(
-            &device.device,
-            &mut encoder,
-            &self.surface.target_view,
-            &view,
-        );
+        paint(device, &mut encoder, &self.surface.target_view, &view);
         device.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         device.queue.present(texture);
         if reconfigure {
             self.context.configure_surface(&self.surface);
         }
+        completed(Stage::Submit);
         Ok(Presentation::Presented)
     }
+}
+
+/// Negotiate optional capabilities before the context allocates render resources.
+pub async fn prepare_device(
+    context: &mut RenderContext,
+    surface: Option<&wgpu::Surface<'_>>,
+    mut preferences: wgpu::DeviceDescriptor<'_>,
+) -> anyhow::Result<usize> {
+    assert!(
+        context.devices.is_empty(),
+        "device preferences must precede render resources"
+    );
+    let id = context
+        .device(surface)
+        .await
+        .context("No compatible graphics device")?;
+    let handle = &mut context.devices[id];
+    if handle
+        .device
+        .features()
+        .contains(preferences.required_features)
+        && preferences
+            .required_limits
+            .check_limits(&handle.device.limits())
+    {
+        return Ok(id);
+    }
+    if handle
+        .adapter()
+        .features()
+        .contains(preferences.required_features)
+        && preferences
+            .required_limits
+            .check_limits(&handle.adapter().limits())
+    {
+        preferences.required_features |= handle.device.features();
+        let (device, queue) = handle.adapter().request_device(&preferences).await?;
+        handle.device = device;
+        handle.queue = queue;
+    }
+    Ok(id)
 }

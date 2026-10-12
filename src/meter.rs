@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use instant::Instant;
 use strum::VariantArray;
 use vello::{
-    kurbo::{Affine, Circle, Line, Point, Size, Stroke, Triangle},
-    peniko::{Color, Compose, Fill, Gradient},
+    kurbo::{Affine, Circle, Point, Size},
+    peniko::{Color, Fill},
     Scene,
 };
 
@@ -24,9 +24,14 @@ const CENTER_Y: f64 = 207.0;
 const NEEDLE_RADIUS: f64 = 174.0;
 const NEEDLE_WIDTH: f64 = 1.0;
 const NEEDLE_INK: Color = Color::from_rgb8(255, 200, 160);
+const LAMP_CENTER: Point = Point::new(0.0, CENTER_Y * -0.4);
+const LAMP_RADIUS: f64 = 5.0;
+const GLOW_RADIUS: f64 = 40.0;
 
 mod motion;
 use motion::Motion;
+mod renderer;
+pub use renderer::Renderer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layout {
@@ -183,10 +188,32 @@ struct FaceSettings {
 }
 
 #[derive(Clone, Copy)]
-struct NeedleAppearance {
-    tip: Point,
-    smear: [Point; 2],
+pub(crate) struct NeedleAppearance {
+    transform: Affine,
+    angle: f64,
+    edges: [f64; 2],
+    peak: f32,
+    blur: f32,
     overload: f32,
+}
+
+impl NeedleAppearance {
+    fn tip(angle: f64) -> Point {
+        Point::new(NEEDLE_RADIUS * angle.cos(), NEEDLE_RADIUS * angle.sin())
+    }
+
+    fn screen_tip(&self) -> Point {
+        self.transform * Self::tip(self.angle)
+    }
+
+    fn screen_edges(&self) -> [Point; 2] {
+        self.edges.map(|edge| self.transform * Self::tip(edge))
+    }
+}
+
+pub struct MeterFrame<'a> {
+    pub background: Frame<'a>,
+    pub needles: &'a [NeedleAppearance; 2],
 }
 
 struct Appearance {
@@ -196,22 +223,20 @@ struct Appearance {
 }
 
 impl Appearance {
-    /// Compare with the last frame selected for rasterization so small movements accumulate.
-    fn differs(&self, previous: &Self) -> bool {
+    /// Compare with the retained pose so small movements accumulate.
+    fn needles_differ(&self, previous: &Self) -> bool {
         self.needles
             .iter()
             .zip(&previous.needles)
             .any(|(current, previous)| {
-                current.tip.distance(previous.tip) >= 0.2
+                current.screen_tip().distance(previous.screen_tip()) >= 0.2
                     || current
-                        .smear
+                        .screen_edges()
                         .iter()
-                        .zip(previous.smear)
+                        .zip(previous.screen_edges())
                         .any(|(current, previous)| current.distance(previous) >= 0.2)
                     || (current.overload - previous.overload).abs() >= 1.0 / 1024.0
             })
-            || (self.range_opacity - previous.range_opacity).abs() >= 1.0 / 255.0
-            || (self.bend_opacity - previous.bend_opacity).abs() >= 1.0 / 255.0
     }
 }
 
@@ -361,7 +386,7 @@ impl Meter {
                 meter,
                 Color::new([0.0, 0.0, 0.0, 0.25]),
                 None,
-                &Circle::new((0.0, CENTER_Y * -0.4), 7.0),
+                &Circle::new(LAMP_CENTER, 7.0),
             );
         }
     }
@@ -373,7 +398,7 @@ impl Meter {
         limit: FrameRateLimit,
         adjusting: Option<ScaleSetting>,
         dt: f32,
-    ) -> Frame<'_> {
+    ) -> MeterFrame<'_> {
         let settings = FaceSettings {
             view: *view,
             scale: self.scale,
@@ -397,39 +422,13 @@ impl Meter {
             let meter = view.transform * Affine::translate(pivot.to_vec2());
             let speed = if level >= 1.0 { 25.0 } else { -5.0 };
             needle.overload = (needle.overload + dt * speed).clamp(0.0, 1.0);
-            let light = Point::new(0.0, CENTER_Y * -0.4);
             let strength = needle.overload;
-            if strength > 0.0 {
-                let glow = Gradient::new_two_point_radial(light, 5.0, light, 40.0).with_stops([
-                    Color::new([
-                        1.0,
-                        strength.powi(2) * 0.2,
-                        strength.powi(4) * 0.1,
-                        strength.powi(2) * 0.2,
-                    ]),
-                    Color::new([1.0, 0.0, 0.0, 0.0]),
-                ]);
-                scene.fill(Fill::NonZero, meter, &glow, None, &Circle::new(light, 40.0));
-                scene.fill(
-                    Fill::NonZero,
-                    meter,
-                    Color::new([
-                        1.0,
-                        strength.powi(2) * 0.9,
-                        strength.powi(4) * 0.8,
-                        strength,
-                    ]),
-                    None,
-                    &Circle::new(light, 5.0),
-                );
-            }
 
             let exposure = needle.motion.advance(self.scale.position(level), dt);
-            // Vello evaluates sweep angles in [0, TAU); the gauge stays within one turn.
+            // Keep angular gradients within one positive turn.
             let angle = Scale::angle(exposure.average as f32) + std::f64::consts::TAU;
             let bounds = [exposure.minimum, exposure.maximum]
                 .map(|position| Scale::angle(position as f32) + std::f64::consts::TAU);
-            let tip = Point::new(NEEDLE_RADIUS * angle.cos(), NEEDLE_RADIUS * angle.sin());
             let travel = (bounds[1] - bounds[0]) * NEEDLE_RADIUS;
             // Normalize the triangular opacity profile by the tip's swept distance.
             let peak = (2.0 * NEEDLE_WIDTH / travel.max(2.0 * NEEDLE_WIDTH)) as f32;
@@ -438,46 +437,12 @@ impl Meter {
             let transition = ((travel * scale / (NEEDLE_WIDTH * scale).max(1.0) - 1.0) / 2.0)
                 .clamp(0.0, 1.0) as f32;
             let blur = transition * transition * (3.0 - 2.0 * transition);
-            let clip = Circle::new(Point::ORIGIN, NEEDLE_RADIUS + NEEDLE_WIDTH);
-            if peak < 1.0 {
-                scene.push_layer(Fill::NonZero, Compose::SrcOver, 1.0, meter, &clip);
-            }
-            // Merge the physical stroke with the wings before applying their shared opacity.
-            scene.stroke(
-                &Stroke::new(NEEDLE_WIDTH),
-                meter,
-                NEEDLE_INK,
-                None,
-                &Line::new(Point::ORIGIN, tip),
-            );
-            let smear = bounds.map(|edge| {
-                let edge_tip = Point::new(NEEDLE_RADIUS * edge.cos(), NEEDLE_RADIUS * edge.sin());
-                if blur > 0.0 && (edge - angle).abs() * NEEDLE_RADIUS * scale > 0.5 {
-                    let triangle = Triangle::new(Point::ORIGIN, tip, edge_tip);
-                    let gradient = Gradient::new_sweep(Point::ORIGIN, angle as f32, edge as f32)
-                        .with_stops([NEEDLE_INK.with_alpha(blur), NEEDLE_INK.with_alpha(0.0)]);
-                    scene.fill(Fill::NonZero, meter, &gradient, None, &triangle);
-                }
-                meter * edge_tip
-            });
-            if peak < 1.0 {
-                let core = peak.sqrt();
-                let white = Color::from_rgb8(255, 255, 255);
-                let opacity = |coverage| white.with_alpha(1.0 - blur + blur * coverage);
-                let mask = Gradient::new_radial(Point::ORIGIN, NEEDLE_RADIUS as f32).with_stops([
-                    (0.0, white),
-                    (peak, white),
-                    (core, opacity(core)),
-                    (1.0, opacity(peak)),
-                ]);
-                scene.push_layer(Fill::NonZero, Compose::DestIn, 1.0, meter, &clip);
-                scene.fill(Fill::NonZero, meter, &mask, None, &clip);
-                scene.pop_layer();
-                scene.pop_layer();
-            }
             NeedleAppearance {
-                tip: meter * tip,
-                smear,
+                transform: meter,
+                angle,
+                edges: bounds,
+                peak,
+                blur,
                 overload: strength,
             }
         });
@@ -486,20 +451,33 @@ impl Meter {
             range_opacity: self.range_readout.opacity,
             bend_opacity: self.bend_readout.opacity,
         };
-        let changed = rebuild
+        let background_changed = rebuild
+            || self.appearance.as_ref().is_none_or(|previous| {
+                appearance.range_opacity != previous.range_opacity
+                    || appearance.bend_opacity != previous.bend_opacity
+            });
+        let changed = background_changed
             || self
                 .appearance
                 .as_ref()
-                .is_none_or(|previous| appearance.differs(previous));
+                .is_none_or(|previous| appearance.needles_differ(previous));
         if changed {
             self.appearance = Some(appearance);
         }
-        if rebuild {
+        let background = if rebuild {
             Frame::Rebuilt(&self.face)
-        } else if changed {
+        } else if background_changed {
             Frame::Retained(&self.face)
         } else {
             Frame::Unchanged(&self.face)
+        };
+        MeterFrame {
+            background,
+            needles: &self
+                .appearance
+                .as_ref()
+                .expect("the first frame prepares the needles")
+                .needles,
         }
     }
 }

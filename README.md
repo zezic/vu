@@ -60,12 +60,56 @@ two channels as left and right.
 
 Run the signal conversion and meter tests with `cargo test`.
 
-Run the headless Vello rendering test with
+Run the headless meter rendering test with
 `cargo test renders_stereo_scales_text_needles_and_overload -- --ignored`.
 It uses synthetic levels and does not initialize audio capture. Set
 `VU_RENDER_PREVIEW_PATH` to a PNG path to save the horizontal frame and a
 `.vertical.png` companion for the stacked layout.
 
-Gauge faces and their text are rasterized once and retained on the GPU until the
-view or a displayed setting changes. Frames without a visible change reuse the
-last drawable while continuing motion updates and synchronized presentation.
+Gauge faces and text are rasterized by Vello and retained on the GPU until the
+view, a displayed setting, or a fading readout changes. A single GPU render pass
+combines that cached image with the moving needles, motion blur, and overload
+lamps. Needle parameters use inline GPU constants when supported and a retained
+uniform buffer otherwise. Motion updates and presentation keep the selected cadence.
+
+## Profiling
+
+Build with `cargo build --release`, then run `target/release/vu --profile`.
+This opens the normal window at a 240 FPS limit with synthetic stereo audio and
+zero preamp. It warms up for one second, measures for ten seconds, and exits.
+The summary reports the GPU and pixel extent, achieved FPS, base rasterizations,
+scene construction time, and presentation time split into drawable acquisition,
+rasterization, and submission. These are wall-clock timings; acquisition can wait for display
+synchronization. A second line reports actual process and main-thread CPU usage,
+excluding warmup. Here 100% means one fully busy core, and process usage includes
+all of VU's threads. Resize the window during warmup to compare sizes;
+keep it visible throughout measurement. The run skips audio capture and leaves
+saved settings untouched.
+
+Base rasterizations count Vello work for the retained scales and labels. Zero
+during steady needle motion is expected: the overlay still renders every frame.
+The `rasterize` stage measures that base work; `submit` includes the combined
+GPU pass and presentation submission.
+
+On macOS, measure process CPU time with
+`/usr/bin/time -lp target/release/vu --profile`. Divide `user + sys` by `real`
+and multiply by 100 for average CPU usage, where 100% means one fully busy core.
+This external average includes startup and warmup. For a stack sample:
+
+```sh
+target/release/vu --profile &
+vu_pid=$!
+sample "$vu_pid" 8 1 -file /tmp/vu.sample.txt
+wait "$vu_pid"
+```
+
+To isolate rendering from the window and presentation loop, run
+`cargo test --release profiles_moving_needles_at_240_fps -- --ignored --nocapture`.
+It drives the meter's audio processor, motion, retained background, and GPU
+overlay for 1,200 measured frames after warmup. Set `VU_PROFILE_MAX_RENDER_US`
+to a positive per-frame microsecond budget to make it fail when rendering
+exceeds that budget. Use release builds and compare runs on the same GPU.
+
+The ignored `overlay_matches_vector_stroke_sweep_mask_and_overload` test compares
+the overlay against vector rendering at rest, during rapid motion, in both layouts,
+and after zooming, including subpixel strokes and overload gradients.

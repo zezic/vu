@@ -24,6 +24,7 @@ mod config;
 mod frame_schedule;
 mod meter;
 mod processor;
+mod profile;
 mod render;
 mod saved;
 mod scales;
@@ -36,11 +37,27 @@ enum AudioEvent {
 
 enum WindowState {
     Suspended,
-    Active {
-        render: Box<RenderWindow>,
-        view: View,
-    },
+    Active(Box<ActiveWindow>),
     Failed(anyhow::Error),
+}
+
+struct ActiveWindow {
+    render: RenderWindow,
+    view: View,
+    meter_renderer: meter::Renderer,
+}
+
+impl ActiveWindow {
+    fn new(event_loop: &ActiveEventLoop) -> anyhow::Result<Self> {
+        let render = RenderWindow::new(event_loop, meter::Renderer::device_preferences())?;
+        let view = View::fit(render.viewport());
+        let meter_renderer = meter::Renderer::new(&render.device().device, render.format());
+        Ok(Self {
+            render,
+            view,
+            meter_renderer,
+        })
+    }
 }
 
 enum DragState {
@@ -85,9 +102,18 @@ struct App {
     last_click: Option<Click>,
     frames: FrameSchedule,
     previous_frame: Instant,
+    profile: Option<profile::Run>,
 }
 
 impl App {
+    fn frame_rate_limit(&self) -> frame_schedule::FrameRateLimit {
+        self.profile
+            .as_ref()
+            .map_or(self.settings.frame_rate_limit, |_| {
+                frame_schedule::FrameRateLimit::Fps240
+            })
+    }
+
     fn adjust_setting(&mut self, setting: Setting, adjustment: Adjustment) {
         let settings = self.settings.edit();
         match setting {
@@ -103,9 +129,23 @@ impl App {
     }
 
     fn window_event(&mut self, event: WindowEvent) -> anyhow::Result<()> {
-        let WindowState::Active { render, view } = &mut self.state else {
+        let limit = self.frame_rate_limit();
+        let WindowState::Active(window) = &mut self.state else {
             return Ok(());
         };
+        let ActiveWindow {
+            render,
+            view,
+            meter_renderer,
+        } = &mut **window;
+        if self.profile.is_some()
+            && !matches!(
+                event,
+                WindowEvent::Resized(_) | WindowEvent::Occluded(_) | WindowEvent::RedrawRequested
+            )
+        {
+            return Ok(());
+        }
         match event {
             WindowEvent::Resized(size) => {
                 render.resize(size);
@@ -219,15 +259,38 @@ impl App {
                 let now = Instant::now();
                 let dt = (now - self.previous_frame).as_secs_f32();
                 self.previous_frame = now;
+                if let Some(profile) = &mut self.profile {
+                    profile.feed(&mut self.meter, now)?;
+                }
+                let before_draw = Instant::now();
                 render.scene.reset();
-                let background = self.meter.draw(
-                    &mut render.scene,
-                    view,
-                    self.settings.frame_rate_limit,
-                    self.drag.setting(),
-                    dt,
-                );
-                if matches!(render.present(background)?, Presentation::Unavailable) {
+                let frame =
+                    self.meter
+                        .draw(&mut render.scene, view, limit, self.drag.setting(), dt);
+                let after_draw = Instant::now();
+                let changed = !matches!(frame.background, render::Frame::Unchanged(_));
+                let viewport = render.viewport();
+                let overlay = |device: &vello::util::DeviceHandle,
+                               encoder: &mut vello::wgpu::CommandEncoder,
+                               background: &vello::wgpu::TextureView,
+                               target: &vello::wgpu::TextureView| {
+                    meter_renderer.draw(
+                        device,
+                        encoder,
+                        background,
+                        target,
+                        viewport,
+                        frame.needles,
+                    );
+                };
+                let presentation = if let Some(profile) = &mut self.profile {
+                    profile.present(before_draw, after_draw, changed, |completed| {
+                        render.present(frame.background, completed, overlay)
+                    })?
+                } else {
+                    render.present(frame.background, |_| {}, overlay)?
+                };
+                if matches!(presentation, Presentation::Unavailable) {
                     self.frames.surface_unavailable(Instant::now());
                 }
             }
@@ -248,18 +311,15 @@ impl ApplicationHandler for App {
         if !matches!(self.state, WindowState::Suspended) {
             return;
         }
-        self.state = match RenderWindow::new(event_loop) {
-            Ok(render) => {
-                let view = View::fit(render.viewport());
+        self.state = match ActiveWindow::new(event_loop) {
+            Ok(window) => {
                 let now = Instant::now();
-                self.frames.resized(render.window.inner_size().into(), now);
+                self.frames
+                    .resized(window.render.window.inner_size().into(), now);
                 self.frames.occlusion_changed(Occlusion::Visible, now);
                 self.drag = DragState::Idle;
                 self.last_click = None;
-                WindowState::Active {
-                    render: Box::new(render),
-                    view,
-                }
+                WindowState::Active(Box::new(window))
             }
             Err(error) => {
                 event_loop.exit();
@@ -270,7 +330,7 @@ impl ApplicationHandler for App {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        if matches!(self.state, WindowState::Active { .. }) {
+        if matches!(self.state, WindowState::Active(_)) {
             self.state = WindowState::Suspended;
             self.frames.resized(SurfaceArea::Empty, Instant::now());
         }
@@ -303,6 +363,14 @@ impl ApplicationHandler for App {
             self.meter.audio_event(event);
         }
         let now = Instant::now();
+        if self
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.finished(now))
+        {
+            event_loop.exit();
+            return;
+        }
         if let Err(error) = self.settings.flush_if_due(now) {
             log::error!("{error:#}");
         }
@@ -310,19 +378,19 @@ impl ApplicationHandler for App {
             match self.frames.kind(now) {
                 FrameKind::Visible => {
                     self.frames
-                        .request_visible_frame(now, self.settings.frame_rate_limit);
-                    let WindowState::Active { render, .. } = &self.state else {
+                        .request_visible_frame(now, self.frame_rate_limit());
+                    let WindowState::Active(window) = &self.state else {
                         unreachable!("a drawable surface owns its window")
                     };
-                    render.window.request_redraw();
+                    window.render.window.request_redraw();
                 }
                 FrameKind::Background => self.frames.background_tick_finished(now),
             }
         } else if self.frames.redraw_is_pending() && self.frames.kind(now) == FrameKind::Visible {
-            let WindowState::Active { render, .. } = &self.state else {
+            let WindowState::Active(window) = &self.state else {
                 unreachable!("a pending redraw owns its window")
             };
-            render.window.request_redraw();
+            window.render.window.request_redraw();
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.frames.deadline(now)));
     }
@@ -330,10 +398,19 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     pretty_env_logger::init();
+    let profile = profile::Run::from_args()?;
     let settings = Saved::<Config>::load(config::config_file()?)?;
-    let meter = Meter::new(settings.preamp_db)?;
+    let mut meter = Meter::new(settings.preamp_db)?;
     let (tx, rx) = std::sync::mpsc::channel();
-    let _stream = capture_stream(tx)?;
+    let _stream = if profile.is_some() {
+        meter.set_preamp(config::PreampDb::try_from(0.0)?);
+        meter.audio_event(AudioEvent::Config {
+            samplerate: profile::SAMPLE_RATE,
+        });
+        None
+    } else {
+        Some(capture_stream(tx)?)
+    };
     let event_loop = EventLoop::new()?;
     let mut app = App {
         state: WindowState::Suspended,
@@ -345,14 +422,26 @@ fn main() -> anyhow::Result<()> {
         last_click: None,
         frames: FrameSchedule::new(Instant::now()),
         previous_frame: Instant::now(),
+        profile,
     };
     let result = event_loop.run_app(&mut app);
     app.settings.flush()?;
     result?;
-    match app.state {
-        WindowState::Failed(error) => Err(error),
-        _ => Ok(()),
+    if let WindowState::Failed(error) = app.state {
+        return Err(error);
     }
+    if let Some(profile) = &app.profile {
+        if let WindowState::Active(window) = &app.state {
+            let info = window.render.device().adapter().get_info();
+            let size = window.render.viewport();
+            eprintln!(
+                "Target: {}x{} pixels; {} ({:?})",
+                size.width, size.height, info.name, info.backend
+            );
+        }
+        profile.report()?;
+    }
+    Ok(())
 }
 
 pub fn db_to_multiplier(db: f32) -> f32 {

@@ -71,7 +71,7 @@ impl FrameRateLimit {
                 .copied()
                 .skip_while(|limit| *limit != self)
                 .nth(1)
-                .unwrap_or(Self::Fps30),
+                .unwrap_or(Self::Fps15),
         }
     }
 }
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn choices_cycle_in_both_directions_and_leave_vsync_unlimited() {
-        let mut choice = FrameRateLimit::Fps30;
+        let mut choice = FrameRateLimit::Fps15;
         let expected = [
             "15", "30", "48", "55", "60", "72", "90", "120", "180", "240", "VSync",
         ];
@@ -239,7 +239,7 @@ mod tests {
             assert_eq!(next.adjusted(Adjustment::Decrease), choice);
             choice = next;
         }
-        assert_eq!(choice, FrameRateLimit::Fps30);
+        assert_eq!(choice, FrameRateLimit::Fps15);
         assert!(FrameRateLimit::VSync.interval().is_none());
     }
 

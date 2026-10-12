@@ -7,7 +7,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
+bytemuck = { version = "1.25", features = ["derive"] }
 cpal = "0.18.2"
+cpu-time = "1.0"
 directories = "5.0"
 instant = { version = "0.1.13", features = ["now"] }
 log = "0.4.22"
