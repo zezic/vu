@@ -1,6 +1,6 @@
 use std::sync::mpsc::Receiver;
 
-use audio::audio_thread;
+use audio::capture_stream;
 use biquad::{Biquad, Coefficients, DirectForm2Transposed, ToHertz, Q_BUTTERWORTH_F32};
 use femtovg::{renderer::OpenGl, Align, Canvas, Color, FontId, Paint, Path};
 use glutin::{
@@ -36,20 +36,19 @@ use helpers::PerfGraph;
 
 enum AudioEvent {
     Config { samplerate: usize },
-    Buffer { buf: Vec<f32> },
+    Buffer { buf: Vec<[f32; 2]> },
 }
 
 const VU_WIDTH: f32 = 320.0;
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     pretty_env_logger::init();
     info!("Hi");
     let (tx, rx) = std::sync::mpsc::channel();
-    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(|| audio_thread(tx, shutdown_rx));
+    let _stream = capture_stream(tx)?;
     helpers::start((VU_WIDTH * 2.0) as u32 * 2, 220 * 2, "VU", true, rx);
 
-    shutdown_tx.send(()).unwrap();
+    Ok(())
 }
 
 use glutin::prelude::*;
@@ -97,7 +96,7 @@ impl ApplicationHandler for App {
                     self.processor.set_samplerate(samplerate);
                 }
                 AudioEvent::Buffer { buf } => {
-                    self.processor.consume_buf(buf);
+                    self.processor.consume_buf(&buf);
                 }
             }
         }
