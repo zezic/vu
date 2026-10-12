@@ -1,6 +1,6 @@
 # VU
 
-A stereo VU meter that analyzes desktop audio.
+A stereo audio meter with VU, quasi-peak PPM, RMS, and sample-peak modes.
 
 ## Requirements
 
@@ -15,17 +15,52 @@ The meters switch between side-by-side and stacked layouts as you resize the win
 choosing the larger fitted scales and centering the pair. In the stacked layout,
 the left channel is above the right channel.
 
+`M` cycles VU, BBC-style PPM, custom 300 ms RMS, and Sample Peak. The current
+mode appears above the theme selector as `[M] Current mode`. RMS is the default.
+Each gauge shows its units above the overload lamp: `VU` or `dBFS`.
+
+In PPM and Sample Peak, `N` switches the physical needle between **Full Spec**
+and **Vintage FR**, the two Sifam response curves. The `[N]` selector sits above
+`[M]` at bottom-left. Full Spec is the default and reaches full deflection near
+100 ms with about 5.4% overshoot. Vintage FR reaches full deflection near 200 ms
+with about 2.5% overshoot. Selection preserves the current pose, momentum, and
+shutter history, and persists across mode changes and restarts.
+
+- **VU:** sine-calibrated rectified-average drive into a moving-coil model. The
+  movement reaches 99% of a step in 300 ms and overshoots by 1.25%. Its deflection
+  is proportional to amplitude, with a fixed scale from -20 to +6 VU.
+- **PPM:** BBC-style quasi-peak detection with parallel slow and fast charging
+  envelopes. The detector reads a 10 ms, 5 kHz tone burst approximately 2 dB below
+  a sustained tone and returns by 26 dB in 3 seconds. Its physical needle follows
+  the selected Sifam movement curve. Full Spec reaches about full deflection at
+  100 ms, with approximately 5.4% overswing near 136 ms and settling around
+  250 ms. Vintage FR is slower with less overswing. Pointer
+  overswing can make its maximum indication exceed the detector's reading.
+- **RMS:** a 300 ms rectangular mean-square window followed by a critically damped
+  needle. This is the custom meter, with two temporal responses in series.
+- **Sample Peak:** detects absolute sample peaks, holds them for 100 ms, and then
+  returns at 20 dB per second, driving the same Sifam-style physical movement.
+  It measures stored samples; it does not reconstruct intersample true peaks.
+
+Preamp applies to every mode. In the dBFS modes, amplitude 1 after preamp is
+0 dBFS; a full-scale sine therefore reads about -3.01 dBFS in RMS mode. For VU,
+0 VU corresponds to a sine with RMS amplitude 1 after preamp. The default +18 dB
+preamp places that reference at an input RMS amplitude of approximately 0.126.
+Switching modes clears detector and needle history. Floating-point samples above
+full scale are measured without clipping.
+
 `A` / `S` cycle backward or forward through Cordex's 41 selected Gogh themes.
 Aura is the default. Colors crossfade over 200 ms, including needles and overload
 lamps. The theme readout sits at the bottom-left in both layouts, with `[A] [S] Theme Name`
-on one left-aligned line and the range popup above the selector.
+on one left-aligned line. The range popup appears above the selector stack.
 
 `Z` / `X` decrease or increase preamp by 6 dB. `Q` / `W` cycle backward or forward
 through the frame limits: 30, 48, 55, 60, 72, 90, 120, 180, 240, and VSync.
 VSync is the default and leaves frame pacing to display synchronization. Numeric
 choices apply an additional maximum frame rate using Cordex's deadline-based limiter.
 
-Drag horizontally to adjust the dB range, or vertically to adjust the scale bend.
+In the dBFS modes, drag horizontally to adjust the dB range, or vertically to adjust
+the scale bend. VU keeps its fixed amplitude-proportional scale.
 The initial drag direction selects the setting for that gesture. Its value fades
 in at the corresponding bottom corner and fades out over about 1.4 seconds after
 release. Double-click to reset both values to the default range (53.4 dB) and bend
@@ -40,13 +75,17 @@ physical response stays the same; longer exposures broaden blur and move the
 visible stroke to the average over that longer path. At startup, the exposure
 uses the available history. You can also set `shutter_frames: 2.5` in the config.
 
-Needle motion uses elapsed time and averages the selected exposure, with motion
+Needle motion models inertia, restoring torque, and damping. VU and peak modes
+allow small overshoot; RMS uses critical damping. Full Spec uses a 5 Hz natural
+frequency and 0.68 damping ratio; Vintage FR uses 3.07 Hz and 0.763. Both are
+fits to the [Sifam movement responses](https://www.don-audio.com/mediafiles/datasheets/Sifam-Vintage_FR-Meters.pdf). Audio-time drive spans preserve
+short events between display frames. The selected exposure averages that path, with motion
 blur for fast movement at low frame rates. Two triangular wings fade around each
 needle using sweep gradients. The stroke and wings share a radial opacity mask,
 keeping the base bright while the faster-moving tip spreads into the blur.
 At rest the needle stays opaque. Needles stop at the gauge endpoints.
 
-Theme, preamp, frame limit, and shutter exposure are restored from `vu-config.ron` on launch. Changes are
+Mode, peak movement, theme, preamp, frame limit, and shutter exposure are restored from `vu-config.ron` on launch. Changes are
 saved every two seconds and on exit, using a temporary sibling file and rename.
 The config uses Cordex's RON format and platform directory convention:
 
@@ -74,9 +113,18 @@ two channels as left and right.
 
 Run the signal conversion and meter tests with `cargo test`.
 
+The config mode variants are `Vu`, `Ppm`, `Rms`, and `SamplePeak`, for example
+`mode: Ppm`. Configurations without a mode use `Rms`. Set
+`peak_movement: FullSpec` or `peak_movement: VintageFr` to choose a physical peak
+needle. Configurations without a peak movement use `FullSpec`.
+
 Run the headless meter rendering test with
 `cargo test renders_stereo_scales_text_needles_and_overload -- --ignored`.
-It uses synthetic levels and does not initialize audio capture. Set
+Verify every mode in both layouts with
+`cargo test renders_all_measurement_modes_and_units_in_both_layouts -- --ignored`.
+Set `VU_MODE_PREVIEW_PREFIX` to a path prefix to save PNG previews for both
+needle movements and layouts.
+These tests use synthetic levels and do not initialize audio capture. Set
 `VU_RENDER_PREVIEW_PATH` to a PNG path to save the horizontal frame and a
 `.vertical.png` companion for the stacked layout.
 

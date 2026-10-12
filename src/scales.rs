@@ -6,7 +6,9 @@ use vello::{
 };
 
 use crate::{
-    db_to_normalized, normalized_to_db,
+    db_to_normalized,
+    measurement::Mode,
+    normalized_to_db,
     text::{Fonts, Text},
     theme::MeterColors,
 };
@@ -73,7 +75,24 @@ impl MarkStyle {
     }
 }
 
-pub fn generate_din_scale(fonts: &mut Fonts) -> Vec<Mark> {
+pub fn generate_scale(fonts: &mut Fonts, mode: Mode) -> Vec<Mark> {
+    if mode == Mode::Vu {
+        return [-20, -10, -7, -5, -3, -2, -1, 0, 1, 2, 3, 6]
+            .into_iter()
+            .map(|db| Mark {
+                position: db_to_normalized(db as f32),
+                label: Some(fonts.layout(
+                    &if db > 0 {
+                        format!("+{db}")
+                    } else {
+                        db.to_string()
+                    },
+                    MarkStyle::Big.label_size(),
+                )),
+                style: MarkStyle::Big,
+            })
+            .collect();
+    }
     let mut marks = Vec::new();
     for val in [-100, -90, -80, -70, -60, -50, -40, -30, -20, -10, -5, 0, 5] {
         let label = if val > 0 {
@@ -124,11 +143,12 @@ pub fn draw_scale(
     transform: Affine,
     marks: &[Mark],
     scale: &Scale,
+    mode: Mode,
     colors: &MeterColors,
 ) {
     let start = Scale::angle(0.0);
     let end = Scale::angle(1.0);
-    let zero = Scale::angle(scale.position(1.0));
+    let zero = Scale::angle(mode.position(scale, 1.0));
     let warning_arc = Arc::new(
         (0.0, 0.0),
         (BASE_RADIUS + 3.75, BASE_RADIUS + 3.75),
@@ -154,10 +174,12 @@ pub fn draw_scale(
 
     let mut previous_labels: HashMap<MarkStyle, f32> = HashMap::new();
     for mark in marks {
-        if normalized_to_db(mark.position, scale.negative_db_range) < -scale.negative_db_range {
+        if mode != Mode::Vu
+            && normalized_to_db(mark.position, scale.negative_db_range) < -scale.negative_db_range
+        {
             continue;
         }
-        let position = scale.position(mark.position);
+        let position = mode.position(scale, mark.position);
         let (low, high, label_offset) = match mark.style {
             MarkStyle::Big => (0.0, 15.0, 20.0),
             MarkStyle::Medium => (0.0, 10.0, 10.0),

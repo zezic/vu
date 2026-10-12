@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use instant::Instant;
 use strum::VariantArray;
 use vello::{
     kurbo::{Affine, Circle, Point, Rect, Size},
@@ -11,9 +10,10 @@ use vello::{
 use crate::{
     config::{Config, PreampDb, ShutterFrames},
     frame_schedule::FrameRateLimit,
+    measurement::Mode,
     processor::Processor,
     render::Frame,
-    scales::{draw_scale, generate_din_scale, Mark, Scale, ScaleSetting},
+    scales::{draw_scale, generate_scale, Mark, Scale, ScaleSetting},
     text::{Fonts, Text},
     theme::{MeterColors, Theme, ThemeId},
     AudioEvent,
@@ -30,6 +30,7 @@ const LAMP_RADIUS: f64 = 5.0;
 const GLOW_RADIUS: f64 = 40.0;
 
 mod motion;
+pub use motion::PeakMovement;
 use motion::{Bend, Motion, HINGE_RADIUS, STOP_RADIUS};
 mod renderer;
 pub use renderer::Renderer;
@@ -183,7 +184,11 @@ impl ScaleReadout {
                 x,
                 view.viewport.height - {
                     let [a, b, ..] = view.transform.as_coeffs();
-                    24.0 + 28.0 * a.hypot(b)
+                    let rows = match self.setting {
+                        ScaleSetting::DbRange => 80.0,
+                        ScaleSetting::Bend => 28.0,
+                    };
+                    24.0 + rows * a.hypot(b)
                 },
             )) * Affine::scale(2.0),
             colors.scale.with_alpha(self.opacity),
@@ -290,6 +295,7 @@ impl Appearance {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
 enum HintOrder {
     BeforeValue,
     AfterValue,
@@ -297,7 +303,7 @@ enum HintOrder {
 
 struct Readout {
     caption: Option<Text>,
-    hints: [Text; 2],
+    hints: Vec<Text>,
 }
 
 impl Readout {
@@ -310,14 +316,14 @@ impl Readout {
     fn new(fonts: &mut Fonts, caption: &str, hints: [&str; 2]) -> Self {
         Self {
             caption: Some(fonts.layout(caption, 8.0)),
-            hints: hints.map(|hint| fonts.layout(hint, 10.0)),
+            hints: hints.map(|hint| fonts.layout(hint, 10.0)).into(),
         }
     }
 
-    fn inline(fonts: &mut Fonts, hints: [&str; 2]) -> Self {
+    fn inline<const N: usize>(fonts: &mut Fonts, hints: [&str; N]) -> Self {
         Self {
             caption: None,
-            hints: hints.map(|hint| fonts.layout(hint, 10.0)),
+            hints: hints.map(|hint| fonts.layout(hint, 10.0)).into(),
         }
     }
 
@@ -361,12 +367,13 @@ impl Readout {
         order: HintOrder,
     ) {
         assert!(self.caption.is_none(), "inline readouts have no caption");
-        let hints = self.hints.each_ref().map(|hint| (hint, colors.hint));
+        let hints = self.hints.iter().map(|hint| (hint, colors.hint));
         let value = (value, colors.readout);
-        let items = match order {
-            HintOrder::BeforeValue => [hints[0], hints[1], value],
-            HintOrder::AfterValue => [value, hints[0], hints[1]],
-        };
+        let items = (order == HintOrder::AfterValue)
+            .then_some(value)
+            .into_iter()
+            .chain(hints)
+            .chain((order == HintOrder::BeforeValue).then_some(value));
         let mut x = 0.0;
         for (text, color) in items {
             text.draw_left(scene, transform * Affine::translate((x, 0.0)), color);
@@ -379,15 +386,22 @@ impl Readout {
 mod tests;
 
 impl Needle {
-    fn new() -> Self {
+    fn new(mode: Mode, peak_movement: PeakMovement) -> Self {
         Self {
             overload: 0.0,
-            motion: Motion::new(),
+            motion: Motion::new(mode, peak_movement),
         }
     }
 }
 
 pub struct Meter {
+    mode: Mode,
+    mode_readout: Readout,
+    mode_value: Text,
+    peak_movement: PeakMovement,
+    peak_movement_readout: Readout,
+    peak_movement_value: Text,
+    units: Text,
     theme: Theme,
     theme_readout: Readout,
     theme_value: Text,
@@ -414,8 +428,13 @@ impl Meter {
     pub fn new(config: &Config) -> anyhow::Result<Self> {
         let preamp = config.preamp_db;
         let selected = config.theme;
-        let processor = Processor::new(preamp.gain());
+        let processor = Processor::new(preamp.gain(), config.mode);
         let mut fonts = Fonts::new()?;
+        let mode_readout = Readout::inline(&mut fonts, ["[M]"]);
+        let mode_value = Readout::value(&mut fonts, config.mode.name());
+        let peak_movement_readout = Readout::inline(&mut fonts, ["[N]"]);
+        let peak_movement_value = Readout::value(&mut fonts, config.peak_movement.name());
+        let units = fonts.layout(config.mode.units(), 14.0);
         let theme_readout = Readout::inline(&mut fonts, ["[A]", "[S]"]);
         let theme_value = Readout::value(&mut fonts, selected.name());
         let shutter_readout = Readout::inline(&mut fonts, ["[C]", "[V]"]);
@@ -430,12 +449,19 @@ impl Meter {
             .map(|&limit| (limit, Readout::value(&mut fonts, &limit.to_string())))
             .collect();
         let preamp_value = Readout::value(&mut fonts, &format!("{:.1}dB", preamp.db()));
-        let marks = generate_din_scale(&mut fonts);
+        let marks = generate_scale(&mut fonts, config.mode);
         let scale = Scale::new();
         let range_readout =
             ScaleReadout::new(&mut fonts, ScaleSetting::DbRange, scale.negative_db_range);
         let bend_readout = ScaleReadout::new(&mut fonts, ScaleSetting::Bend, scale.bend);
         Ok(Self {
+            mode: config.mode,
+            mode_readout,
+            mode_value,
+            peak_movement: config.peak_movement,
+            peak_movement_readout,
+            peak_movement_value,
+            units,
             theme: Theme::new(selected),
             theme_readout,
             theme_value,
@@ -450,7 +476,7 @@ impl Meter {
             preamp_value,
             frame_readout,
             frame_values,
-            needles: std::array::from_fn(|_| Needle::new()),
+            needles: std::array::from_fn(|_| Needle::new(config.mode, config.peak_movement)),
             face: Scene::new(),
             face_settings: None,
             range_readout,
@@ -464,6 +490,32 @@ impl Meter {
             AudioEvent::Config { samplerate } => self.processor.set_samplerate(samplerate),
             AudioEvent::Buffer { buf } => self.processor.consume_buf(&buf),
         }
+    }
+
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        self.processor.set_mode(mode);
+        self.needles = std::array::from_fn(|_| Needle::new(mode, self.peak_movement));
+        self.mode_value = Readout::value(&mut self.fonts, mode.name());
+        self.units = self.fonts.layout(mode.units(), 14.0);
+        self.marks = generate_scale(&mut self.fonts, mode);
+        self.face_settings = None;
+        self.appearance = None;
+        self.range_readout.opacity = 0.0;
+        self.bend_readout.opacity = 0.0;
+    }
+
+    pub fn set_peak_movement(&mut self, movement: PeakMovement) {
+        assert!(
+            self.mode.uses_peak_movement(),
+            "peak movement selection belongs to a peak mode"
+        );
+        self.peak_movement = movement;
+        self.peak_movement_value = Readout::value(&mut self.fonts, movement.name());
+        for needle in &mut self.needles {
+            needle.motion.set_peak_movement(movement);
+        }
+        self.face_settings = None;
     }
 
     pub fn set_theme(&mut self, selected: ThemeId) {
@@ -495,8 +547,9 @@ impl Meter {
 
     pub fn reset_scale(&mut self) {
         self.scale = Scale::new();
-        self.range_readout.opacity = 1.0;
-        self.bend_readout.opacity = 1.0;
+        let opacity = if self.mode == Mode::Vu { 0.0 } else { 1.0 };
+        self.range_readout.opacity = opacity;
+        self.bend_readout.opacity = opacity;
     }
 
     fn draw_face(&mut self, view: &View, limit: FrameRateLimit) {
@@ -516,6 +569,20 @@ impl Meter {
             Affine::translate((24.0, view.viewport.height - 24.0)) * Affine::scale(theme_scale);
         self.theme_readout
             .draw(scene, theme_transform, &self.theme_value, colors);
+        self.mode_readout.draw(
+            scene,
+            theme_transform * Affine::translate((0.0, -24.0)),
+            &self.mode_value,
+            colors,
+        );
+        if self.mode.uses_peak_movement() {
+            self.peak_movement_readout.draw(
+                scene,
+                theme_transform * Affine::translate((0.0, -48.0)),
+                &self.peak_movement_value,
+                colors,
+            );
+        }
         let shutter_width = self.shutter_readout.inline_width(&self.shutter_value) * theme_scale;
         let shutter_transform = Affine::translate((
             view.viewport.width - 24.0 - shutter_width,
@@ -547,7 +614,12 @@ impl Meter {
         );
         for pivot in view.layout.pivots() {
             let meter = view.transform * Affine::translate(pivot.to_vec2());
-            draw_scale(scene, meter, &self.marks, &self.scale, colors);
+            draw_scale(scene, meter, &self.marks, &self.scale, self.mode, colors);
+            self.units.draw(
+                scene,
+                meter * Affine::translate((LAMP_CENTER.x, LAMP_CENTER.y - 23.0)),
+                colors.scale,
+            );
             scene.fill(
                 Fill::NonZero,
                 meter,
@@ -589,21 +661,31 @@ impl Meter {
             readout.advance(&mut self.fonts, &self.scale, adjusting, dt);
             readout.draw(scene, view, &self.theme.colors);
         }
-        let levels = self.processor.get_hands_for_instant(Instant::now());
+        let drives = self.processor.frame_drives(f64::from(dt));
         let pivots = view.layout.pivots();
         let needles = std::array::from_fn(|channel| {
             let needle = &mut self.needles[channel];
-            let level = levels[channel];
             let pivot = pivots[channel];
             let meter = view.transform * Affine::translate(pivot.to_vec2());
-            let speed = if level >= 1.0 { 25.0 } else { -5.0 };
-            needle.overload = (needle.overload + dt * speed).clamp(0.0, 1.0);
+            for drive in drives {
+                let speed = if drive.levels[channel] >= 1.0 {
+                    25.0
+                } else {
+                    -5.0
+                };
+                needle.overload = (needle.overload + drive.seconds as f32 * speed).clamp(0.0, 1.0);
+            }
             let strength = needle.overload;
 
-            let exposure =
-                needle
-                    .motion
-                    .advance(self.scale.position(level), dt, self.shutter_frames);
+            let exposure = needle.motion.advance_path(
+                drives.iter().map(|drive| {
+                    (
+                        self.mode.position(&self.scale, drive.levels[channel]),
+                        drive.seconds,
+                    )
+                }),
+                self.shutter_frames,
+            );
             // Keep angular gradients within one positive turn.
             let angle = Scale::angle(exposure.average as f32) + std::f64::consts::TAU;
             let bounds = [exposure.minimum, exposure.maximum]

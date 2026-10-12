@@ -22,6 +22,7 @@ use winit::{
 mod audio;
 mod config;
 mod frame_schedule;
+mod measurement;
 mod meter;
 mod processor;
 mod profile;
@@ -89,6 +90,8 @@ impl DragState {
 }
 
 enum Setting {
+    Mode,
+    PeakMovement,
     Theme,
     Preamp,
     FrameRate,
@@ -120,6 +123,15 @@ impl App {
     fn adjust_setting(&mut self, setting: Setting, adjustment: Adjustment) {
         let settings = self.settings.edit();
         match setting {
+            Setting::PeakMovement => {
+                settings.peak_movement = settings.peak_movement.next();
+                self.meter.set_peak_movement(settings.peak_movement);
+            }
+            Setting::Mode => {
+                settings.mode = settings.mode.next();
+                self.meter.set_mode(settings.mode);
+                self.drag = DragState::Idle;
+            }
             Setting::Shutter => {
                 settings.shutter_frames = settings.shutter_frames.adjusted(adjustment);
                 self.meter.set_shutter(settings.shutter_frames);
@@ -206,7 +218,7 @@ impl App {
                 let mut delta = position - self.mouse;
                 if let DragState::Pending(origin) = self.drag {
                     let movement = position - origin;
-                    if movement.hypot() >= 3.0 {
+                    if self.settings.mode != measurement::Mode::Vu && movement.hypot() >= 3.0 {
                         self.drag = DragState::Adjusting(if movement.x.abs() > movement.y.abs() {
                             ScaleSetting::DbRange
                         } else {
@@ -215,17 +227,18 @@ impl App {
                         delta = movement;
                     }
                 }
-                match self.drag.setting() {
-                    Some(ScaleSetting::DbRange) => {
+                match (self.settings.mode, self.drag.setting()) {
+                    (measurement::Mode::Vu, _) => {}
+                    (_, Some(ScaleSetting::DbRange)) => {
                         self.meter.scale.negative_db_range = (self.meter.scale.negative_db_range
                             + delta.x as f32 * 0.1)
                             .clamp(1.0, 100.0);
                     }
-                    Some(ScaleSetting::Bend) => {
+                    (_, Some(ScaleSetting::Bend)) => {
                         self.meter.scale.bend =
                             (self.meter.scale.bend * (1.0 + delta.y as f32 * 0.003)).max(0.1);
                     }
-                    None => {}
+                    (_, None) => {}
                 }
                 self.mouse = position;
             }
@@ -243,23 +256,33 @@ impl App {
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     match key {
-                        KeyCode::Equal => {
+                        KeyCode::Equal if self.settings.mode != measurement::Mode::Vu => {
                             self.meter.scale.negative_db_range =
                                 (self.meter.scale.negative_db_range + 0.1).min(100.0)
                         }
-                        KeyCode::Minus => {
+                        KeyCode::Minus if self.settings.mode != measurement::Mode::Vu => {
                             self.meter.scale.negative_db_range =
                                 (self.meter.scale.negative_db_range - 0.1).max(1.0)
                         }
-                        KeyCode::BracketLeft => {
+                        KeyCode::BracketLeft if self.settings.mode != measurement::Mode::Vu => {
                             self.meter.scale.bend = (self.meter.scale.bend - 0.1).max(0.1)
                         }
-                        KeyCode::BracketRight => self.meter.scale.bend += 0.1,
+                        KeyCode::BracketRight if self.settings.mode != measurement::Mode::Vu => {
+                            self.meter.scale.bend += 0.1
+                        }
                         KeyCode::KeyC => {
                             self.adjust_setting(Setting::Shutter, Adjustment::Decrease)
                         }
                         KeyCode::KeyV => {
                             self.adjust_setting(Setting::Shutter, Adjustment::Increase)
+                        }
+                        KeyCode::KeyM if !event.repeat => {
+                            self.adjust_setting(Setting::Mode, Adjustment::Increase)
+                        }
+                        KeyCode::KeyN
+                            if !event.repeat && self.settings.mode.uses_peak_movement() =>
+                        {
+                            self.adjust_setting(Setting::PeakMovement, Adjustment::Increase)
                         }
                         KeyCode::KeyA => self.adjust_setting(Setting::Theme, Adjustment::Decrease),
                         KeyCode::KeyS => self.adjust_setting(Setting::Theme, Adjustment::Increase),

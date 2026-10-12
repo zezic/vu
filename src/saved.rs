@@ -106,6 +106,8 @@ mod tests {
         config.flush()?;
         assert!(!path.exists());
         config.edit().preamp_db = PreampDb::try_from(-12.0)?;
+        config.edit().mode = crate::measurement::Mode::SamplePeak;
+        config.edit().peak_movement = crate::meter::PeakMovement::VintageFr;
         config.edit().frame_rate_limit = FrameRateLimit::Fps55;
         config.edit().shutter_frames = crate::config::ShutterFrames::try_from(2.5)?;
         config.edit().theme = config
@@ -137,6 +139,8 @@ mod tests {
             "(shutter_frames: 17.0)",
             "(shutter_frames: NaN)",
             "(frame_rate_limit: Fps99)",
+            "(mode: Unknown)",
+            "(peak_movement: Unknown)",
             "(theme: \"Unknown theme\")",
         ] {
             fs::write(&path, text)?;
@@ -145,6 +149,8 @@ mod tests {
         }
         let missing: Config = ron::from_str("(frame_rate_limit: Fps48)")?;
         assert_eq!(missing.preamp_db, PreampDb::default());
+        assert_eq!(missing.mode, crate::measurement::Mode::Rms);
+        assert_eq!(missing.peak_movement, crate::meter::PeakMovement::FullSpec);
         assert_eq!(
             missing.shutter_frames,
             crate::config::ShutterFrames::default()

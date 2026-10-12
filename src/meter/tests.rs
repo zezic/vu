@@ -270,6 +270,144 @@ fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Resu
 
 #[test]
 #[ignore = "requires a compute-capable GPU"]
+fn renders_all_measurement_modes_and_units_in_both_layouts() -> anyhow::Result<()> {
+    use crate::{measurement::Mode, meter::PeakMovement};
+    let mut context = RenderContext::new();
+    let id = pollster::block_on(context.device(None)).expect("a compute-capable GPU is required");
+    let device = &context.devices[id];
+    let mut renderer = renderer(&device.device)?;
+    let mut meter = Meter::new(&crate::config::Config {
+        preamp_db: PreampDb::try_from(0.0)?,
+        ..Default::default()
+    })?;
+    meter.audio_event(AudioEvent::Config { samplerate: 48000 });
+    let mut background = BackgroundCache::new();
+    let mut scene = Scene::new();
+    for mode in [Mode::Vu, Mode::Ppm, Mode::Rms, Mode::SamplePeak] {
+        meter.set_mode(mode);
+        let movements: &[PeakMovement] = if mode.uses_peak_movement() {
+            &[PeakMovement::FullSpec, PeakMovement::VintageFr]
+        } else {
+            &[PeakMovement::FullSpec]
+        };
+        for &movement in movements {
+            if mode.uses_peak_movement() {
+                meter.set_peak_movement(movement);
+            }
+            for (width, height, layout_name) in [(1280, 440, "horizontal"), (640, 960, "vertical")]
+            {
+                let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+                for frame in 0..60 {
+                    let buf = (frame * 800..(frame + 1) * 800)
+                        .map(|sample| {
+                            let wave =
+                                (std::f32::consts::TAU * 1000.0 * sample as f32 / 48000.0).sin();
+                            [wave * 0.25, wave * 0.75]
+                        })
+                        .collect();
+                    meter.audio_event(AudioEvent::Buffer { buf });
+                    scene.reset();
+                    meter.draw(&mut scene, &view, FrameRateLimit::Fps60, None, 1.0 / 60.0);
+                }
+                let params = RenderParams {
+                    base_color: meter.theme.colors.background,
+                    width,
+                    height,
+                    antialiasing_method: ANTIALIASING,
+                };
+                let composite = background.compose(
+                    &mut renderer,
+                    device,
+                    crate::render::Frame::Retained(&meter.face),
+                    &scene,
+                    &params,
+                )?;
+                let pixels = render_frame(
+                    device,
+                    &mut renderer,
+                    composite,
+                    Some(&meter.appearance.as_ref().unwrap().needles),
+                    width,
+                    height,
+                )?;
+                let background_rgb = meter.theme.colors.background.components;
+                let ink = |region: Rect| {
+                    (region.y0.max(0.0) as usize..region.y1.min(f64::from(height)) as usize)
+                        .flat_map(|y| {
+                            (region.x0.max(0.0) as usize..region.x1.min(f64::from(width)) as usize)
+                                .map(move |x| (x, y))
+                        })
+                        .filter(|&(x, y)| {
+                            pixels[(y * width as usize + x) * 4..][..3]
+                                .iter()
+                                .zip(&background_rgb[..3])
+                                .any(|(&pixel, &background)| {
+                                    (f32::from(pixel) - background * 255.0).abs() > 20.0
+                                })
+                        })
+                        .count()
+                };
+                let [a, b, ..] = view.transform.as_coeffs();
+                let scale = a.hypot(b);
+                let baseline = f64::from(height) - 24.0 - 24.0 * scale;
+                assert!(
+                    ink(Rect::new(
+                        24.0,
+                        baseline - 13.0 * scale,
+                        24.0 + meter.mode_readout.inline_width(&meter.mode_value) * scale,
+                        baseline
+                    )) > 40,
+                    "mode control must render for {mode:?}/{layout_name}"
+                );
+                if mode.uses_peak_movement() {
+                    let x = 24.0;
+                    let baseline = baseline - 24.0 * scale;
+                    assert!(
+                        ink(Rect::new(
+                            x,
+                            baseline - 13.0 * scale,
+                            x + meter
+                                .peak_movement_readout
+                                .inline_width(&meter.peak_movement_value)
+                                * scale,
+                            baseline
+                        )) > 40,
+                        "movement control must render for {mode:?}/{movement:?}/{layout_name}"
+                    );
+                }
+                for pivot in view.layout.pivots() {
+                    let center = view.transform
+                        * (pivot + (super::LAMP_CENTER.x, super::LAMP_CENTER.y - 23.0));
+                    let half_width = meter.units.width() * scale / 2.0;
+                    assert!(
+                        ink(Rect::new(
+                            center.x - half_width,
+                            center.y - 14.0 * scale,
+                            center.x + half_width,
+                            center.y
+                        )) > 30,
+                        "units must render for {mode:?}/{layout_name}"
+                    );
+                }
+                if let Some(prefix) = std::env::var_os("VU_MODE_PREVIEW_PREFIX") {
+                    let path = format!(
+                        "{}-{mode:?}-{movement:?}-{layout_name}.png",
+                        std::path::Path::new(&prefix).display()
+                    );
+                    let mut encoder =
+                        png::Encoder::new(BufWriter::new(File::create(path)?), width, height);
+                    encoder.set_color(png::ColorType::Rgba);
+                    encoder.set_depth(png::BitDepth::Eight);
+                    encoder.write_header()?.write_image_data(&pixels)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
 fn renders_stereo_scales_text_needles_and_overload() -> anyhow::Result<()> {
     let mut meter = Meter::new(&crate::config::Config {
         preamp_db: PreampDb::try_from(0.0)?,
@@ -643,7 +781,10 @@ fn overlay_matches_vector_stroke_sweep_mask_and_overload() -> anyhow::Result<()>
                 needle.overload = overload;
             }
             if name.starts_with("bent") {
-                let mut motion = super::Motion::new();
+                let mut motion = super::Motion::new(
+                    crate::measurement::Mode::Rms,
+                    super::PeakMovement::default(),
+                );
                 let exposure = motion.advance(1.2, 1.0, crate::config::ShutterFrames::default());
                 for needle in &mut needles {
                     needle.bend = exposure.bend;
