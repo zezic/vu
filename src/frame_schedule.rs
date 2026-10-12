@@ -25,13 +25,13 @@ pub enum FrameRateLimit {
     Fps30,
     Fps48,
     Fps55,
+    #[default]
     Fps60,
     Fps72,
     Fps90,
     Fps120,
     Fps180,
     Fps240,
-    #[default]
     VSync,
 }
 
