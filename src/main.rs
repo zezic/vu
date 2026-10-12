@@ -92,6 +92,7 @@ enum Setting {
     Theme,
     Preamp,
     FrameRate,
+    Shutter,
 }
 
 struct App {
@@ -119,6 +120,10 @@ impl App {
     fn adjust_setting(&mut self, setting: Setting, adjustment: Adjustment) {
         let settings = self.settings.edit();
         match setting {
+            Setting::Shutter => {
+                settings.shutter_frames = settings.shutter_frames.adjusted(adjustment);
+                self.meter.set_shutter(settings.shutter_frames);
+            }
             Setting::Theme => {
                 settings.theme = settings.theme.adjusted(adjustment);
                 self.meter.set_theme(settings.theme);
@@ -249,6 +254,12 @@ impl App {
                             self.meter.scale.bend = (self.meter.scale.bend - 0.1).max(0.1)
                         }
                         KeyCode::BracketRight => self.meter.scale.bend += 0.1,
+                        KeyCode::KeyC => {
+                            self.adjust_setting(Setting::Shutter, Adjustment::Decrease)
+                        }
+                        KeyCode::KeyV => {
+                            self.adjust_setting(Setting::Shutter, Adjustment::Increase)
+                        }
                         KeyCode::KeyA => self.adjust_setting(Setting::Theme, Adjustment::Decrease),
                         KeyCode::KeyS => self.adjust_setting(Setting::Theme, Adjustment::Increase),
                         KeyCode::KeyZ => self.adjust_setting(Setting::Preamp, Adjustment::Decrease),
@@ -408,7 +419,7 @@ fn main() -> anyhow::Result<()> {
     pretty_env_logger::init();
     let profile = profile::Run::from_args()?;
     let settings = Saved::<Config>::load(config::config_file()?)?;
-    let mut meter = Meter::new(settings.preamp_db, settings.theme)?;
+    let mut meter = Meter::new(&settings)?;
     let (tx, rx) = std::sync::mpsc::channel();
     let _stream = if profile.is_some() {
         meter.set_preamp(config::PreampDb::try_from(0.0)?);

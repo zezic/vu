@@ -82,7 +82,10 @@ fn profiles_moving_needles_at_240_fps() -> anyhow::Result<()> {
             Ok(budget)
         })
         .transpose()?;
-    let mut meter = Meter::new(PreampDb::try_from(0.0)?, crate::theme::ThemeId::default())?;
+    let mut meter = Meter::new(&crate::config::Config {
+        preamp_db: PreampDb::try_from(0.0)?,
+        ..Default::default()
+    })?;
     meter.audio_event(AudioEvent::Config { samplerate: 48000 });
     let mut context = RenderContext::new();
     let id = pollster::block_on(prepare_device(
@@ -204,7 +207,10 @@ fn profiles_moving_needles_at_240_fps() -> anyhow::Result<()> {
 
 #[test]
 fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Result<()> {
-    let mut meter = Meter::new(PreampDb::try_from(0.0)?, crate::theme::ThemeId::default())?;
+    let mut meter = Meter::new(&crate::config::Config {
+        preamp_db: PreampDb::try_from(0.0)?,
+        ..Default::default()
+    })?;
     meter.processor.set_samplerate(48000);
     for _ in 0..2 {
         meter.processor.consume_buf(&[[0.1, 0.5]; 14400]);
@@ -265,7 +271,10 @@ fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Resu
 #[test]
 #[ignore = "requires a compute-capable GPU"]
 fn renders_stereo_scales_text_needles_and_overload() -> anyhow::Result<()> {
-    let mut meter = Meter::new(PreampDb::try_from(0.0)?, crate::theme::ThemeId::default())?;
+    let mut meter = Meter::new(&crate::config::Config {
+        preamp_db: PreampDb::try_from(0.0)?,
+        ..Default::default()
+    })?;
     meter.audio_event(AudioEvent::Config { samplerate: 48000 });
     // Fill the RMS window, then deliver a buffer whose first frame has a full window.
     for _ in 0..2 {
@@ -316,7 +325,13 @@ fn renders_stereo_scales_text_needles_and_overload() -> anyhow::Result<()> {
             let (x, y) = (point.x as usize, point.y as usize);
             &pixels[(y * width as usize + x) * 4..][..4]
         };
-        let count_bright = |region: Rect| {
+        let background_rgb = meter.theme.colors.background.components;
+        let scale_contrast: f32 = meter.theme.colors.scale.components[..3]
+            .iter()
+            .zip(&background_rgb[..3])
+            .map(|(ink, background)| (ink - background).abs() * 255.0)
+            .sum();
+        let count_scale_ink = |region: Rect| {
             let region = view.transform.transform_rect_bbox(region);
             (region.y0 as usize..region.y1 as usize)
                 .flat_map(|y| {
@@ -325,7 +340,12 @@ fn renders_stereo_scales_text_needles_and_overload() -> anyhow::Result<()> {
                 })
                 .filter(|&point| {
                     let p = pixel(point);
-                    p[0] > 170 && p[1] > 170 && p[2] > 170
+                    let contrast: f32 = p[..3]
+                        .iter()
+                        .zip(&background_rgb[..3])
+                        .map(|(pixel, background)| (f32::from(*pixel) - background * 255.0).abs())
+                        .sum();
+                    contrast > scale_contrast * 0.5
                 })
                 .count()
         };
@@ -387,13 +407,13 @@ fn renders_stereo_scales_text_needles_and_overload() -> anyhow::Result<()> {
                 origin.y + 100.0,
             );
             assert!(
-                count_bright(scale_region) > 400,
+                count_scale_ink(scale_region) > 400,
                 "both scales must render in either layout"
             );
             let label_region =
                 Rect::new(origin.x, origin.y + 7.5, origin.x + 320.0, origin.y + 27.5);
             assert!(
-                count_bright(label_region) > 50,
+                count_scale_ink(label_region) > 50,
                 "the DIN labels above each arc must render"
             );
             let angle =
@@ -556,16 +576,32 @@ fn overlay_matches_vector_stroke_sweep_mask_and_overload() -> anyhow::Result<()>
         let id = pollster::block_on(prepare_device(&mut context, None, preferences))?;
         let device = &context.devices[id];
         let mut renderer = renderer(&device.device)?;
-        for (name, width, height, dt, steps, zoom, overload) in [
-            ("rest", 1280, 440, 1.0 / 60.0, 90, 1.0, [0.0, 0.0]),
-            ("rise240", 1280, 440, 1.0 / 240.0, 3, 1.0, [0.0, 0.0]),
-            ("rise15", 1280, 440, 1.0 / 15.0, 1, 1.0, [0.0, 0.0]),
-            ("vertical", 640, 960, 1.0 / 15.0, 2, 1.0, [0.0, 0.0]),
-            ("zoom", 1280, 440, 1.0 / 30.0, 2, 1.7, [0.0, 0.0]),
-            ("subpixel", 320, 220, 1.0 / 60.0, 90, 1.0, [0.0, 0.0]),
-            ("overload", 1280, 440, 1.0 / 60.0, 90, 1.0, [0.45, 1.0]),
+        for (name, width, height, dt, steps, zoom, overload, shutter_frames) in [
+            ("rest", 1280, 440, 1.0 / 60.0, 90, 1.0, [0.0, 0.0], 1.0),
+            ("rise240", 1280, 440, 1.0 / 240.0, 3, 1.0, [0.0, 0.0], 1.0),
+            ("rise15", 1280, 440, 1.0 / 15.0, 1, 1.0, [0.0, 0.0], 1.0),
+            ("vertical", 640, 960, 1.0 / 15.0, 2, 1.0, [0.0, 0.0], 1.0),
+            ("zoom", 1280, 440, 1.0 / 30.0, 2, 1.7, [0.0, 0.0], 1.0),
+            ("subpixel", 320, 220, 1.0 / 60.0, 90, 1.0, [0.0, 0.0], 1.0),
+            ("overload", 1280, 440, 1.0 / 60.0, 90, 1.0, [0.45, 1.0], 1.0),
+            ("shutter2", 1280, 440, 1.0 / 60.0, 4, 1.0, [0.0, 0.0], 2.0),
+            ("shutter2.5", 640, 960, 1.0 / 60.0, 4, 1.0, [0.0, 0.0], 2.5),
+            (
+                "shutter16",
+                1280,
+                440,
+                1.0 / 60.0,
+                16,
+                1.0,
+                [0.0, 0.0],
+                16.0,
+            ),
         ] {
-            let mut meter = Meter::new(PreampDb::try_from(0.0)?, crate::theme::ThemeId::default())?;
+            let mut meter = Meter::new(&crate::config::Config {
+                preamp_db: PreampDb::try_from(0.0)?,
+                shutter_frames: crate::config::ShutterFrames::try_from(shutter_frames)?,
+                ..Default::default()
+            })?;
             meter.audio_event(AudioEvent::Config { samplerate: 48000 });
             for _ in 0..2 {
                 meter.processor.consume_buf(&[[0.1, 1.0]; 14400]);

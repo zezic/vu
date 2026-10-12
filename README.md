@@ -31,13 +31,22 @@ in at the corresponding bottom corner and fades out over about 1.4 seconds after
 release. Double-click to reset both values to the default range (53.4 dB) and bend
 (2.0).
 
-Needle motion uses elapsed time and averages each frame's exposure, with motion
+`C` / `V` decrease or increase shutter exposure by half a frame, from 1 to 16
+frame intervals. The bottom-right readout shows `Shutter 2.5f [C] [V]` for a 2.5-frame exposure. `1.0` is the
+original full-frame exposure; `2.0` spans the latest two frames. Fractional values
+include the trailing fraction of the oldest frame. Frame durations weight the
+average, so changing FPS keeps the exposure tied to frame intervals. The needle's
+physical response stays the same; longer exposures broaden blur and move the
+visible stroke to the average over that longer path. At startup, the exposure
+uses the available history. You can also set `shutter_frames: 2.5` in the config.
+
+Needle motion uses elapsed time and averages the selected exposure, with motion
 blur for fast movement at low frame rates. Two triangular wings fade around each
 needle using sweep gradients. The stroke and wings share a radial opacity mask,
 keeping the base bright while the faster-moving tip spreads into the blur.
 At rest the needle stays opaque. Needles stop at the gauge endpoints.
 
-Theme, preamp, and frame limit are restored from `vu-config.ron` on launch. Changes are
+Theme, preamp, frame limit, and shutter exposure are restored from `vu-config.ron` on launch. Changes are
 saved every two seconds and on exit, using a temporary sibling file and rename.
 The config uses Cordex's RON format and platform directory convention:
 

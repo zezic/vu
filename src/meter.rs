@@ -9,7 +9,7 @@ use vello::{
 };
 
 use crate::{
-    config::PreampDb,
+    config::{Config, PreampDb, ShutterFrames},
     frame_schedule::FrameRateLimit,
     processor::Processor,
     render::Frame,
@@ -180,13 +180,10 @@ impl ScaleReadout {
             scene,
             Affine::translate((
                 x,
-                view.viewport.height
-                    - if self.setting == ScaleSetting::DbRange {
-                        let [a, b, ..] = view.transform.as_coeffs();
-                        24.0 + 28.0 * a.hypot(b)
-                    } else {
-                        24.0
-                    },
+                view.viewport.height - {
+                    let [a, b, ..] = view.transform.as_coeffs();
+                    24.0 + 28.0 * a.hypot(b)
+                },
             )) * Affine::scale(2.0),
             colors.scale.with_alpha(self.opacity),
         );
@@ -259,6 +256,11 @@ impl Appearance {
     }
 }
 
+enum HintOrder {
+    BeforeValue,
+    AfterValue,
+}
+
 struct Readout {
     caption: Option<Text>,
     hints: [Text; 2],
@@ -285,6 +287,18 @@ impl Readout {
         }
     }
 
+    fn inline_width(&self, value: &Text) -> f64 {
+        assert!(
+            self.caption.is_none(),
+            "inline width belongs to a readout without a caption"
+        );
+        self.hints
+            .iter()
+            .map(|hint| hint.width() + 8.0)
+            .sum::<f64>()
+            + value.width()
+    }
+
     fn hint_offset(value: &Text) -> f64 {
         Self::HINT_OFFSET.max(value.width() / 2.0 + 16.0)
     }
@@ -300,18 +314,29 @@ impl Readout {
                     hint.draw(scene, baseline * Affine::translate((x, 0.0)), colors.hint);
                 }
             }
-            None => {
-                let mut x = 0.0;
-                for hint in &self.hints {
-                    hint.draw_left(scene, transform * Affine::translate((x, 0.0)), colors.hint);
-                    x += hint.width() + 8.0;
-                }
-                value.draw_left(
-                    scene,
-                    transform * Affine::translate((x, 0.0)),
-                    colors.readout,
-                );
-            }
+            None => self.draw_inline(scene, transform, value, colors, HintOrder::BeforeValue),
+        }
+    }
+
+    fn draw_inline(
+        &self,
+        scene: &mut Scene,
+        transform: Affine,
+        value: &Text,
+        colors: &MeterColors,
+        order: HintOrder,
+    ) {
+        assert!(self.caption.is_none(), "inline readouts have no caption");
+        let hints = self.hints.each_ref().map(|hint| (hint, colors.hint));
+        let value = (value, colors.readout);
+        let items = match order {
+            HintOrder::BeforeValue => [hints[0], hints[1], value],
+            HintOrder::AfterValue => [value, hints[0], hints[1]],
+        };
+        let mut x = 0.0;
+        for (text, color) in items {
+            text.draw_left(scene, transform * Affine::translate((x, 0.0)), color);
+            x += text.width() + 8.0;
         }
     }
 }
@@ -332,6 +357,9 @@ pub struct Meter {
     theme: Theme,
     theme_readout: Readout,
     theme_value: Text,
+    shutter_frames: ShutterFrames,
+    shutter_readout: Readout,
+    shutter_value: Text,
     processor: Processor,
     pub scale: Scale,
     marks: Vec<Mark>,
@@ -349,11 +377,18 @@ pub struct Meter {
 }
 
 impl Meter {
-    pub fn new(preamp: PreampDb, selected: ThemeId) -> anyhow::Result<Self> {
+    pub fn new(config: &Config) -> anyhow::Result<Self> {
+        let preamp = config.preamp_db;
+        let selected = config.theme;
         let processor = Processor::new(preamp.gain());
         let mut fonts = Fonts::new()?;
         let theme_readout = Readout::inline(&mut fonts, ["[A]", "[S]"]);
         let theme_value = Readout::value(&mut fonts, selected.name());
+        let shutter_readout = Readout::inline(&mut fonts, ["[C]", "[V]"]);
+        let shutter_value = Readout::value(
+            &mut fonts,
+            &format!("Shutter {:.1}f", config.shutter_frames.frames()),
+        );
         let preamp_readout = Readout::new(&mut fonts, "Preamp", ["[Z]", "[X]"]);
         let frame_readout = Readout::new(&mut fonts, "FPS Limit", ["[Q]", "[W]"]);
         let frame_values = FrameRateLimit::VARIANTS
@@ -370,6 +405,9 @@ impl Meter {
             theme: Theme::new(selected),
             theme_readout,
             theme_value,
+            shutter_frames: config.shutter_frames,
+            shutter_readout,
+            shutter_value,
             processor,
             scale,
             marks,
@@ -397,6 +435,15 @@ impl Meter {
     pub fn set_theme(&mut self, selected: ThemeId) {
         self.theme.select(selected);
         self.theme_value = Readout::value(&mut self.fonts, selected.name());
+        self.face_settings = None;
+    }
+
+    pub fn set_shutter(&mut self, shutter: ShutterFrames) {
+        self.shutter_frames = shutter;
+        self.shutter_value = Readout::value(
+            &mut self.fonts,
+            &format!("Shutter {:.1}f", shutter.frames()),
+        );
         self.face_settings = None;
     }
 
@@ -429,6 +476,18 @@ impl Meter {
             Affine::translate((24.0, view.viewport.height - 24.0)) * Affine::scale(theme_scale);
         self.theme_readout
             .draw(scene, theme_transform, &self.theme_value, colors);
+        let shutter_width = self.shutter_readout.inline_width(&self.shutter_value) * theme_scale;
+        let shutter_transform = Affine::translate((
+            view.viewport.width - 24.0 - shutter_width,
+            view.viewport.height - 24.0,
+        )) * Affine::scale(theme_scale);
+        self.shutter_readout.draw_inline(
+            scene,
+            shutter_transform,
+            &self.shutter_value,
+            colors,
+            HintOrder::AfterValue,
+        );
         let [preamp, frame] = view.layout.readouts();
         self.preamp_readout.draw(
             scene,
@@ -494,7 +553,10 @@ impl Meter {
             needle.overload = (needle.overload + dt * speed).clamp(0.0, 1.0);
             let strength = needle.overload;
 
-            let exposure = needle.motion.advance(self.scale.position(level), dt);
+            let exposure =
+                needle
+                    .motion
+                    .advance(self.scale.position(level), dt, self.shutter_frames);
             // Keep angular gradients within one positive turn.
             let angle = Scale::angle(exposure.average as f32) + std::f64::consts::TAU;
             let bounds = [exposure.minimum, exposure.maximum]

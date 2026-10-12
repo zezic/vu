@@ -107,6 +107,7 @@ mod tests {
         assert!(!path.exists());
         config.edit().preamp_db = PreampDb::try_from(-12.0)?;
         config.edit().frame_rate_limit = FrameRateLimit::Fps55;
+        config.edit().shutter_frames = crate::config::ShutterFrames::try_from(2.5)?;
         config.edit().theme = config
             .theme
             .adjusted(crate::frame_schedule::Adjustment::Increase);
@@ -132,6 +133,9 @@ mod tests {
         for text in [
             "(preamp_db: 97.0)",
             "(preamp_db: NaN)",
+            "(shutter_frames: 0.0)",
+            "(shutter_frames: 17.0)",
+            "(shutter_frames: NaN)",
             "(frame_rate_limit: Fps99)",
             "(theme: \"Unknown theme\")",
         ] {
@@ -141,6 +145,10 @@ mod tests {
         }
         let missing: Config = ron::from_str("(frame_rate_limit: Fps48)")?;
         assert_eq!(missing.preamp_db, PreampDb::default());
+        assert_eq!(
+            missing.shutter_frames,
+            crate::config::ShutterFrames::default()
+        );
         Ok(())
     }
 
