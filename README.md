@@ -9,7 +9,7 @@ A stereo audio meter with VU, quasi-peak PPM, RMS, and sample-peak modes.
 
 ## Run
 
-Run with `cargo run --release`.
+Run with `cargo run --release`
 
 On macOS, allow system audio recording when prompted.
 
