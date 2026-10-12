@@ -1,16 +1,53 @@
-use std::{collections::HashMap, ops::Sub};
+use std::collections::HashMap;
 
-use femtovg::{renderer::OpenGl, Canvas, Color, FontId, Paint, Path, Solidity};
+use vello::{
+    kurbo::{Affine, Arc, Cap, Line, Stroke},
+    peniko::Color,
+    Scene,
+};
 
-use crate::{db_to_normalized, normalized_to_db};
+use crate::{
+    db_to_normalized, normalized_to_db,
+    text::{Fonts, Text},
+};
+
+pub const MAX_ANGLE: f32 = 47.0;
+const POSITIVE_DB_RANGE: f32 = 6.0;
+const BASE_RADIUS: f64 = 164.0;
+const INK: Color = Color::from_rgb8(220, 220, 220);
+const WARNING: Color = Color::from_rgb8(220, 62, 73);
+
+pub struct Scale {
+    pub negative_db_range: f32,
+    pub bend: f32,
+}
+
+impl Scale {
+    pub fn new() -> Self {
+        Self {
+            negative_db_range: 53.4,
+            bend: 2.0,
+        }
+    }
+
+    pub fn position(&self, value: f32) -> f32 {
+        let db = normalized_to_db(value, self.negative_db_range);
+        ((db + self.negative_db_range).max(0.0) / (self.negative_db_range + POSITIVE_DB_RANGE))
+            .powf(self.bend)
+    }
+
+    pub fn angle(position: f32) -> f64 {
+        f64::from(position * MAX_ANGLE * 2.0 - 90.0 - MAX_ANGLE).to_radians()
+    }
+}
 
 pub struct Mark {
     position: f32,
-    label: Option<String>,
+    label: Option<Text>,
     style: MarkStyle,
 }
 
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum MarkStyle {
     Big,
     Medium,
@@ -19,212 +56,133 @@ enum MarkStyle {
     UnderWarn,
 }
 
-pub fn generate_din_scale() -> Vec<Mark> {
-    let mut marks = vec![];
+impl MarkStyle {
+    fn label_size(self) -> f32 {
+        match self {
+            Self::Big => 16.0,
+            Self::Medium => 10.0,
+            Self::Under | Self::UnderWarn => 6.0,
+            Self::Inter => unreachable!("intermediate marks have no labels"),
+        }
+    }
+}
 
+pub fn generate_din_scale(fonts: &mut Fonts) -> Vec<Mark> {
+    let mut marks = Vec::new();
     for val in [-100, -90, -80, -70, -60, -50, -40, -30, -20, -10, -5, 0, 5] {
+        let label = if val > 0 {
+            format!("+{val}")
+        } else {
+            val.to_string()
+        };
         marks.push(Mark {
             position: db_to_normalized(val as f32),
-            label: Some(if val > 0 {
-                format!("+{}", val)
-            } else {
-                val.to_string()
-            }),
+            label: Some(fonts.layout(&label, MarkStyle::Big.label_size())),
             style: MarkStyle::Big,
-        })
+        });
     }
-
     marks.push(Mark {
-        position: db_to_normalized(-9 as f32),
-        label: Some("-9".into()),
+        position: db_to_normalized(-9.0),
+        label: Some(fonts.layout("-9", MarkStyle::Medium.label_size())),
         style: MarkStyle::Medium,
     });
-
-    for val in [-45, -35, -25, -15 - 4, -3, -2, -1, 1, 2, 3, 4] {
+    for val in [-45, -35, -25, -19, -3, -2, -1, 1, 2, 3, 4] {
         marks.push(Mark {
             position: db_to_normalized(val as f32),
             label: None,
             style: MarkStyle::Inter,
-        })
+        });
     }
-
-    // marks.push(Mark {
-    //     position: 0.0,
-    //     label: None,
-    //     style: MarkStyle::Inter,
-    // });
-
     marks.push(Mark {
         position: 2.0,
         label: None,
         style: MarkStyle::Inter,
     });
-
     for val in [1, 2, 3, 5, 10, 20, 30, 50, 100, 200] {
+        let style = if val == 50 || val == 100 {
+            MarkStyle::UnderWarn
+        } else {
+            MarkStyle::Under
+        };
         marks.push(Mark {
             position: val as f32 / 100.0,
-            label: Some(val.to_string()),
-            style: if val == 50 || val == 100 {
-                MarkStyle::UnderWarn
-            } else {
-                MarkStyle::Under
-            },
-        })
+            label: Some(fonts.layout(&val.to_string(), style.label_size())),
+            style,
+        });
     }
-
     marks
 }
 
-pub fn draw_scale(
-    canvas: &mut Canvas<OpenGl>,
-    font_id: FontId,
-    marks: &[Mark],
-    max_angle: f32,
-    negative_db_range: f32,
-    positive_db_range: f32,
-    bend: f32,
-) {
-    let base_radius = 164.0;
-
-    let zero_db = normalized_to_db(1.0, negative_db_range);
-    let zero_db = zero_db + negative_db_range;
-    let zero_db = zero_db / (negative_db_range + positive_db_range);
-    let zero_db = zero_db.powf(bend);
-    let mut path = Path::new();
-    path.arc(
+pub fn draw_scale(scene: &mut Scene, transform: Affine, marks: &[Mark], scale: &Scale) {
+    let start = Scale::angle(0.0);
+    let end = Scale::angle(1.0);
+    let zero = Scale::angle(scale.position(1.0));
+    let warning_arc = Arc::new(
+        (0.0, 0.0),
+        (BASE_RADIUS + 3.75, BASE_RADIUS + 3.75),
+        zero,
+        end - zero,
         0.0,
-        0.0,
-        base_radius + 7.5 / 2.0,
-        (zero_db * max_angle * 2.0 - 90.0 - max_angle) * (std::f32::consts::PI / 180.0),
-        (max_angle - 90.0) * (std::f32::consts::PI / 180.0),
-        Solidity::Hole,
     );
-    let mut paint = Paint::color(Color::rgb(220, 62, 73));
-    paint.set_line_width(7.5);
-    canvas.stroke_path(&path, &paint);
-
-    let mut path = Path::new();
-    path.arc(
-        0.0,
-        0.0,
-        base_radius,
-        (-max_angle - 90.0) * (std::f32::consts::PI / 180.0),
-        (max_angle - 90.0) * (std::f32::consts::PI / 180.0),
-        Solidity::Hole,
+    scene.stroke(
+        &Stroke::new(7.5).with_caps(Cap::Butt),
+        transform,
+        WARNING,
+        None,
+        &warning_arc,
     );
-    let mut paint = Paint::color(Color::rgb(220, 220, 220));
-    paint.set_line_width(1.0);
-    canvas.stroke_path(&path, &paint);
+    let arc = Arc::new(
+        (0.0, 0.0),
+        (BASE_RADIUS, BASE_RADIUS),
+        start,
+        end - start,
+        0.0,
+    );
+    scene.stroke(&Stroke::new(1.0), transform, INK, None, &arc);
 
-    let mut previous_label_places = HashMap::new();
-
+    let mut previous_labels: HashMap<MarkStyle, f32> = HashMap::new();
     for mark in marks {
-        let rms = normalized_to_db(mark.position, negative_db_range);
-        if rms < -negative_db_range {
+        if normalized_to_db(mark.position, scale.negative_db_range) < -scale.negative_db_range {
             continue;
         }
-        let rms = rms + negative_db_range;
-        let rms = rms / (negative_db_range + positive_db_range);
-        let rms = rms.powf(bend);
-
-        // Convert value from [0.0, 1.0] to angle range [-max_angle°, max_angle°] in radians
-        let angle = (rms * max_angle * 2.0 - 90.0 - max_angle) * (std::f32::consts::PI / 180.0); // Convert degrees to radians
-
-        let (mark_lo, mark_hi) = match mark.style {
-            MarkStyle::Big => (0.0, 15.0),
-            MarkStyle::Medium => (0.0, 10.0),
-            MarkStyle::Inter => (0.0, 7.5),
-            MarkStyle::Under => (-3.0, 0.0),
-            MarkStyle::UnderWarn => (-3.0, 15.0),
+        let position = scale.position(mark.position);
+        let (low, high, label_offset) = match mark.style {
+            MarkStyle::Big => (0.0, 15.0, 20.0),
+            MarkStyle::Medium => (0.0, 10.0, 10.0),
+            MarkStyle::Inter => (0.0, 7.5, 0.0),
+            MarkStyle::Under => (-3.0, 0.0, -10.0),
+            MarkStyle::UnderWarn => (-3.0, 15.0, -10.0),
         };
-        let mark_lo = base_radius + mark_lo;
-        let mark_hi = base_radius + mark_hi;
-
-        let text_y = match mark.style {
-            MarkStyle::Big => 20.0,
-            MarkStyle::Medium => 10.0,
-            MarkStyle::Inter => 0.0,
-            MarkStyle::Under => -10.0,
-            MarkStyle::UnderWarn => -10.0,
-        };
-        let text_y = base_radius + text_y;
-
-        let text_paint = match mark.style {
-            MarkStyle::Big => {
-                let mut paint = Paint::color(Color::rgb(220, 220, 220));
-                paint.set_text_align(femtovg::Align::Center);
-                paint.set_font(&[font_id]);
-                paint.set_font_size(16.0);
-                paint
-            }
-            MarkStyle::Medium => {
-                let mut paint = Paint::color(Color::rgb(220, 220, 220));
-                paint.set_text_align(femtovg::Align::Center);
-                paint.set_font(&[font_id]);
-                paint.set_font_size(10.0);
-                paint
-            }
-            MarkStyle::Inter => Paint::color(Color::white()),
-            MarkStyle::Under => {
-                let mut paint = Paint::color(Color::rgb(220, 220, 220));
-                paint.set_text_align(femtovg::Align::Center);
-                paint.set_font(&[font_id]);
-                paint.set_font_size(6.0);
-                paint
-            }
-            MarkStyle::UnderWarn => {
-                let mut paint = Paint::color(Color::rgb(220, 62, 73));
-                paint.set_text_align(femtovg::Align::Center);
-                paint.set_font(&[font_id]);
-                paint.set_font_size(6.0);
-                paint
-            }
-        };
-
-        let mark_paint = match mark.style {
-            MarkStyle::Big => {
-                let mut paint = Paint::color(Color::rgb(220, 220, 220));
-                paint.set_line_width(1.0);
-                paint
-            }
-            MarkStyle::Medium => {
-                let mut paint = Paint::color(Color::rgb(220, 62, 73));
-                paint.set_line_width(1.0);
-                paint
-            }
-            MarkStyle::Inter => {
-                let mut paint = Paint::color(Color::rgb(220, 220, 220));
-                paint.set_line_width(1.0);
-                paint
-            }
-            MarkStyle::Under => {
-                let mut paint = Paint::color(Color::rgb(220, 220, 220));
-                paint.set_line_width(1.0);
-                paint
-            }
-            MarkStyle::UnderWarn => {
-                let mut paint = Paint::color(Color::rgb(220, 62, 73));
-                paint.set_line_width(1.0);
-                paint
-            }
-        };
-
-        canvas.save();
-        canvas.rotate(angle + std::f32::consts::FRAC_PI_2);
+        let rotated =
+            transform * Affine::rotate(Scale::angle(position) + std::f64::consts::FRAC_PI_2);
         if let Some(label) = &mark.label {
-            let prev_place = previous_label_places.get(&mark.style).unwrap_or(&10.0);
-            if prev_place.sub(rms).abs() > 0.075 {
-                canvas.fill_text(0.0, -text_y, label, &text_paint).unwrap();
-                previous_label_places.insert(&mark.style, rms);
+            if previous_labels
+                .get(&mark.style)
+                .is_none_or(|previous| (previous - position).abs() > 0.075)
+            {
+                let color = if mark.style == MarkStyle::UnderWarn {
+                    WARNING
+                } else {
+                    INK
+                };
+                label.draw(
+                    scene,
+                    rotated * Affine::translate((0.0, -BASE_RADIUS - label_offset)),
+                    color,
+                );
+                previous_labels.insert(mark.style, position);
             }
         }
-
-        let mut path = Path::new();
-        path.move_to(0.0, -mark_lo);
-        path.line_to(0.0, -mark_hi);
-
-        canvas.stroke_path(&path, &mark_paint);
-
-        canvas.restore();
+        let color = match mark.style {
+            MarkStyle::Medium | MarkStyle::UnderWarn => WARNING,
+            _ => INK,
+        };
+        scene.stroke(
+            &Stroke::new(1.0),
+            rotated,
+            color,
+            None,
+            &Line::new((0.0, -BASE_RADIUS - low), (0.0, -BASE_RADIUS - high)),
+        );
     }
 }

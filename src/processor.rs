@@ -2,8 +2,6 @@ use std::{collections::VecDeque, ops::Mul};
 
 use instant::Instant;
 
-use crate::db_to_multiplier;
-
 pub struct Processor {
     squares: VecDeque<[i64; 2]>,
     square_sums: VecDeque<[i64; 2]>,
@@ -13,13 +11,13 @@ pub struct Processor {
 }
 
 impl Processor {
-    pub fn new() -> Self {
+    pub fn new(preamp: f32) -> Self {
         Self {
             squares: VecDeque::new(),
             square_sums: VecDeque::new(),
             head_instant: Instant::now(),
             samplerate: 44100,
-            preamp: db_to_multiplier(18.0),
+            preamp,
         }
     }
 
@@ -96,8 +94,7 @@ mod tests {
 
     #[test]
     fn meters_stereo_channels_independently_and_resets_on_sample_rate_change() {
-        let mut processor = Processor::new();
-        processor.preamp = 1.0;
+        let mut processor = Processor::new(1.0);
         processor.set_samplerate(100);
         processor.consume_buf(&[[0.5, 0.25]; 60]);
         assert_eq!(
