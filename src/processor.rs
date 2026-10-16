@@ -67,7 +67,7 @@ impl Detector {
         match self {
             Self::Vu => {
                 // Sine calibration: mean(|sin|) * pi/(2*sqrt(2)) = sine RMS.
-                input.map(|sample| sample.abs() * std::f64::consts::PI / (2.0 * 2.0_f64.sqrt()))
+                input.map(crate::measurement::vu_drive)
             }
             Self::Ppm {
                 slow,

@@ -313,3 +313,9 @@ pub async fn prepare_device(
     }
     Ok(id)
 }
+
+impl Default for BackgroundCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}

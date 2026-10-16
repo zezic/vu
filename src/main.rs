@@ -21,28 +21,8 @@ use winit::{
     window::WindowId,
 };
 
-mod audio;
-mod config;
-mod frame_schedule;
-mod measurement;
-mod meter;
-mod processor;
-mod profile;
-mod render;
+use vu::{audio, config, frame_schedule, measurement, meter, profile, render, scales, AudioEvent};
 mod saved;
-mod scales;
-mod text;
-mod theme;
-
-enum AudioEvent {
-    Config {
-        samplerate: usize,
-    },
-    Buffer {
-        buf: Vec<[f32; 2]>,
-        captured_at: Instant,
-    },
-}
 
 enum WindowState {
     Suspended,
@@ -513,16 +493,4 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn db_to_multiplier(db: f32) -> f32 {
-    10.0_f32.powf(db / 20.0)
-}
-pub fn normalized_to_db(value: f32, negative_db_range: f32) -> f32 {
-    if value <= 0.0 {
-        -negative_db_range
-    } else {
-        20.0 * value.log10()
-    }
-}
-pub fn db_to_normalized(db: f32) -> f32 {
-    10.0_f32.powf(db / 20.0)
-}
+pub use vu::{db_to_multiplier, db_to_normalized, normalized_to_db};

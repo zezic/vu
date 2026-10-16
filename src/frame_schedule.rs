@@ -78,7 +78,7 @@ impl FrameRateLimit {
         })
     }
 
-    fn interval(self) -> Option<Duration> {
+    pub fn interval(self) -> Option<Duration> {
         self.fps()
             .map(|fps| Duration::from_nanos(1_000_000_000_u64.div_ceil(fps)))
     }

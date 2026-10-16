@@ -50,3 +50,8 @@ impl Mode {
         }
     }
 }
+
+/// Rectified-average drive, calibrated so a sine's mean drive equals its RMS.
+pub(crate) fn vu_drive(sample: f64) -> f64 {
+    sample.abs() * std::f64::consts::PI / (2.0 * 2.0_f64.sqrt())
+}

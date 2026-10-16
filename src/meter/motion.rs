@@ -283,7 +283,7 @@ pub(super) struct Motion {
     mechanics: Mechanics,
     at: AudioTime,
     history: VecDeque<TimedSegment>,
-    frames: VecDeque<f64>,
+    frames: ShutterWindow,
 }
 
 pub(super) struct Exposure {
@@ -446,7 +446,9 @@ impl Motion {
             },
             at,
             history: VecDeque::with_capacity(2048),
-            frames: VecDeque::with_capacity(ShutterFrames::MAX as usize),
+            frames: ShutterWindow {
+                frames: VecDeque::with_capacity(ShutterFrames::MAX as usize),
+            },
         }
     }
 
@@ -464,7 +466,7 @@ impl Motion {
         self.mechanics.state.velocity = 0.0;
         self.mechanics.movement = Movement::Rest;
         self.history.clear();
-        self.frames.clear();
+        self.frames.frames.clear();
     }
 
     /// Commit one drive on the sample grid. This is never called by rendering.
@@ -500,29 +502,8 @@ impl Motion {
             frame.end() <= self.at,
             "display cursor must stay within recorded audio"
         );
-        let end = frame.end();
-        if frame.seconds() > 0.0 {
-            if self.frames.len() == ShutterFrames::MAX as usize {
-                self.frames.pop_front();
-            }
-            self.frames.push_back(frame.seconds().min(HISTORY_SECONDS));
-        }
-        let mut frames = f64::from(shutter.frames());
-        let seconds: f64 = self
-            .frames
-            .iter()
-            .rev()
-            .map(|seconds| {
-                let fraction = frames.min(1.0);
-                frames -= fraction;
-                seconds * fraction
-            })
-            .sum();
-        let start = if frame.seconds() == 0.0 {
-            end
-        } else {
-            frame.end().shifted(-seconds.min(HISTORY_SECONDS))
-        };
+        let interval = self.frames.interval(frame, shutter);
+        let (start, end) = (interval.start(), interval.end());
         let mut minimum = f64::INFINITY;
         let mut maximum = f64::NEG_INFINITY;
         let mut integral = 0.0;
@@ -616,7 +597,7 @@ mod tests {
             );
         }
         assert!(motion.history.len() <= 2001);
-        assert!(motion.frames.is_empty());
+        assert!(motion.frames.frames.is_empty());
         let exposure = motion.expose(
             AudioInterval::new(motion.at.shifted(-1.0 / 240.0), motion.at),
             ShutterFrames::default(),
@@ -1029,9 +1010,43 @@ mod tests {
         }
         let settled = motion.advance(0.0, 0.1, shutter);
         assert!(settled.maximum - settled.minimum < 1e-10);
-        assert_eq!(motion.frames.len(), ShutterFrames::MAX as usize);
+        assert_eq!(motion.frames.frames.len(), ShutterFrames::MAX as usize);
         let paused = motion.advance(0.0, 0.0, shutter);
         near(paused.minimum, paused.maximum);
         near(paused.average, motion.mechanics.state.position);
+    }
+}
+
+/// Display-frame shutter accounting shared by recorded motion sources.
+#[derive(Default)]
+pub struct ShutterWindow {
+    frames: VecDeque<f64>,
+}
+impl ShutterWindow {
+    pub fn interval(&mut self, frame: AudioInterval, shutter: ShutterFrames) -> AudioInterval {
+        let end = frame.end();
+        if frame.seconds() > 0.0 {
+            if self.frames.len() == ShutterFrames::MAX as usize {
+                self.frames.pop_front();
+            }
+            self.frames.push_back(frame.seconds().min(HISTORY_SECONDS));
+        }
+        let mut frames = f64::from(shutter.frames());
+        let seconds: f64 = self
+            .frames
+            .iter()
+            .rev()
+            .map(|seconds| {
+                let fraction = frames.min(1.0);
+                frames -= fraction;
+                seconds * fraction
+            })
+            .sum();
+        let start = if frame.seconds() == 0.0 {
+            end
+        } else {
+            frame.end().shifted(-seconds.min(HISTORY_SECONDS))
+        };
+        AudioInterval::new(start, end)
     }
 }

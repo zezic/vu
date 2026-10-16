@@ -137,3 +137,16 @@ exceeds that budget. Use release builds and compare runs on the same GPU.
 The ignored `overlay_matches_vector_stroke_sweep_mask_and_overload` test compares
 the overlay against vector rendering at rest, during rapid motion, in both layouts,
 and after zooming, including subpixel strokes and overload gradients.
+
+## Embedding
+
+The crate exports its existing renderer, measurement modes, scales, themes, and
+text layouts as a library. Feed borrowed output samples to `Meter::consume_buf`.
+`Meter::update_gauges` uses the same detectors, lamp history, motion, stop contact,
+permanent bending, shutter exposure and subpixel appearance comparison as the
+standalone application's `Meter::draw`. `Meter::draw_gauge_faces` draws the same
+scales, stop dots and lamp recesses at host-supplied transforms.
+
+`meter::SWEEP_SHADER` supplies the shared geometric sweep-wing coverage and radial
+opacity functions. `meter::ShutterWindow` supplies the frame-based shutter window
+used by recorded motion sources.

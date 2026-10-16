@@ -162,6 +162,14 @@ pub struct Theme {
 }
 
 impl Theme {
+    pub fn animating(&self) -> bool {
+        self.transition.is_some()
+    }
+
+    pub fn selected(&self) -> ThemeId {
+        self.selected
+    }
+
     pub fn new(selected: ThemeId) -> Self {
         Self {
             selected,

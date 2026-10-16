@@ -31,8 +31,8 @@ const LAMP_RADIUS: f64 = 5.0;
 const GLOW_RADIUS: f64 = 40.0;
 
 mod motion;
-pub use motion::PeakMovement;
 use motion::{Bend, Motion, HINGE_RADIUS, STOP_RADIUS};
+pub use motion::{PeakMovement, ShutterWindow};
 mod renderer;
 pub use renderer::Renderer;
 
@@ -365,7 +365,7 @@ struct FaceSettings {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct NeedleAppearance {
+pub struct NeedleAppearance {
     transform: Affine,
     angle: f64,
     bend: Bend,
@@ -663,17 +663,20 @@ impl Meter {
                     Needle::new(self.mode, self.peak_movement, AudioTime::ZERO)
                 });
             }
-            AudioEvent::Buffer { buf, captured_at } => {
-                for drive in self.processor.consume_buf(&buf, captured_at) {
-                    for (channel, needle) in self.needles.iter_mut().enumerate() {
-                        needle.consume(
-                            self.mode,
-                            &self.scale,
-                            drive.levels[channel],
-                            drive.interval,
-                        );
-                    }
-                }
+            AudioEvent::Buffer { buf, captured_at } => self.consume_buf(&buf, captured_at),
+        }
+    }
+
+    /// Borrowed output audio follows the standalone capture processing path.
+    pub fn consume_buf(&mut self, buf: &[[f32; 2]], captured_at: std::time::Instant) {
+        for drive in self.processor.consume_buf(buf, captured_at) {
+            for (channel, needle) in self.needles.iter_mut().enumerate() {
+                needle.consume(
+                    self.mode,
+                    &self.scale,
+                    drive.levels[channel],
+                    drive.interval,
+                );
             }
         }
     }
@@ -740,6 +743,37 @@ impl Meter {
         self.bend_readout.opacity = opacity;
     }
 
+    fn draw_gauge(
+        scene: &mut Scene,
+        meter: Affine,
+        marks: &[Mark],
+        scale: &Scale,
+        mode: Mode,
+        colors: &MeterColors,
+        units: &Text,
+    ) {
+        draw_scale(scene, meter, marks, scale, mode, colors);
+        units.draw(
+            scene,
+            meter * Affine::translate((LAMP_CENTER.x, LAMP_CENTER.y - 23.0)),
+            colors.scale,
+        );
+        scene.fill(
+            Fill::NonZero,
+            meter,
+            colors.needle_stop,
+            None,
+            &Circle::new(motion::stop_center(), STOP_RADIUS),
+        );
+        scene.fill(
+            Fill::NonZero,
+            meter,
+            colors.lamp_off,
+            None,
+            &Circle::new(LAMP_CENTER, 7.0),
+        );
+    }
+
     fn draw_face(&mut self, view: &View, limit: FrameRateLimit) {
         let scene = &mut self.face;
         scene.reset();
@@ -802,27 +836,68 @@ impl Meter {
         );
         for pivot in view.layout.pivots() {
             let meter = view.transform * Affine::translate(pivot.to_vec2());
-            draw_scale(scene, meter, &self.marks, &self.scale, self.mode, colors);
-            self.units.draw(
+            Self::draw_gauge(
                 scene,
-                meter * Affine::translate((LAMP_CENTER.x, LAMP_CENTER.y - 23.0)),
-                colors.scale,
-            );
-            scene.fill(
-                Fill::NonZero,
                 meter,
-                colors.needle_stop,
-                None,
-                &Circle::new(motion::stop_center(), STOP_RADIUS),
-            );
-            scene.fill(
-                Fill::NonZero,
-                meter,
-                colors.lamp_off,
-                None,
-                &Circle::new(LAMP_CENTER, 7.0),
+                &self.marks,
+                &self.scale,
+                self.mode,
+                colors,
+                &self.units,
             );
         }
+    }
+
+    fn expose_needles(
+        &mut self,
+        transforms: [Affine; 2],
+        frame_time: FrameTime,
+    ) -> [NeedleAppearance; 2] {
+        let requested = AudioInterval::new(
+            self.processor
+                .position_at(frame_time.start())
+                .unwrap_or(AudioTime::ZERO),
+            self.processor
+                .position_at(frame_time.end())
+                .unwrap_or(AudioTime::ZERO),
+        );
+        let frame =
+            self.audio_cursor
+                .frame(frame_time, requested, self.processor.available_interval());
+        self.appearances_at(transforms, frame)
+    }
+    fn appearances_at(
+        &mut self,
+        transforms: [Affine; 2],
+        frame: AudioInterval,
+    ) -> [NeedleAppearance; 2] {
+        std::array::from_fn(|channel| {
+            let needle = &mut self.needles[channel];
+            let meter = transforms[channel];
+            let strength = needle.overload.value_at(frame.end());
+            let exposure = needle.motion.expose(frame, self.shutter_frames);
+            // Keep angular gradients within one positive turn.
+            let angle = Scale::angle(exposure.average as f32) + std::f64::consts::TAU;
+            let bounds = [exposure.minimum, exposure.maximum]
+                .map(|position| Scale::angle(position as f32) + std::f64::consts::TAU);
+            let travel = (bounds[1] - bounds[0]) * NEEDLE_RADIUS;
+            // Normalize the triangular opacity profile by the tip's swept distance.
+            let peak = (2.0 * NEEDLE_WIDTH / travel.max(2.0 * NEEDLE_WIDTH)) as f32;
+            let scale = meter.as_coeffs()[0].hypot(meter.as_coeffs()[1]);
+            // Introduce the wings once their sweep exceeds the visible stroke width.
+            let transition = ((travel * scale / (NEEDLE_WIDTH * scale).max(1.0) - 1.0) / 2.0)
+                .clamp(0.0, 1.0) as f32;
+            let blur = transition * transition * (3.0 - 2.0 * transition);
+            NeedleAppearance {
+                transform: meter,
+                angle,
+                bend: exposure.bend,
+                edges: bounds,
+                peak,
+                blur,
+                overload: strength,
+            }
+        })
     }
 
     pub fn draw(
@@ -850,46 +925,12 @@ impl Meter {
             readout.advance(&mut self.fonts, &self.scale, adjusting, dt);
             readout.draw(scene, view, &self.theme.colors);
         }
-        let requested = AudioInterval::new(
-            self.processor
-                .position_at(frame_time.start())
-                .unwrap_or(AudioTime::ZERO),
-            self.processor
-                .position_at(frame_time.end())
-                .unwrap_or(AudioTime::ZERO),
+        let needles = self.expose_needles(
+            view.layout
+                .pivots()
+                .map(|pivot| view.transform * Affine::translate(pivot.to_vec2())),
+            frame_time,
         );
-        let frame =
-            self.audio_cursor
-                .frame(frame_time, requested, self.processor.available_interval());
-        let pivots = view.layout.pivots();
-        let needles = std::array::from_fn(|channel| {
-            let needle = &mut self.needles[channel];
-            let pivot = pivots[channel];
-            let meter = view.transform * Affine::translate(pivot.to_vec2());
-            let strength = needle.overload.value_at(frame.end());
-            let exposure = needle.motion.expose(frame, self.shutter_frames);
-            // Keep angular gradients within one positive turn.
-            let angle = Scale::angle(exposure.average as f32) + std::f64::consts::TAU;
-            let bounds = [exposure.minimum, exposure.maximum]
-                .map(|position| Scale::angle(position as f32) + std::f64::consts::TAU);
-            let travel = (bounds[1] - bounds[0]) * NEEDLE_RADIUS;
-            // Normalize the triangular opacity profile by the tip's swept distance.
-            let peak = (2.0 * NEEDLE_WIDTH / travel.max(2.0 * NEEDLE_WIDTH)) as f32;
-            let scale = view.transform.as_coeffs()[0].hypot(view.transform.as_coeffs()[1]);
-            // Introduce the wings once their sweep exceeds the visible stroke width.
-            let transition = ((travel * scale / (NEEDLE_WIDTH * scale).max(1.0) - 1.0) / 2.0)
-                .clamp(0.0, 1.0) as f32;
-            let blur = transition * transition * (3.0 - 2.0 * transition);
-            NeedleAppearance {
-                transform: meter,
-                angle,
-                bend: exposure.bend,
-                edges: bounds,
-                peak,
-                blur,
-                overload: strength,
-            }
-        });
         let appearance = Appearance {
             needles,
             range_opacity: self.range_readout.opacity,
@@ -926,5 +967,120 @@ impl Meter {
                     .needles,
             },
         }
+    }
+}
+
+/// A host supplies placement and display times; VU retains all meter behavior.
+#[derive(Clone, Copy)]
+pub struct GaugeFrame {
+    pub needles: [NeedleAppearance; 2],
+    pub colors: MeterColors,
+    pub positions: [f32; 2],
+    pub changed: bool,
+}
+impl Meter {
+    pub fn configure(&mut self, config: &Config) {
+        if self.mode != config.mode {
+            self.set_mode(config.mode);
+        }
+        if self.peak_movement != config.peak_movement && config.mode.uses_peak_movement() {
+            self.set_peak_movement(config.peak_movement);
+        }
+        if self.processor.preamp != config.preamp_db.gain() {
+            self.set_preamp(config.preamp_db);
+        }
+        if self.shutter_frames != config.shutter_frames {
+            self.set_shutter(config.shutter_frames);
+        }
+        if self.theme.selected() != config.theme {
+            self.set_theme(config.theme);
+        }
+    }
+    pub fn draw_gauge_faces(&self, scene: &mut Scene, transforms: [Affine; 2]) {
+        for transform in transforms {
+            Self::draw_gauge(
+                scene,
+                transform * Affine::translate((160.0, CENTER_Y)),
+                &self.marks,
+                &self.scale,
+                self.mode,
+                &self.theme.colors,
+                &self.units,
+            );
+        }
+    }
+    /// Compare the current recorded pose without adding a display frame to the shutter.
+    pub fn gauges_need_frame(&mut self, transforms: [Affine; 2], now: std::time::Instant) -> bool {
+        let end = self
+            .processor
+            .position_at(now)
+            .unwrap_or(AudioTime::ZERO)
+            .min(self.processor.available_interval().end());
+        let needles = self.appearances_at(
+            transforms.map(|t| t * Affine::translate((160.0, CENTER_Y))),
+            AudioInterval::new(end, end),
+        );
+        let current = Appearance {
+            needles,
+            range_opacity: 0.0,
+            bend_opacity: 0.0,
+        };
+        self.theme.animating()
+            || self
+                .appearance
+                .as_ref()
+                .is_none_or(|previous| current.needles_differ(previous))
+    }
+    pub fn update_gauges(&mut self, transforms: [Affine; 2], frame_time: FrameTime) -> GaugeFrame {
+        let previous_colors = self.theme.colors;
+        self.theme.advance(frame_time.seconds());
+        let needles = self.expose_needles(
+            transforms.map(|t| t * Affine::translate((160.0, CENTER_Y))),
+            frame_time,
+        );
+        let appearance = Appearance {
+            needles,
+            range_opacity: 0.0,
+            bend_opacity: 0.0,
+        };
+        let changed = previous_colors != self.theme.colors
+            || self
+                .appearance
+                .as_ref()
+                .is_none_or(|previous| appearance.needles_differ(previous));
+        if changed {
+            self.appearance = Some(appearance);
+        }
+        let needles = self
+            .appearance
+            .as_ref()
+            .expect("first gauge frame has an appearance")
+            .needles;
+        GaugeFrame {
+            needles,
+            colors: self.theme.colors,
+            positions: needles.map(|needle| {
+                ((needle.angle - std::f64::consts::TAU).to_degrees() as f32
+                    + 90.0
+                    + crate::scales::MAX_ANGLE)
+                    / (2.0 * crate::scales::MAX_ANGLE)
+            }),
+            changed,
+        }
+    }
+}
+
+/// VU's angular wing profile, independent of the rendered vector geometry.
+pub const SWEEP_PROFILE_SHADER: &str = include_str!("meter/profile.wgsl");
+
+/// Shared geometric stroke coverage, sweep wings and radial opacity.
+pub const SWEEP_SHADER: &str = include_str!("meter/sweep.wgsl");
+
+impl GaugeFrame {
+    pub fn placed(mut self, transforms: [Affine; 2]) -> Self {
+        for (needle, transform) in self.needles.iter_mut().zip(transforms) {
+            needle.transform = transform * Affine::translate((160.0, CENTER_Y));
+        }
+        self
     }
 }

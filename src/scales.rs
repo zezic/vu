@@ -220,3 +220,9 @@ pub fn draw_scale(
         );
     }
 }
+
+impl Default for Scale {
+    fn default() -> Self {
+        Self::new()
+    }
+}

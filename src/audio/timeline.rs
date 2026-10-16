@@ -61,7 +61,7 @@ impl AudioInterval {
 /// Correlates the native stream clock with the application clock once per stream.
 /// Subsequent buffers use native capture timestamps, not their delivery times.
 #[derive(Debug)]
-pub(super) struct CaptureClock {
+pub struct CaptureClock {
     native: StreamInstant,
     local: Instant,
 }
@@ -72,10 +72,16 @@ impl CaptureClock {
     }
 
     pub fn capture_at(&self, timestamp: InputStreamTimestamp) -> Instant {
-        if timestamp.capture >= self.native {
-            self.local + timestamp.capture.duration_since(self.native)
+        self.local_at(timestamp.capture)
+    }
+    pub fn playback_at(&self, timestamp: cpal::OutputStreamTimestamp) -> Instant {
+        self.local_at(timestamp.playback)
+    }
+    fn local_at(&self, native: StreamInstant) -> Instant {
+        if native >= self.native {
+            self.local + native.duration_since(self.native)
         } else {
-            self.local - self.native.duration_since(timestamp.capture)
+            self.local - self.native.duration_since(native)
         }
     }
 }

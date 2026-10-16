@@ -246,8 +246,10 @@ impl Renderer {
             label: Some("Meter overlay"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}\n{}",
+                    "{}\n{}\n{}\n{}",
                     binding.declaration(),
+                    super::SWEEP_PROFILE_SHADER,
+                    super::SWEEP_SHADER,
                     include_str!("overlay.wgsl")
                 )
                 .into(),
