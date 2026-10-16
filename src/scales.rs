@@ -146,6 +146,18 @@ pub fn draw_scale(
     mode: Mode,
     colors: &MeterColors,
 ) {
+    draw_scale_styled(scene, transform, marks, scale, mode, colors, None);
+}
+
+pub(crate) fn draw_scale_styled(
+    scene: &mut Scene,
+    transform: Affine,
+    marks: &[Mark],
+    scale: &Scale,
+    mode: Mode,
+    colors: &MeterColors,
+    line_width: Option<f64>,
+) {
     let start = Scale::angle(0.0);
     let end = Scale::angle(1.0);
     let zero = Scale::angle(mode.position(scale, 1.0));
@@ -170,7 +182,13 @@ pub fn draw_scale(
         end - start,
         0.0,
     );
-    scene.stroke(&Stroke::new(1.0), transform, colors.scale, None, &arc);
+    scene.stroke(
+        &Stroke::new(line_width.unwrap_or(1.0)),
+        transform,
+        colors.scale,
+        None,
+        &arc,
+    );
 
     let mut previous_labels: HashMap<MarkStyle, f32> = HashMap::new();
     for mark in marks {
@@ -212,7 +230,7 @@ pub fn draw_scale(
             _ => colors.scale,
         };
         scene.stroke(
-            &Stroke::new(1.0),
+            &Stroke::new(line_width.unwrap_or(1.0)),
             rotated,
             color,
             None,

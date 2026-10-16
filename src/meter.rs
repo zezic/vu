@@ -14,7 +14,7 @@ use crate::{
     measurement::Mode,
     processor::Processor,
     render::Frame,
-    scales::{draw_scale, generate_scale, Mark, Scale, ScaleSetting},
+    scales::{generate_scale, Mark, Scale, ScaleSetting},
     text::{Fonts, Text},
     theme::{MeterColors, Theme, ThemeId},
     AudioEvent,
@@ -373,6 +373,7 @@ pub struct NeedleAppearance {
     peak: f32,
     blur: f32,
     overload: f32,
+    width: f64,
 }
 
 impl NeedleAppearance {
@@ -444,7 +445,8 @@ impl Appearance {
             .iter()
             .zip(&previous.needles)
             .any(|(current, previous)| {
-                current.screen_tip().distance(previous.screen_tip()) >= 0.2
+                current.width != previous.width
+                    || current.screen_tip().distance(previous.screen_tip()) >= 0.2
                     || current
                         .screen_edges()
                         .iter()
@@ -559,7 +561,16 @@ impl Needle {
     }
 }
 
+/// Overrides for embedded gauges. Omitted values follow VU's native styling.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GaugeStyle {
+    /// Gauge-local stroke width, shared by the scale and needle.
+    pub line_width: Option<f64>,
+    pub colors: Option<MeterColors>,
+}
+
 pub struct Meter {
+    gauge_style: GaugeStyle,
     mode: Mode,
     mode_readout: Readout,
     mode_value: Text,
@@ -621,6 +632,7 @@ impl Meter {
             ScaleReadout::new(&mut fonts, ScaleSetting::DbRange, scale.negative_db_range);
         let bend_readout = ScaleReadout::new(&mut fonts, ScaleSetting::Bend, scale.bend);
         Ok(Self {
+            gauge_style: GaugeStyle::default(),
             mode: config.mode,
             mode_readout,
             mode_value,
@@ -751,8 +763,9 @@ impl Meter {
         mode: Mode,
         colors: &MeterColors,
         units: &Text,
+        line_width: Option<f64>,
     ) {
-        draw_scale(scene, meter, marks, scale, mode, colors);
+        crate::scales::draw_scale_styled(scene, meter, marks, scale, mode, colors, line_width);
         units.draw(
             scene,
             meter * Affine::translate((LAMP_CENTER.x, LAMP_CENTER.y - 23.0)),
@@ -844,6 +857,7 @@ impl Meter {
                 self.mode,
                 colors,
                 &self.units,
+                None,
             );
         }
     }
@@ -880,13 +894,14 @@ impl Meter {
             let angle = Scale::angle(exposure.average as f32) + std::f64::consts::TAU;
             let bounds = [exposure.minimum, exposure.maximum]
                 .map(|position| Scale::angle(position as f32) + std::f64::consts::TAU);
+            let width = self.gauge_style.line_width.unwrap_or(NEEDLE_WIDTH);
             let travel = (bounds[1] - bounds[0]) * NEEDLE_RADIUS;
             // Normalize the triangular opacity profile by the tip's swept distance.
-            let peak = (2.0 * NEEDLE_WIDTH / travel.max(2.0 * NEEDLE_WIDTH)) as f32;
+            let peak = (2.0 * width / travel.max(2.0 * width)) as f32;
             let scale = meter.as_coeffs()[0].hypot(meter.as_coeffs()[1]);
             // Introduce the wings once their sweep exceeds the visible stroke width.
-            let transition = ((travel * scale / (NEEDLE_WIDTH * scale).max(1.0) - 1.0) / 2.0)
-                .clamp(0.0, 1.0) as f32;
+            let transition =
+                ((travel * scale / (width * scale).max(1.0) - 1.0) / 2.0).clamp(0.0, 1.0) as f32;
             let blur = transition * transition * (3.0 - 2.0 * transition);
             NeedleAppearance {
                 transform: meter,
@@ -896,6 +911,7 @@ impl Meter {
                 peak,
                 blur,
                 overload: strength,
+                width,
             }
         })
     }
@@ -979,6 +995,15 @@ pub struct GaugeFrame {
     pub changed: bool,
 }
 impl Meter {
+    pub fn set_gauge_style(&mut self, style: GaugeStyle) {
+        assert!(style
+            .line_width
+            .is_none_or(|width| width.is_finite() && width > 0.0));
+        if self.gauge_style != style {
+            self.gauge_style = style;
+            self.appearance = None;
+        }
+    }
     pub fn configure(&mut self, config: &Config) {
         if self.mode != config.mode {
             self.set_mode(config.mode);
@@ -1004,8 +1029,9 @@ impl Meter {
                 &self.marks,
                 &self.scale,
                 self.mode,
-                &self.theme.colors,
+                &self.gauge_style.colors.unwrap_or(self.theme.colors),
                 &self.units,
+                self.gauge_style.line_width,
             );
         }
     }
@@ -1058,7 +1084,7 @@ impl Meter {
             .needles;
         GaugeFrame {
             needles,
-            colors: self.theme.colors,
+            colors: self.gauge_style.colors.unwrap_or(self.theme.colors),
             positions: needles.map(|needle| {
                 ((needle.angle - std::f64::consts::TAU).to_degrees() as f32
                     + 90.0

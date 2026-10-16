@@ -51,6 +51,56 @@ impl<'de> Deserialize<'de> for ThemeId {
     }
 }
 
+/// A named slot in the selected theme's original terminal palette.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, strum::VariantArray, strum::Display,
+)]
+#[strum(serialize_all = "title_case")]
+pub enum Accent {
+    Foreground,
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    BrightBlack,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
+    BrightWhite,
+}
+impl ThemeId {
+    pub fn color(self, accent: Accent) -> Color {
+        let entry = &registry()[self.0];
+        let index = match accent {
+            Accent::Foreground => return entry.foreground,
+            Accent::Black => 0,
+            Accent::Red => 1,
+            Accent::Green => 2,
+            Accent::Yellow => 3,
+            Accent::Blue => 4,
+            Accent::Magenta => 5,
+            Accent::Cyan => 6,
+            Accent::White => 7,
+            Accent::BrightBlack => 8,
+            Accent::BrightRed => 9,
+            Accent::BrightGreen => 10,
+            Accent::BrightYellow => 11,
+            Accent::BrightBlue => 12,
+            Accent::BrightMagenta => 13,
+            Accent::BrightCyan => 14,
+            Accent::BrightWhite => 15,
+        };
+        entry.accents[index]
+    }
+}
+
 /// The single mapping from Gogh's terminal palette to VU's visual roles.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterColors {
@@ -64,6 +114,8 @@ pub struct MeterColors {
     pub hint: Color,
     pub lamp_off: Color,
     pub lamp_hot: Color,
+    pub lamp: Color,
+    pub lamp_glow: Color,
 }
 
 impl MeterColors {
@@ -81,6 +133,8 @@ impl MeterColors {
             hint: mix(background, scale, 0.6),
             lamp_off: mix(background, scale, 0.1),
             lamp_hot: hex(&theme.basic[11]),
+            lamp: hex(&theme.basic[1]),
+            lamp_glow: hex(&theme.basic[1]),
         }
     }
 
@@ -96,6 +150,8 @@ impl MeterColors {
             hint: mix(self.hint, target.hint, progress),
             lamp_off: mix(self.lamp_off, target.lamp_off, progress),
             lamp_hot: mix(self.lamp_hot, target.lamp_hot, progress),
+            lamp: mix(self.lamp, target.lamp, progress),
+            lamp_glow: mix(self.lamp_glow, target.lamp_glow, progress),
         }
     }
 }
@@ -123,6 +179,8 @@ struct GoghTheme {
 
 struct Entry {
     name: String,
+    foreground: Color,
+    accents: [Color; 16],
     colors: MeterColors,
 }
 
@@ -135,6 +193,8 @@ fn registry() -> &'static [Entry] {
             .into_iter()
             .map(|theme| Entry {
                 colors: MeterColors::from_gogh(&theme),
+                foreground: hex(&theme.foreground),
+                accents: theme.basic.each_ref().map(|value| hex(value)),
                 name: theme.name,
             })
             .collect();

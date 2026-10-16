@@ -6,7 +6,7 @@ use vello::{
 
 use super::{
     motion::HINGE_RADIUS, NeedleAppearance, Overlay, BEND_ROUNDING, GLOW_RADIUS, LAMP_CENTER,
-    LAMP_RADIUS, NEEDLE_RADIUS, NEEDLE_WIDTH,
+    LAMP_RADIUS, NEEDLE_RADIUS,
 };
 
 #[repr(C)]
@@ -45,8 +45,8 @@ impl From<&NeedleAppearance> for GpuNeedle {
                 |bounds, point| bounds.union_pt(point),
             )
             .inflate(
-                NEEDLE_WIDTH * scale / 2.0 + 1.0,
-                NEEDLE_WIDTH * scale / 2.0 + 1.0,
+                needle.width * scale / 2.0 + 1.0,
+                needle.width * scale / 2.0 + 1.0,
             );
         let glow = needle
             .transform
@@ -84,7 +84,7 @@ impl From<&NeedleAppearance> for GpuNeedle {
             ],
             shape: [
                 NEEDLE_RADIUS as f32,
-                NEEDLE_WIDTH as f32,
+                needle.width as f32,
                 needle.peak,
                 needle.overload,
             ],
@@ -98,7 +98,8 @@ struct Uniforms {
     viewport: [f32; 4],
     ink: [f32; 4],
     light: [f32; 4],
-    warning: [f32; 4],
+    lamp: [f32; 4],
+    halo: [f32; 4],
     hot: [f32; 4],
     needles: [GpuNeedle; 2],
 }
@@ -327,6 +328,28 @@ impl Renderer {
         viewport: Size,
         overlay: &Overlay<'_>,
     ) {
+        self.draw_in_regions(
+            device,
+            encoder,
+            background,
+            target,
+            viewport,
+            overlay,
+            &[Rect::from_origin_size(Point::ORIGIN, viewport)],
+        );
+    }
+
+    /// Composite motion only within nonoverlapping pixel rectangles, preserving foreground UI.
+    pub fn draw_in_regions(
+        &mut self,
+        device: &DeviceHandle,
+        encoder: &mut wgpu::CommandEncoder,
+        background: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        viewport: Size,
+        overlay: &Overlay<'_>,
+        regions: &[Rect],
+    ) {
         if self
             .background
             .as_ref()
@@ -342,7 +365,8 @@ impl Renderer {
         let uniforms = Uniforms {
             viewport: [viewport.width as f32, viewport.height as f32, 0.0, 0.0],
             ink: colors.needle.components,
-            warning: colors.warning.components,
+            lamp: colors.lamp.components,
+            halo: colors.lamp_glow.components,
             hot: colors.lamp_hot.components,
             light: [
                 LAMP_CENTER.x as f32,
@@ -377,11 +401,19 @@ impl Renderer {
             &[],
         );
         pass.draw(0..3, 0..1);
-        if needles.iter().any(|needle| needle.overload > 0.0) {
-            pass.set_pipeline(&self.glow);
+        for region in regions {
+            pass.set_scissor_rect(
+                region.x0 as u32,
+                region.y0 as u32,
+                region.width() as u32,
+                region.height() as u32,
+            );
+            if needles.iter().any(|needle| needle.overload > 0.0) {
+                pass.set_pipeline(&self.glow);
+                pass.draw(0..6, 0..2);
+            }
+            pass.set_pipeline(&self.needle);
             pass.draw(0..6, 0..2);
         }
-        pass.set_pipeline(&self.needle);
-        pass.draw(0..6, 0..2);
     }
 }

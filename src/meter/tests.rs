@@ -1458,3 +1458,33 @@ fn changing_vu_levels_keep_continuous_motion_and_full_shutter_between_buffers() 
     }
     Ok(())
 }
+
+#[test]
+fn embedded_gauge_style_preserves_measurements_and_separates_visual_roles() {
+    use super::GaugeStyle;
+    use crate::theme::{Accent, ThemeId};
+    let config = crate::config::Config::default();
+    let mut original = Meter::new(&config).unwrap();
+    let mut styled = Meter::new(&config).unwrap();
+    let mut colors = crate::theme::Theme::new(config.theme).colors;
+    colors.needle = ThemeId::default().color(Accent::Cyan);
+    colors.lamp = ThemeId::default().color(Accent::Yellow);
+    colors.lamp_glow = ThemeId::default().color(Accent::Magenta);
+    styled.set_gauge_style(GaugeStyle {
+        line_width: Some(3.0),
+        colors: Some(colors),
+    });
+    let mut clock = TestClock::new();
+    for meter in [&mut original, &mut styled] {
+        clock.samples = 0;
+        clock.feed(meter, &[[0.5, 0.25]; 4800]);
+    }
+    let frame = FrameTime::new(clock.origin, clock.origin + Duration::from_millis(100));
+    let transforms = [vello::kurbo::Affine::IDENTITY; 2];
+    let original = original.update_gauges(transforms, frame);
+    let styled = styled.update_gauges(transforms, frame);
+    assert_eq!(original.positions, styled.positions);
+    assert_eq!(styled.colors, colors);
+    assert_eq!(styled.needles[0].width, 3.0);
+    assert_eq!(original.needles[0].width, super::NEEDLE_WIDTH);
+}
