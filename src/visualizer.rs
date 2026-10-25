@@ -14,7 +14,7 @@ use crate::{
     config::ShutterFrames,
     frame_schedule::Adjustment,
     shutter::ShutterWindow,
-    theme::{mix, Accent, MeterColors, ThemeId},
+    theme::{mix, Accent, ThemeId},
 };
 
 use geometry::{
@@ -268,6 +268,8 @@ pub struct Palette {
 }
 
 impl Palette {
+    pub const VIVID_COUNT: usize = 12;
+
     pub fn from_theme(theme: ThemeId) -> Self {
         Self {
             neutral: [
@@ -310,9 +312,10 @@ impl Palette {
     /// Continuous sample of the vivid ring, so palette drift never snaps between
     /// neighbouring hues.
     pub fn vivid_blend(&self, angle: f32) -> Color {
-        let scaled = ((angle.sin() * 0.5 + 0.5) * 12.0).rem_euclid(12.0);
-        let base = (scaled.floor() as usize).min(11);
-        let next = (base + 1) % 12;
+        let scaled = ((angle.sin() * 0.5 + 0.5) * Self::VIVID_COUNT as f32)
+            .rem_euclid(Self::VIVID_COUNT as f32);
+        let base = (scaled.floor() as usize).min(Self::VIVID_COUNT - 1);
+        let next = (base + 1) % Self::VIVID_COUNT;
         let fraction = scaled.fract();
         mix(self.vivid[base], self.vivid[next], fraction)
     }
@@ -902,7 +905,6 @@ impl Visualizer {
         frame: AudioInterval,
         shutter: ShutterFrames,
         dt: f32,
-        colors: &MeterColors,
         palette: &Palette,
         viewport: (f32, f32),
         zoom: f32,
@@ -943,7 +945,6 @@ impl Visualizer {
             exposure.start(),
             frame.end(),
             camera,
-            colors,
             &self.palette,
             self.depth_fade.strength(),
             self.near_opacity.value(),
@@ -1407,7 +1408,6 @@ impl Scene {
         exposure_start: AudioTime,
         frame_end: AudioTime,
         camera: Camera,
-        colors: &MeterColors,
         palette: &Palette,
         depth_fade: f32,
         near_opacity: f32,
@@ -1433,7 +1433,6 @@ impl Scene {
             exposure_start,
             frame_end,
             camera,
-            colors,
             palette,
             depth_fade,
             near_opacity,
@@ -1449,7 +1448,6 @@ impl Scene {
                 exposure_start,
                 frame_end,
                 camera,
-                colors,
                 palette,
                 depth_fade,
                 near_opacity,
@@ -1549,7 +1547,6 @@ impl FigureRuntime {
         exposure_start: AudioTime,
         frame_end: AudioTime,
         camera: Camera,
-        colors: &MeterColors,
         palette: &Palette,
         depth_fade: f32,
         near_opacity: f32,
@@ -1629,7 +1626,7 @@ impl FigureRuntime {
         let exposure = self.exposure_poses(exposure_start, frame_end);
         let line_energy = music.band(13);
         for (index, current) in self.current.iter().enumerate() {
-            let rgb = self.tint.edge_rgb(index, palette, colors);
+            let rgb = self.tint.edge_rgb(index, palette);
             let base_opacity = (0.6 + 0.4 * line_energy).max(near_opacity);
             let alpha = self.opacity * base_opacity;
             let width = base_width * (1.0 + music.kick * 0.25);
@@ -1963,44 +1960,39 @@ impl Style {
     }
 }
 
-/// The palette assignment of one spawned figure: which vivid hues its edges
-/// sample and how strongly they are mixed into the neutral base. The assignment
-/// is frozen at spawn, so the figure keeps its colors until it leaves the scene.
+/// The palette assignment of one spawned figure: which clean vivid theme color
+/// each edge uses. The assignment is frozen at spawn, so the figure keeps its
+/// colors until it leaves the scene.
 #[derive(Clone, Copy, Debug)]
 struct FigureTint {
-    primary_phase: f32,
-    secondary_phase: Option<f32>,
-    accent_mix: f32,
+    primary: usize,
+    secondary: Option<usize>,
 }
 
 impl FigureTint {
-    /// `accent` is the accent band value at spawn; it selects the saturation of
-    /// the figure's colors without making them follow the spectrum afterwards.
+    /// `accent` is the accent band value at spawn; it shifts the chosen theme
+    /// color without making it follow the spectrum afterwards.
     fn spawn(kind: FigureKind, accent: f32, rng: &mut Rng) -> Self {
-        let primary_phase = rng.unit() * TAU;
-        let secondary_phase = kind
+        let offset = (accent.clamp(0.0, 1.0) * (Palette::VIVID_COUNT - 1) as f32).round() as usize;
+        let primary = (offset + rng.range(Palette::VIVID_COUNT)) % Palette::VIVID_COUNT;
+        let secondary = kind
             .uses_two_accents()
-            .then(|| primary_phase + 1.5 + rng.unit() * 2.0);
-        Self {
-            primary_phase,
-            secondary_phase,
-            accent_mix: (0.3 + accent * (0.15 + rng.unit() * 0.45)).clamp(0.0, 0.9),
-        }
+            .then(|| (primary + 1 + rng.range(Palette::VIVID_COUNT - 1)) % Palette::VIVID_COUNT);
+        Self { primary, secondary }
     }
 
-    /// RGB for one edge. The palette is still sampled live so a theme
-    /// crossfade reaches figures that are already on screen.
-    fn edge_rgb(self, edge: usize, palette: &Palette, colors: &MeterColors) -> [f32; 3] {
-        let phase = match self.secondary_phase {
+    /// RGB for one edge. The palette is sampled live so a theme crossfade
+    /// reaches figures that are already on screen.
+    fn edge_rgb(self, edge: usize, palette: &Palette) -> [f32; 3] {
+        let index = match self.secondary {
             Some(secondary) if edge % 2 == 1 => secondary,
-            _ => self.primary_phase,
+            _ => self.primary,
         };
-        let base = mix(colors.background, palette.neutral[0], 0.55);
-        let tinted = mix(base, palette.vivid_blend(phase), self.accent_mix);
+        let color = palette.vivid(index);
         [
-            tinted.components[0],
-            tinted.components[1],
-            tinted.components[2],
+            color.components[0],
+            color.components[1],
+            color.components[2],
         ]
     }
 }
@@ -2099,14 +2091,12 @@ mod tests {
         let mut visualizer = Visualizer::new();
         visualizer.debug_music([0.5; BAND_COUNT], 0.6);
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
-        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         for _ in 0..6 {
             visualizer.update(
                 frame,
                 ShutterFrames::try_from(3.0).unwrap(),
                 1.0 / 60.0,
-                &colors,
                 &palette,
                 (1280.0, 440.0),
                 1.0,
@@ -2230,7 +2220,6 @@ mod tests {
     #[test]
     fn a_step_in_spectrum_energy_moves_lines_without_jumping_out_of_view() {
         let mut visualizer = Visualizer::new();
-        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         let mut previous: Vec<[f32; 2]> = Vec::new();
@@ -2241,7 +2230,6 @@ mod tests {
                 frame,
                 ShutterFrames::try_from(1.0).unwrap(),
                 1.0 / 60.0,
-                &colors,
                 &palette,
                 (1280.0, 440.0),
                 1.0,
@@ -2281,7 +2269,6 @@ mod tests {
     fn strong_bass_bursts_reach_the_scene_and_trigger_evolution() {
         let mut visualizer = Visualizer::new();
         visualizer.set_samplerate(48_000);
-        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut at = AudioTime::ZERO;
         let mut last_name = visualizer.scene_name();
@@ -2308,7 +2295,6 @@ mod tests {
                 AudioInterval::new(at, end),
                 ShutterFrames::try_from(2.0).unwrap(),
                 800.0 / 48_000.0,
-                &colors,
                 &palette,
                 (1280.0, 440.0),
                 1.0,
@@ -2329,7 +2315,6 @@ mod tests {
     fn longer_shutter_keeps_more_of_the_recorded_motion_path() {
         fn trail(shutter: f32) -> (usize, f32) {
             let mut visualizer = Visualizer::new();
-            let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
             let palette = Palette::from_theme(crate::theme::ThemeId::default());
             let mut frame =
                 AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
@@ -2339,7 +2324,6 @@ mod tests {
                     frame,
                     ShutterFrames::try_from(shutter).unwrap(),
                     1.0 / 60.0,
-                    &colors,
                     &palette,
                     (1280.0, 440.0),
                     1.0,
@@ -2378,7 +2362,6 @@ mod tests {
     #[test]
     fn edge_opacity_fades_with_projected_depth() {
         let mut visualizer = Visualizer::new();
-        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         visualizer.debug_music([0.0; BAND_COUNT], 0.0);
         let frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
@@ -2386,7 +2369,6 @@ mod tests {
             frame,
             ShutterFrames::try_from(1.0).unwrap(),
             1.0 / 60.0,
-            &colors,
             &palette,
             (1280.0, 440.0),
             1.0,
@@ -2422,7 +2404,6 @@ mod tests {
             next,
             ShutterFrames::try_from(1.0).unwrap(),
             1.0 / 60.0,
-            &colors,
             &palette,
             (1280.0, 440.0),
             1.0,
@@ -2436,19 +2417,22 @@ mod tests {
 
     #[test]
     fn the_tesseract_shares_one_edge_color_and_the_torus_alternates_two() {
-        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut rng = Rng::new(17);
         let tesseract = FigureTint::spawn(FigureKind::Tesseract, 0.8, &mut rng);
-        let expected = tesseract.edge_rgb(0, &palette, &colors);
+        let expected = tesseract.edge_rgb(0, &palette);
+        assert!(
+            palette.vivid.iter().any(|color| {
+                let [red, green, blue, _] = color.components;
+                [red, green, blue] == expected
+            }),
+            "figure colors must be clean theme colors"
+        );
         for edge in 0..Wireframe::build(FigureKind::Tesseract).edges().len() {
-            assert_eq!(tesseract.edge_rgb(edge, &palette, &colors), expected);
+            assert_eq!(tesseract.edge_rgb(edge, &palette), expected);
         }
         let torus = FigureTint::spawn(FigureKind::Torus, 0.8, &mut rng);
-        assert_ne!(
-            torus.edge_rgb(0, &palette, &colors),
-            torus.edge_rgb(1, &palette, &colors)
-        );
+        assert_ne!(torus.edge_rgb(0, &palette), torus.edge_rgb(1, &palette));
     }
 
     #[test]
@@ -2459,7 +2443,6 @@ mod tests {
         visualizer.scene.current.reset_temporal();
         visualizer.scene.current.tint =
             FigureTint::spawn(FigureKind::Tesseract, 0.8, &mut visualizer.rng);
-        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         let mut expected: Option<[f32; 3]> = None;
@@ -2471,7 +2454,6 @@ mod tests {
                 frame,
                 ShutterFrames::try_from(2.0).unwrap(),
                 1.0 / 60.0,
-                &colors,
                 &palette,
                 (1280.0, 440.0),
                 1.0,
@@ -2557,7 +2539,6 @@ mod tests {
         visualizer.scene.current.kind = FigureKind::Tesseract;
         visualizer.scene.current.wireframe = Wireframe::build(FigureKind::Tesseract);
         visualizer.scene.current.reset_temporal();
-        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         let mut previous = None;
@@ -2568,7 +2549,6 @@ mod tests {
                 frame,
                 ShutterFrames::try_from(2.0).unwrap(),
                 1.0 / 60.0,
-                &colors,
                 &palette,
                 (1280.0, 440.0),
                 1.0,
@@ -2590,7 +2570,6 @@ mod tests {
     #[test]
     fn diagnosis_appears_on_a_vertex_and_follows_it_lazily() {
         let mut visualizer = Visualizer::new();
-        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         visualizer.diagnosis.next_in = 0.0;
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
@@ -2602,7 +2581,6 @@ mod tests {
                 frame,
                 ShutterFrames::try_from(2.0).unwrap(),
                 1.0 / 60.0,
-                &colors,
                 &palette,
                 (1280.0, 440.0),
                 1.0,
@@ -2655,7 +2633,6 @@ mod tests {
     #[test]
     fn debug_snapshot_exposes_all_analysis_layers() {
         let mut visualizer = Visualizer::new();
-        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         for _ in 0..3 {
@@ -2664,7 +2641,6 @@ mod tests {
                 frame,
                 ShutterFrames::try_from(2.0).unwrap(),
                 1.0 / 60.0,
-                &colors,
                 &palette,
                 (1280.0, 440.0),
                 1.0,

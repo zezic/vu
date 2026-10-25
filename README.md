@@ -84,7 +84,8 @@ blur carries the same per-vertex opacities through the exposure.
 
 A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The bands
 drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,
-and the pulse. The accent band sets the saturation of each newly spawned figure.
+and the pulse. The accent band shifts which clean vivid theme color each newly
+spawned figure takes.
 Broadband power sets the idle animation and transition speed, while low-frequency
 onset detection drives the kick envelope. Bass hits are more likely than other
 hits to trigger a parameter transition or a full scene change; a short cooldown
@@ -139,12 +140,12 @@ that is an integer number of cycles for every phase-driven deformation and
 tesseract rotation. Crossing 2*PI therefore never snaps the geometry.
 
 The selected Gogh theme drives the scene through its four neutral and twelve vivid
-colors. A figure receives its edge colors when it spawns and keeps them until it
-leaves the scene; music does not recolor it afterwards. Every figure uses one vivid
-accent for all of its edges, except the torus, which alternates two. The tesseract
-therefore draws all of its edges in one color instead of striping the nested cubes.
-Neutral foregrounds provide the base tone. Theme changes crossfade both the gauge
-colors and the wireframe palette.
+colors. A figure receives one clean vivid theme color when it spawns and keeps it
+until it leaves the scene; music does not recolor it afterwards. Every edge of a
+figure uses that color, except the torus, which alternates two vivid colors. The
+tesseract therefore draws all of its edges in one color instead of striping the
+nested cubes. No edge color is blended with the background or neutral tones. Theme
+changes crossfade both the gauge colors and the wireframe palette.
 
 Press `D` to show the live analysis panel. It refreshes at 10 Hz by default; `B`
 cycles through FFT-hop, 20, 10, 5, 2, and 1 Hz. The panel renders:

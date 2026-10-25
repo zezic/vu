@@ -1820,7 +1820,6 @@ impl Meter {
                 frame_interval,
                 self.shutter_frames,
                 dt,
-                &self.theme.colors,
                 &palette,
                 (view.viewport.width as f32, view.viewport.height as f32),
                 view.zoom_factor() as f32,

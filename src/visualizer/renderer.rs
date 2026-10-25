@@ -501,7 +501,6 @@ mod tests {
                 AudioInterval::new(at, end),
                 ShutterFrames::try_from(8.0)?,
                 800.0 / 48_000.0,
-                &colors,
                 &palette,
                 (width as f32, height as f32),
                 1.0,
