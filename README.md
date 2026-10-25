@@ -72,10 +72,11 @@ geometrically, but it no longer shades individual edges.
 
 A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The bands
 drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,
-accent color, and the pulse. Broadband power sets the idle animation and transition
-speed, while low-frequency onset detection drives the kick envelope. Bass hits are
-more likely than other hits to trigger a parameter transition or a full scene
-change; a short cooldown keeps the transitions legible.
+and the pulse. The accent band sets the saturation of each newly spawned figure.
+Broadband power sets the idle animation and transition speed, while low-frequency
+onset detection drives the kick envelope. Bass hits are more likely than other
+hits to trigger a parameter transition or a full scene change; a short cooldown
+keeps the transitions legible.
 
 All envelopes are smoothed with fast attack and slower release. Shape changes
 crossfade and parameter changes ease toward their new targets. Every moving edge
@@ -126,11 +127,12 @@ that is an integer number of cycles for every phase-driven deformation and
 tesseract rotation. Crossing 2*PI therefore never snaps the geometry.
 
 The selected Gogh theme drives the scene through its four neutral and twelve vivid
-colors. Simple figures use one vivid accent at a time; tesseract and torus use two.
-Accent hues drift continuously, so a figure can move from one palette color to
-another without a jump. Neutral foregrounds provide the base tone, while hit
-flashes brighten the existing accent rather than adding another hue. Theme changes
-crossfade both the gauge colors and the wireframe palette.
+colors. A figure receives its edge colors when it spawns and keeps them until it
+leaves the scene; music does not recolor it afterwards. Every figure uses one vivid
+accent for all of its edges, except the torus, which alternates two. The tesseract
+therefore draws all of its edges in one color instead of striping the nested cubes.
+Neutral foregrounds provide the base tone. Theme changes crossfade both the gauge
+colors and the wireframe palette.
 
 Press `D` to show the live analysis panel. It refreshes at 10 Hz by default; `B`
 cycles through FFT-hop, 20, 10, 5, 2, and 1 Hz. The panel renders:

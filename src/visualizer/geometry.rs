@@ -164,9 +164,11 @@ impl FigureKind {
         }
     }
 
-    /// Complex figures use two vivid accents; simple figures use one.
-    pub fn is_complex(self) -> bool {
-        matches!(self, Self::Tesseract | Self::Torus)
+    /// The torus alternates two vivid accents across its edges. Every other
+    /// figure keeps one accent so its edges read as a single object, including
+    /// the tesseract whose two projected cubes would otherwise be striped.
+    pub fn uses_two_accents(self) -> bool {
+        matches!(self, Self::Torus)
     }
 }
 
@@ -510,11 +512,11 @@ mod tests {
             kind = kind.next();
         }
         assert_eq!(kind, FigureKind::Cube);
-        assert!(!FigureKind::Cube.is_complex());
-        assert!(!FigureKind::Octahedron.is_complex());
-        assert!(!FigureKind::Icosahedron.is_complex());
-        assert!(FigureKind::Tesseract.is_complex());
-        assert!(FigureKind::Torus.is_complex());
+        assert!(!FigureKind::Cube.uses_two_accents());
+        assert!(!FigureKind::Octahedron.uses_two_accents());
+        assert!(!FigureKind::Icosahedron.uses_two_accents());
+        assert!(!FigureKind::Tesseract.uses_two_accents());
+        assert!(FigureKind::Torus.uses_two_accents());
     }
 
     #[test]

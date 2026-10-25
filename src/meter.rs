@@ -1501,21 +1501,21 @@ impl Meter {
             ),
             (
                 format!(
-                    "AX{:+5.1},{:+5.1},{:+5.1} TW{:+5.1} DF{:>4.1} AC{:>4.1}",
+                    "AX{:+5.1},{:+5.1},{:+5.1} TW{:+5.1} DF{:>4.1} SH{:+5.1}",
                     snapshot.style.axis[0],
                     snapshot.style.axis[1],
                     snapshot.style.axis[2],
                     snapshot.style.twist_sign,
                     snapshot.style.deform_bias,
-                    snapshot.style.accent_bias
+                    snapshot.style.shear_sign
                 ),
                 palette.neutral[0],
             ),
             (
                 format!(
-                    "ZM{:>4.1} PA{:>4.1} L{:>4} R{:>5}",
+                    "ZM{:>4.1} PR{:>4.1} L{:>4} R{:>5}",
                     snapshot.style.zoom_bias,
-                    snapshot.style.palette_rate,
+                    snapshot.style.phase_rate,
                     snapshot.lines,
                     snapshot.ribbons
                 ),

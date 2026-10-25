@@ -235,10 +235,8 @@ pub struct StyleDebug {
     pub twist_sign: f32,
     pub shear_sign: f32,
     pub deform_bias: f32,
-    pub accent_bias: f32,
     pub zoom_bias: f32,
     pub phase_rate: f32,
-    pub palette_rate: f32,
     pub jitter_bias: f32,
 }
 
@@ -458,6 +456,8 @@ impl Visualizer {
     pub fn new() -> Self {
         let bands =
             std::array::from_fn(|index| Envelope::new(14.0, 5.0 + 5.0 * index as f32 / 15.0));
+        let mut rng = Rng::new(0x005e_ed0f_7e5e_1e55u64);
+        let scene = Scene::new(&mut rng);
         Self {
             analyzer: SpectrumAnalyzer::new(48_000),
             bands,
@@ -467,8 +467,8 @@ impl Visualizer {
             bass_onset: Onset::bass(),
             broadband_onset: Onset::broadband(),
             pending_hits: VecDeque::with_capacity(MAX_PENDING_HITS),
-            rng: Rng::new(0x005e_ed0f_7e5e_1e55u64),
-            scene: Scene::new(),
+            rng,
+            scene,
             frames: ShutterWindow::default(),
             kick: 0.0,
             time: 0.0,
@@ -672,10 +672,8 @@ impl Visualizer {
                 twist_sign: style.twist_sign,
                 shear_sign: style.shear_sign,
                 deform_bias: style.deform_bias,
-                accent_bias: style.accent_bias,
                 zoom_bias: style.zoom_bias,
                 phase_rate: style.phase_rate,
-                palette_rate: style.palette_rate,
                 jitter_bias: style.jitter_bias,
             },
             phase: self.scene.current.phase.rem_euclid(TAU),
@@ -709,8 +707,9 @@ impl Visualizer {
                 strongest = Some(hit);
             }
         }
+        let accent = self.bands[12].value;
         if let Some(hit) = strongest {
-            self.handle_hit(hit);
+            self.handle_hit(hit, accent);
         }
         self.kick *= (-dt * 3.2).exp();
         self.bass_hit_flash *= (-dt * 5.0).exp();
@@ -721,7 +720,6 @@ impl Visualizer {
             bands: self.bands.map(|band| band.value),
             power: self.power.value,
             bass: self.bass.value.max(self.bass_onset.previous),
-            treble: self.treble.value,
             kick: self.kick,
         };
         let width = (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * 1.4;
@@ -946,14 +944,14 @@ impl Visualizer {
         );
     }
 
-    fn handle_hit(&mut self, hit: Hit) {
+    fn handle_hit(&mut self, hit: Hit, accent: f32) {
         self.kick = self.kick.max(hit.strength);
         if self.transition_cooldown > 0.0 {
             return;
         }
         match roll_transition(hit.kind, &mut self.rng) {
             Some(Transition::Scene) => {
-                self.scene.change(&mut self.rng);
+                self.scene.change(&mut self.rng, accent);
                 self.transition_cooldown = 0.3;
             }
             Some(Transition::Parameter) => {
@@ -985,7 +983,6 @@ struct Music {
     bands: [f32; BAND_COUNT],
     power: f32,
     bass: f32,
-    treble: f32,
     kick: f32,
 }
 
@@ -1152,23 +1149,24 @@ struct Scene {
 }
 
 impl Scene {
-    fn new() -> Self {
+    fn new(rng: &mut Rng) -> Self {
+        let style = Style::default();
+        let tint = FigureTint::spawn(FigureKind::Cube, 0.0, rng);
         Self {
-            current: FigureRuntime::new(FigureKind::Cube, 1.0),
+            current: FigureRuntime::new(FigureKind::Cube, 1.0, style, tint),
             outgoing: None,
             transition: 1.0,
         }
     }
 
-    fn change(&mut self, rng: &mut Rng) {
+    fn change(&mut self, rng: &mut Rng, accent: f32) {
         let next = self.current.kind.next();
-        let mut entering = FigureRuntime::new(next, 0.0);
+        let target_style = Style::random(rng);
+        let tint = FigureTint::spawn(next, accent, rng);
+        let mut entering = FigureRuntime::new(next, 0.0, target_style, tint);
         entering.pose.yaw += rng.signed() * 0.9;
         entering.pose.pitch += rng.signed() * 0.4;
         entering.phase = rng.unit() * TAU;
-        entering.palette_phase_a = rng.unit() * TAU;
-        entering.palette_phase_b = entering.palette_phase_a + 1.5 + rng.unit() * 2.0;
-        entering.target_style = Style::random(rng);
         self.outgoing = None;
         self.current.opacity = 1.0;
         let old = std::mem::replace(&mut self.current, entering);
@@ -1178,7 +1176,6 @@ impl Scene {
 
     fn mutate(&mut self, rng: &mut Rng) {
         self.current.target_style = Style::random(rng);
-        self.current.flash = 1.0;
     }
 
     fn reset_temporal(&mut self) {
@@ -1256,11 +1253,9 @@ struct FigureRuntime {
     roll: Smoother,
     style: Style,
     target_style: Style,
+    tint: FigureTint,
     phase: f32,
-    palette_phase_a: f32,
-    palette_phase_b: f32,
     entrance: f32,
-    flash: f32,
     opacity: f32,
     history: VecDeque<PoseSnapshot>,
     vertices: Vec<Projected>,
@@ -1292,7 +1287,7 @@ struct VertexDiagnosis {
 }
 
 impl FigureRuntime {
-    fn new(kind: FigureKind, opacity: f32) -> Self {
+    fn new(kind: FigureKind, opacity: f32, target_style: Style, tint: FigureTint) -> Self {
         let pose = Pose::default();
         Self {
             kind,
@@ -1301,12 +1296,10 @@ impl FigureRuntime {
             pitch: Smoother::new(pose.pitch),
             roll: Smoother::new(pose.roll),
             style: Style::default(),
-            target_style: Style::default(),
+            target_style,
+            tint,
             phase: 0.0,
-            palette_phase_a: 0.0,
-            palette_phase_b: 2.2,
             entrance: opacity,
-            flash: 0.0,
             opacity,
             history: VecDeque::with_capacity(MAX_HISTORY),
             vertices: Vec::with_capacity(64),
@@ -1324,7 +1317,8 @@ impl FigureRuntime {
 
     // Sixteen log-spaced areas drive the scene: 0-3 bass pulse and hits, 4 spin,
     // 5 pitch, 6 roll, 7 twist, 8 bulge, 9 ripple, 10 shear, 11 camera zoom,
-    // 12 accent colour, 13 line energy, 14 jitter, 15 phase speed.
+    // 12 accent saturation of newly spawned figures, 13 line energy, 14 jitter,
+    // 15 phase speed.
     #[allow(clippy::too_many_arguments)]
     fn update(
         &mut self,
@@ -1340,7 +1334,6 @@ impl FigureRuntime {
         out: &mut Vec<LineInstance>,
         out_ribbons: &mut Vec<RibbonInstance>,
     ) {
-        self.flash *= (-dt * 3.0).exp();
         self.entrance = (self.entrance + dt * (1.4 + 2.5 * music.power)).min(1.0);
         self.style
             .approach(self.target_style, dt, 1.1 + 3.0 * music.power);
@@ -1358,10 +1351,6 @@ impl FigureRuntime {
         self.phase = (self.phase
             + dt * (0.35 + 2.6 * music.power + 0.7 * music.band(15)) * self.style.phase_rate)
             .rem_euclid(PHASE_PERIOD);
-        let palette_step =
-            dt * (0.12 + 0.8 * music.power + 0.45 * music.band(12)) * self.style.palette_rate;
-        self.palette_phase_a = (self.palette_phase_a + palette_step).rem_euclid(TAU);
-        self.palette_phase_b = (self.palette_phase_b + palette_step * 0.73).rem_euclid(TAU);
         let entrance_scale = 0.62 + 0.38 * smoothstep(self.entrance);
         let camera_zoom = 1.0 + music.band(11) * 0.18;
         let scale = entrance_scale
@@ -1411,35 +1400,10 @@ impl FigureRuntime {
         }
         let exposure = self.exposure_poses(exposure_start, frame_end);
         let line_energy = music.band(13);
-        let accent =
-            (music.band(12) * self.style.accent_bias + music.flash() * 0.25).clamp(0.0, 1.0);
-        let hot = (music.kick * 0.45 + self.flash * 0.25).clamp(0.0, 1.0);
-        let highlight = if color_luma(colors.background) > 0.45 {
-            palette.neutral[3]
-        } else {
-            palette.neutral[1]
-        };
         for (index, current) in self.current.iter().enumerate() {
-            let base = mix(colors.background, palette.neutral[0], 0.55);
-            let use_second = self.kind.is_complex() && index % 2 == 1;
-            let accent_color = if use_second {
-                palette.vivid_blend(self.palette_phase_b)
-            } else {
-                palette.vivid_blend(self.palette_phase_a)
-            };
-            let accent_mix = (0.3 + accent * self.style.accent_bias * 0.3 + music.band(12) * 0.3)
-                .clamp(0.0, 0.9);
-            let tinted = mix(base, accent_color, accent_mix);
-            // Hits brighten the existing accent instead of introducing a third hue.
-            let hot_color = mix(accent_color, highlight, 0.5);
-            let color = mix(tinted, hot_color, hot * 0.65);
+            let rgb = self.tint.edge_rgb(index, palette, colors);
             let alpha = self.opacity * (0.6 + 0.4 * line_energy);
             let width = base_width * (1.0 + music.kick * 0.25);
-            let rgb = [
-                color.components[0],
-                color.components[1],
-                color.components[2],
-            ];
             let alpha = alpha.clamp(0.0, 1.0);
 
             let Some(exposure) = &exposure else {
@@ -1702,10 +1666,8 @@ struct Style {
     twist_sign: f32,
     shear_sign: f32,
     deform_bias: f32,
-    accent_bias: f32,
     zoom_bias: f32,
     phase_rate: f32,
-    palette_rate: f32,
     jitter_bias: f32,
 }
 
@@ -1716,10 +1678,8 @@ impl Default for Style {
             twist_sign: 1.0,
             shear_sign: 1.0,
             deform_bias: 0.55,
-            accent_bias: 0.35,
             zoom_bias: 1.0,
             phase_rate: 1.0,
-            palette_rate: 1.0,
             jitter_bias: 0.5,
         }
     }
@@ -1739,10 +1699,8 @@ impl Style {
             twist_sign: if rng.chance(0.5) { 1.0 } else { -1.0 },
             shear_sign: if rng.chance(0.5) { 1.0 } else { -1.0 },
             deform_bias: 0.35 + rng.unit() * 0.95,
-            accent_bias: 0.15 + rng.unit() * 0.85,
             zoom_bias: 0.9 + rng.unit() * 0.25,
             phase_rate: 0.7 + rng.unit() * 0.7,
-            palette_rate: 0.55 + rng.unit() * 1.1,
             jitter_bias: 0.2 + rng.unit() * 1.1,
         }
     }
@@ -1755,23 +1713,52 @@ impl Style {
         self.twist_sign += (target.twist_sign - self.twist_sign) * blend;
         self.shear_sign += (target.shear_sign - self.shear_sign) * blend;
         self.deform_bias += (target.deform_bias - self.deform_bias) * blend;
-        self.accent_bias += (target.accent_bias - self.accent_bias) * blend;
         self.zoom_bias += (target.zoom_bias - self.zoom_bias) * blend;
         self.phase_rate += (target.phase_rate - self.phase_rate) * blend;
-        self.palette_rate += (target.palette_rate - self.palette_rate) * blend;
         self.jitter_bias += (target.jitter_bias - self.jitter_bias) * blend;
     }
 }
 
-impl Music {
-    fn flash(self) -> f32 {
-        (self.kick * 0.4 + self.treble * 0.15).clamp(0.0, 1.0)
-    }
+/// The palette assignment of one spawned figure: which vivid hues its edges
+/// sample and how strongly they are mixed into the neutral base. The assignment
+/// is frozen at spawn, so the figure keeps its colors until it leaves the scene.
+#[derive(Clone, Copy, Debug)]
+struct FigureTint {
+    primary_phase: f32,
+    secondary_phase: Option<f32>,
+    accent_mix: f32,
 }
 
-fn color_luma(color: Color) -> f32 {
-    let [red, green, blue, _] = color.components;
-    0.299 * red + 0.587 * green + 0.114 * blue
+impl FigureTint {
+    /// `accent` is the accent band value at spawn; it selects the saturation of
+    /// the figure's colors without making them follow the spectrum afterwards.
+    fn spawn(kind: FigureKind, accent: f32, rng: &mut Rng) -> Self {
+        let primary_phase = rng.unit() * TAU;
+        let secondary_phase = kind
+            .uses_two_accents()
+            .then(|| primary_phase + 1.5 + rng.unit() * 2.0);
+        Self {
+            primary_phase,
+            secondary_phase,
+            accent_mix: (0.3 + accent * (0.15 + rng.unit() * 0.45)).clamp(0.0, 0.9),
+        }
+    }
+
+    /// RGB for one edge. The palette is still sampled live so a theme
+    /// crossfade reaches figures that are already on screen.
+    fn edge_rgb(self, edge: usize, palette: &Palette, colors: &MeterColors) -> [f32; 3] {
+        let phase = match self.secondary_phase {
+            Some(secondary) if edge % 2 == 1 => secondary,
+            _ => self.primary_phase,
+        };
+        let base = mix(colors.background, palette.neutral[0], 0.55);
+        let tinted = mix(base, palette.vivid_blend(phase), self.accent_mix);
+        [
+            tinted.components[0],
+            tinted.components[1],
+            tinted.components[2],
+        ]
+    }
 }
 
 fn smoothstep(value: f32) -> f32 {
@@ -2061,6 +2048,72 @@ mod tests {
     }
 
     #[test]
+    fn the_tesseract_shares_one_edge_color_and_the_torus_alternates_two() {
+        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
+        let palette = Palette::from_theme(crate::theme::ThemeId::default());
+        let mut rng = Rng::new(17);
+        let tesseract = FigureTint::spawn(FigureKind::Tesseract, 0.8, &mut rng);
+        let expected = tesseract.edge_rgb(0, &palette, &colors);
+        for edge in 0..Wireframe::build(FigureKind::Tesseract).edges().len() {
+            assert_eq!(tesseract.edge_rgb(edge, &palette, &colors), expected);
+        }
+        let torus = FigureTint::spawn(FigureKind::Torus, 0.8, &mut rng);
+        assert_ne!(
+            torus.edge_rgb(0, &palette, &colors),
+            torus.edge_rgb(1, &palette, &colors)
+        );
+    }
+
+    #[test]
+    fn a_spawned_figure_keeps_its_edge_colors_while_the_music_changes() {
+        let mut visualizer = Visualizer::new();
+        visualizer.scene.current.kind = FigureKind::Tesseract;
+        visualizer.scene.current.wireframe = Wireframe::build(FigureKind::Tesseract);
+        visualizer.scene.current.reset_temporal();
+        visualizer.scene.current.tint =
+            FigureTint::spawn(FigureKind::Tesseract, 0.8, &mut visualizer.rng);
+        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
+        let palette = Palette::from_theme(crate::theme::ThemeId::default());
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        let mut expected: Option<[f32; 3]> = None;
+        for step in 0..30 {
+            let level = step as f32 / 29.0;
+            visualizer.debug_music([level; BAND_COUNT], level);
+            visualizer.kick = level;
+            visualizer.update(
+                frame,
+                ShutterFrames::try_from(2.0).unwrap(),
+                1.0 / 60.0,
+                &colors,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+            let frame = visualizer.frame();
+            let mut rgbs: Vec<[f32; 3]> = Vec::new();
+            for line in frame.lines {
+                if line.color[3] > 0.0 {
+                    rgbs.push([line.color[0], line.color[1], line.color[2]]);
+                }
+            }
+            for ribbon in frame.ribbons {
+                for color in [ribbon.start_color, ribbon.end_color, ribbon.third_color] {
+                    if color[3] > 0.0 {
+                        rgbs.push([color[0], color[1], color[2]]);
+                    }
+                }
+            }
+            assert!(!rgbs.is_empty());
+            let first = *expected.get_or_insert(rgbs[0]);
+            for rgb in rgbs {
+                assert_eq!(rgb, first, "edge colors changed with the music");
+            }
+        }
+    }
+
+    #[test]
     fn crossing_segments_produce_intersection_point() {
         let crossing = segment_intersection(
             Vec2::new(-50.0, 0.0),
@@ -2154,7 +2207,7 @@ mod tests {
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         let mut first_anchor = None;
         let mut latest_anchor = None;
-        for _ in 0..120 {
+        for step in 0..120 {
             visualizer.debug_music([0.7; BAND_COUNT], 0.7);
             visualizer.update(
                 frame,
@@ -2166,6 +2219,23 @@ mod tests {
                 1.0,
                 1.0,
             );
+            if step == 0 {
+                // Make the follow test independent of which vertex the RNG
+                // picked: the top vertices clamp the readout anchor to the
+                // viewport edge and can keep it there for the whole run.
+                let vertex = visualizer
+                    .scene
+                    .current
+                    .vertices
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.screen.y.total_cmp(&b.screen.y))
+                    .map(|(index, _)| index)
+                    .expect("the cube has vertices");
+                visualizer.diagnosis.vertex = vertex;
+                visualizer.diagnosis.anchor = visualizer.diagnosis_target((1280.0, 440.0), 1.0);
+                visualizer.diagnosis.refresh_timer = 0.0;
+            }
             if let Some(readout) = visualizer.diagnosis() {
                 assert!(
                     readout.text.starts_with("POS")
