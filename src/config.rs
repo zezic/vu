@@ -177,6 +177,7 @@ pub struct Config {
     pub visualizer_text_scale: VisualizerTextScale,
     pub onset_thresholds: crate::visualizer::OnsetThresholds,
     pub depth_fade: crate::visualizer::DepthFade,
+    pub near_opacity: crate::visualizer::NearOpacity,
 }
 
 pub fn config_file() -> anyhow::Result<PathBuf> {

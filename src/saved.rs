@@ -128,6 +128,9 @@ mod tests {
         config.edit().depth_fade = config
             .depth_fade
             .adjusted(crate::frame_schedule::Adjustment::Increase);
+        config.edit().near_opacity = config
+            .near_opacity
+            .adjusted(crate::frame_schedule::Adjustment::Increase);
         config.flush_if_due(config.last_write + SAVE_INTERVAL - Duration::from_millis(1))?;
         assert!(!path.exists());
         config.flush_if_due(config.last_write + SAVE_INTERVAL)?;
@@ -162,6 +165,9 @@ mod tests {
             "(depth_fade: -0.1)",
             "(depth_fade: 1.1)",
             "(depth_fade: NaN)",
+            "(near_opacity: 0.5)",
+            "(near_opacity: 1.1)",
+            "(near_opacity: NaN)",
             "(frame_rate_limit: Fps99)",
             "(mode: Unknown)",
             "(peak_movement: Unknown)",
@@ -192,6 +198,10 @@ mod tests {
             crate::visualizer::OnsetThresholds::default()
         );
         assert_eq!(missing.depth_fade, crate::visualizer::DepthFade::default());
+        assert_eq!(
+            missing.near_opacity,
+            crate::visualizer::NearOpacity::default()
+        );
         Ok(())
     }
 

@@ -94,6 +94,7 @@ enum Setting {
     BassThreshold,
     BroadbandThreshold,
     DepthFade,
+    NearOpacity,
 }
 
 struct App {
@@ -165,6 +166,10 @@ impl App {
             Setting::DepthFade => {
                 settings.depth_fade = settings.depth_fade.adjusted(adjustment);
                 self.meter.set_depth_fade(settings.depth_fade);
+            }
+            Setting::NearOpacity => {
+                settings.near_opacity = settings.near_opacity.adjusted(adjustment);
+                self.meter.set_near_opacity(settings.near_opacity);
             }
         }
     }
@@ -347,6 +352,12 @@ impl App {
                         }
                         KeyCode::KeyP => {
                             self.adjust_setting(Setting::DepthFade, Adjustment::Increase)
+                        }
+                        KeyCode::KeyU => {
+                            self.adjust_setting(Setting::NearOpacity, Adjustment::Decrease)
+                        }
+                        KeyCode::KeyI => {
+                            self.adjust_setting(Setting::NearOpacity, Adjustment::Increase)
                         }
                         KeyCode::KeyM if !event.repeat => {
                             self.adjust_setting(Setting::Mode, Adjustment::Increase)

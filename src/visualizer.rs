@@ -172,6 +172,58 @@ impl From<DepthFade> for f32 {
     }
 }
 
+/// Minimum opacity at the nearest figure vertex before line-energy brightening.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct NearOpacity(f32);
+
+impl NearOpacity {
+    const MIN: f32 = 0.6;
+    const MAX: f32 = 1.0;
+    const STEP: f32 = 0.05;
+
+    pub fn value(self) -> f32 {
+        self.0
+    }
+
+    pub fn percent(self) -> u32 {
+        (self.0 * 100.0).round() as u32
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        let delta = match adjustment {
+            Adjustment::Decrease => -Self::STEP,
+            Adjustment::Increase => Self::STEP,
+        };
+        Self((self.0 + delta).clamp(Self::MIN, Self::MAX))
+    }
+}
+
+impl Default for NearOpacity {
+    fn default() -> Self {
+        Self(Self::MIN)
+    }
+}
+
+impl TryFrom<f32> for NearOpacity {
+    type Error = anyhow::Error;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        anyhow::ensure!(
+            value.is_finite() && (Self::MIN..=Self::MAX).contains(&value),
+            "near_opacity must be finite and between 0.6 and 1"
+        );
+        Ok(Self(value))
+    }
+}
+
+impl From<NearOpacity> for f32 {
+    fn from(value: NearOpacity) -> Self {
+        value.0
+    }
+}
+
 /// One exposure-swept line, in physical pixels, uploaded as a vertex instance.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -567,6 +619,7 @@ pub struct Visualizer {
     transition_cooldown: f32,
     palette: Palette,
     depth_fade: DepthFade,
+    near_opacity: NearOpacity,
     last_spectrum: Spectrum,
     bass_hit_flash: f32,
     broadband_hit_flash: f32,
@@ -604,6 +657,7 @@ impl Visualizer {
             transition_cooldown: 0.0,
             palette: Palette::from_theme(ThemeId::default()),
             depth_fade: DepthFade::default(),
+            near_opacity: NearOpacity::default(),
             last_spectrum: Spectrum::default(),
             bass_hit_flash: 0.0,
             broadband_hit_flash: 0.0,
@@ -747,6 +801,14 @@ impl Visualizer {
         self.depth_fade = depth_fade;
     }
 
+    pub fn near_opacity(&self) -> NearOpacity {
+        self.near_opacity
+    }
+
+    pub fn set_near_opacity(&mut self, near_opacity: NearOpacity) {
+        self.near_opacity = near_opacity;
+    }
+
     pub fn diagnosis(&self) -> Option<&DiagnosisReadout> {
         self.diagnosis.readout.as_ref()
     }
@@ -884,6 +946,7 @@ impl Visualizer {
             colors,
             &self.palette,
             self.depth_fade.strength(),
+            self.near_opacity.value(),
             width,
             self.time,
             &mut self.lines,
@@ -1347,6 +1410,7 @@ impl Scene {
         colors: &MeterColors,
         palette: &Palette,
         depth_fade: f32,
+        near_opacity: f32,
         width: f32,
         time: f32,
         out: &mut Vec<LineInstance>,
@@ -1372,6 +1436,7 @@ impl Scene {
             colors,
             palette,
             depth_fade,
+            near_opacity,
             width,
             time,
             out,
@@ -1387,6 +1452,7 @@ impl Scene {
                 colors,
                 palette,
                 depth_fade,
+                near_opacity,
                 width,
                 time,
                 out,
@@ -1486,6 +1552,7 @@ impl FigureRuntime {
         colors: &MeterColors,
         palette: &Palette,
         depth_fade: f32,
+        near_opacity: f32,
         base_width: f32,
         time: f32,
         out: &mut Vec<LineInstance>,
@@ -1563,7 +1630,8 @@ impl FigureRuntime {
         let line_energy = music.band(13);
         for (index, current) in self.current.iter().enumerate() {
             let rgb = self.tint.edge_rgb(index, palette, colors);
-            let alpha = self.opacity * (0.6 + 0.4 * line_energy);
+            let base_opacity = (0.6 + 0.4 * line_energy).max(near_opacity);
+            let alpha = self.opacity * base_opacity;
             let width = base_width * (1.0 + music.kick * 0.25);
             let alpha = alpha.clamp(0.0, 1.0);
             let start_alpha = alpha * current.start_depth_opacity;
@@ -2126,6 +2194,24 @@ mod tests {
         assert!(DepthFade::try_from(-0.01).is_err());
         assert!(DepthFade::try_from(1.01).is_err());
         assert!(DepthFade::try_from(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn near_opacity_adjusts_in_five_percent_steps_and_stays_normalized() {
+        let opacity = NearOpacity::default();
+        assert_eq!(opacity.percent(), 60);
+        assert_eq!(opacity.adjusted(Adjustment::Increase).percent(), 65);
+        assert_eq!(opacity.adjusted(Adjustment::Decrease).percent(), 60);
+
+        let mut highest = opacity;
+        for _ in 0..30 {
+            highest = highest.adjusted(Adjustment::Increase);
+        }
+        assert_eq!(highest.value(), 1.0);
+
+        assert!(NearOpacity::try_from(0.59).is_err());
+        assert!(NearOpacity::try_from(1.01).is_err());
+        assert!(NearOpacity::try_from(f32::NAN).is_err());
     }
 
     #[test]

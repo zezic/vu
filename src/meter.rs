@@ -722,6 +722,9 @@ pub struct Meter {
     depth_fade: visualizer::DepthFade,
     depth_fade_readout: Readout,
     depth_fade_value: Text,
+    near_opacity: visualizer::NearOpacity,
+    near_opacity_readout: Readout,
+    near_opacity_value: Text,
     diagnosis_text: Option<Text>,
     diagnosis_anchor: Point,
     diagnosis_color: Color,
@@ -798,6 +801,11 @@ impl Meter {
         visualizer.set_depth_fade(depth_fade);
         let depth_fade_readout = Readout::new(&mut fonts, "Depth Fade", ["[O]", "[P]"]);
         let depth_fade_value = Readout::value(&mut fonts, &format!("{:>3}%", depth_fade.percent()));
+        let near_opacity = config.near_opacity;
+        visualizer.set_near_opacity(near_opacity);
+        let near_opacity_readout = Readout::new(&mut fonts, "Near Opacity", ["[U]", "[I]"]);
+        let near_opacity_value =
+            Readout::value(&mut fonts, &format!("{:>3}%", near_opacity.percent()));
         let scene_name = visualizer.scene_name();
         let mode_readout = Readout::gauge_inline(&mut fonts, ["[M]"]);
         let mode_value = Readout::gauge_value(&mut fonts, config.mode.name());
@@ -868,6 +876,9 @@ impl Meter {
             depth_fade,
             depth_fade_readout,
             depth_fade_value,
+            near_opacity,
+            near_opacity_readout,
+            near_opacity_value,
             diagnosis_text: None,
             diagnosis_anchor: Point::ORIGIN,
             diagnosis_color: Color::new([1.0, 1.0, 1.0, 1.0]),
@@ -1091,6 +1102,17 @@ impl Meter {
         self.face_settings = None;
     }
 
+    pub fn set_near_opacity(&mut self, near_opacity: visualizer::NearOpacity) {
+        if self.near_opacity == near_opacity {
+            return;
+        }
+        self.near_opacity = near_opacity;
+        self.visualizer.set_near_opacity(near_opacity);
+        self.near_opacity_value =
+            Readout::value(&mut self.fonts, &format!("{:>3}%", near_opacity.percent()));
+        self.face_settings = None;
+    }
+
     pub fn repair_needles(&mut self) {
         for needle in &mut self.needles {
             needle.motion.repair();
@@ -1304,6 +1326,12 @@ impl Meter {
                     scene,
                     top_left * Affine::translate((0.0, 176.0)),
                     &self.depth_fade_value,
+                    &hud_colors,
+                );
+                self.near_opacity_readout.draw_left_aligned(
+                    scene,
+                    top_left * Affine::translate((0.0, 220.0)),
+                    &self.near_opacity_value,
                     &hud_colors,
                 );
                 if self.debug {
