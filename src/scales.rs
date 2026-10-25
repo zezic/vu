@@ -81,7 +81,7 @@ pub fn generate_scale(fonts: &mut Fonts, mode: Mode) -> Vec<Mark> {
             .into_iter()
             .map(|db| Mark {
                 position: db_to_normalized(db as f32),
-                label: Some(fonts.layout(
+                label: Some(fonts.layout_gauge(
                     &if db > 0 {
                         format!("+{db}")
                     } else {
@@ -102,13 +102,13 @@ pub fn generate_scale(fonts: &mut Fonts, mode: Mode) -> Vec<Mark> {
         };
         marks.push(Mark {
             position: db_to_normalized(val as f32),
-            label: Some(fonts.layout(&label, MarkStyle::Big.label_size())),
+            label: Some(fonts.layout_gauge(&label, MarkStyle::Big.label_size())),
             style: MarkStyle::Big,
         });
     }
     marks.push(Mark {
         position: db_to_normalized(-9.0),
-        label: Some(fonts.layout("-9", MarkStyle::Medium.label_size())),
+        label: Some(fonts.layout_gauge("-9", MarkStyle::Medium.label_size())),
         style: MarkStyle::Medium,
     });
     for val in [-45, -35, -25, -19, -3, -2, -1, 1, 2, 3, 4] {
@@ -131,7 +131,7 @@ pub fn generate_scale(fonts: &mut Fonts, mode: Mode) -> Vec<Mark> {
         };
         marks.push(Mark {
             position: val as f32 / 100.0,
-            label: Some(fonts.layout(&val.to_string(), style.label_size())),
+            label: Some(fonts.layout_gauge(&val.to_string(), style.label_size())),
             style,
         });
     }

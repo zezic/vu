@@ -112,19 +112,102 @@ impl From<ShutterFrames> for f32 {
     }
 }
 
+const VISUALIZER_TEXT_MIN: f32 = 0.6;
+const VISUALIZER_TEXT_MAX: f32 = 2.0;
+const VISUALIZER_TEXT_STEP: f32 = 0.1;
+
+/// Visualizer chrome text multiplier, applied on top of the display DPI scale.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct VisualizerTextScale(f32);
+
+impl Default for VisualizerTextScale {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl TryFrom<f32> for VisualizerTextScale {
+    type Error = anyhow::Error;
+
+    fn try_from(scale: f32) -> Result<Self, Self::Error> {
+        ensure!(
+            scale.is_finite() && (VISUALIZER_TEXT_MIN..=VISUALIZER_TEXT_MAX).contains(&scale),
+            "visualizer_text_scale must be finite and between {VISUALIZER_TEXT_MIN} and {VISUALIZER_TEXT_MAX}"
+        );
+        Ok(Self(scale))
+    }
+}
+
+impl From<VisualizerTextScale> for f32 {
+    fn from(value: VisualizerTextScale) -> Self {
+        value.0
+    }
+}
+
+impl VisualizerTextScale {
+    pub fn factor(self) -> f32 {
+        self.0
+    }
+
+    pub fn percent(self) -> u32 {
+        (self.0 * 100.0).round() as u32
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        let delta = match adjustment {
+            Adjustment::Decrease => -VISUALIZER_TEXT_STEP,
+            Adjustment::Increase => VISUALIZER_TEXT_STEP,
+        };
+        Self((self.0 + delta).clamp(VISUALIZER_TEXT_MIN, VISUALIZER_TEXT_MAX))
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub presentation: crate::visualizer::Presentation,
     pub mode: crate::measurement::Mode,
     pub peak_movement: crate::meter::PeakMovement,
     pub theme: crate::theme::ThemeId,
     pub preamp_db: PreampDb,
     pub frame_rate_limit: FrameRateLimit,
     pub shutter_frames: ShutterFrames,
+    pub visualizer_text_scale: VisualizerTextScale,
 }
 
 pub fn config_file() -> anyhow::Result<PathBuf> {
     let directories = ProjectDirs::from("com", "zezic", "vu")
         .context("Could not resolve VU's user config directory")?;
     Ok(directories.config_dir().join("vu-config.ron"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visualizer_text_scale_steps_between_sane_bounds() {
+        let normal = VisualizerTextScale::default();
+        assert_eq!(normal.percent(), 100);
+        assert_eq!(normal.adjusted(Adjustment::Increase).percent(), 110);
+        assert_eq!(normal.adjusted(Adjustment::Decrease).percent(), 90);
+
+        let mut smallest = normal;
+        for _ in 0..20 {
+            smallest = smallest.adjusted(Adjustment::Decrease);
+        }
+        assert_eq!(smallest.percent(), 60);
+
+        let mut largest = normal;
+        for _ in 0..20 {
+            largest = largest.adjusted(Adjustment::Increase);
+        }
+        assert_eq!(largest.percent(), 200);
+
+        assert!(VisualizerTextScale::try_from(0.5).is_err());
+        assert!(VisualizerTextScale::try_from(2.1).is_err());
+        assert!(VisualizerTextScale::try_from(f32::NAN).is_err());
+    }
 }

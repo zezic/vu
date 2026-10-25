@@ -17,6 +17,10 @@ On macOS, allow system audio recording when prompted.
 
 ## Hotkeys
 
+- `B` - cycles the visualizer's analysis refresh rate: FFT hop, 20, 10, 5, 2,
+and 1 Hz.
+- `D` - toggles the visualizer's analysis debug panel.
+- `F` - toggles between the physical gauges and the wireframe visualizer.
 - `M` - cycles VU, BBC-style PPM, custom 300 ms RMS, and Sample Peak.
 - `N` - In PPM and Sample Peak, switches the physical needle between **Full Spec**
 and **Vintage FR**, the two Sifam response curves.
@@ -24,6 +28,8 @@ and **Vintage FR**, the two Sifam response curves.
 - `Z` / `X` - decrease or increase preamp by 6 dB, or 1 dB while holding `Shift`.
 - `Q` / `W` - cycle backward or forward
 through the frame rate limits: 30, 48, 55, 60, 72, 90, 120, 180, 240, and VSync.
+- `-` / `=` - decrease or increase visualizer UI text size in 10% steps, from 60%
+to 200%. The setting persists in the config file.
 - `C` / `V` - decrease or increase shutter exposure by half a frame, from 1 to 16
 frame intervals. 
 
@@ -54,6 +60,91 @@ the scale bend. VU keeps its fixed amplitude-proportional scale.
 Double-click to reset both values to the default range (53.4 dB) and bend
 (2.0).
 
+## Visualizer
+
+![Abstract wireframe visualizer](./assets/visualizer.png)
+
+Press `F` to replace the gauges with a pseudo-3D wireframe scene. The scene starts
+as a simple cube and evolves through an octahedron, icosahedron, tesseract, and
+torus as energy hits arrive. Each figure is projected in perspective and drawn as
+vector lines with depth-dependent weight and opacity.
+
+A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The bands
+drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,
+accent color, and the pulse. Broadband power sets the idle animation and transition
+speed, while low-frequency onset detection drives the kick envelope. Bass hits are
+more likely than other hits to trigger a parameter transition or a full scene
+change; a short cooldown keeps the transitions legible.
+
+All envelopes are smoothed with fast attack and slower release. Shape changes
+crossfade and parameter changes ease toward their new targets. Every moving edge
+uses the first and last recorded poses across the shutter exposure and
+reconstructs the middle pose as the median of the corresponding endpoints.
+
+For an ordinary sweep, the reconstructed middle pose carries the sharp line body
+at peak opacity `P`; the start-to-middle span fades `0 -> P`, and the
+middle-to-end span fades `P -> 0`. `P` falls as the frame-one to frame-three
+vertex displacement grows, so a fast edge spreads into a fainter blur while a
+slow edge stays crisp.
+
+When the first and last edge lines intersect at `X`, the sweep becomes four
+triangles: `X-A1-AM`, `X-AM-A2`, `X-B1-BM`, and `X-BM-B2`, where `AM` and `BM`
+are the median points of the two vertex trajectories. Their vertex opacities are:
+
+- `X`: 100%
+- `AM`: `U`, falling with the `A1-A2` travel
+- `BM`: `V`, falling with the `B1-B2` travel
+- `A1`, `A2`, `B1`, `B2`: 0%
+
+Each triangle interpolates its three vertex opacities, so the edges read
+`0 -> U -> 0` along `A1-AM-A2` and `B1-BM-B2`, `U -> 100` along `AM-X`, and
+`0 -> 100` along each endpoint-to-`X` edge. The intersection stays fully opaque
+while the active extremes fade to zero; no median line body is drawn through the
+crossing. Non-convex fallback triangles use the same per-vertex interpolation.
+
+There is no convexity or small-displacement gate on the two ramps: any edge with
+nonzero screen displacement emits both. An edge with zero screen displacement
+keeps only its central line, because there is no spread to draw.
+
+The animation phase runs on a continuous clock and is rebased only at a period
+that is an integer number of cycles for every phase-driven deformation and
+tesseract rotation. Crossing 2*PI therefore never snaps the geometry.
+
+The selected Gogh theme drives the scene through its four neutral and twelve vivid
+colors. Simple figures use one vivid accent at a time; tesseract and torus use two.
+Accent hues drift continuously, so a figure can move from one palette color to
+another without a jump. Neutral foregrounds carry depth and brightness, while hit
+flashes brighten the existing accent rather than adding another hue. Theme changes
+crossfade both the gauge colors and the wireframe palette.
+
+Press `D` to show the live analysis panel. It refreshes at 10 Hz by default; `B`
+cycles through FFT-hop, 20, 10, 5, 2, and 1 Hz. The panel renders:
+
+- all sixteen smoothed bands with raw values and their scene roles
+- broadband, bass, and treble envelopes with raw levels
+- spectral flux, bass flux, onset baselines, thresholds, cooldowns, and flashes
+- kick, transition cooldown, hits last frame, hit totals, last hit, scene and crossfade state
+- the current style values plus line and ribbon counts
+
+![Wireframe visualizer with analysis debug panel](./assets/visualizer-debug.png)
+
+Occasionally a random figure vertex gets a sci-fi diagnosis: corner brackets and a
+crosshair mark the live vertex, a stepped polyline connects it to a fixed-width
+readout, and the readout's box moves smoothly on a deliberately sluggish anchor.
+The readout cycles between screen position, object-space coordinates, velocity,
+and acceleration.
+
+## Typography
+
+The complete VU meter face - scale markings, units, readouts, and hotkey hints -
+uses the bundled D-DIN face. The visualizer HUD, analyzer debug panel, and vertex
+diagnosis use Iosevka Tight Soft, with Light, Light Italic, SemiBold, and SemiBold
+Italic faces assigned by role. The bundled Iosevka files are stripped glyph
+subsets, so `Fonts::new` supplies their family, width, weight, and style metadata
+during registration. Visualizer chrome uses fixed logical pixel sizes: it scales
+with the display's DPI factor and the `-` / `=` text-size setting, but never with
+window size.
+
 ## Config
 
 - macOS: `~/Library/Application Support/com.zezic.vu/vu-config.ron`
@@ -82,6 +173,11 @@ Run the signal conversion and meter tests with `cargo test`.
 
 Run the headless meter rendering test with
 `cargo test renders_stereo_scales_text_needles_and_overload -- --ignored`.
+Run the wireframe overlay preview with
+`cargo test renders_wireframe_lines_and_swept_ribbons -- --ignored`.
+Run the full visualizer HUD and diagnosis preview with
+`cargo test renders_visualizer_face_and_wireframe_with_hud -- --ignored` (set
+`VU_RENDER_PREVIEW_PATH` to save the PNG).
 Verify every mode in both layouts with
 `cargo test renders_all_measurement_modes_and_units_in_both_layouts -- --ignored`.
 Set `VU_MODE_PREVIEW_PREFIX` to a path prefix to save PNG previews for both

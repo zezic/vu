@@ -19,6 +19,13 @@ use crate::{
     AudioEvent,
 };
 
+fn gauges<'a>(overlay: &'a super::Overlay<'a>) -> &'a super::GaugeOverlay<'a> {
+    match overlay {
+        super::Overlay::Gauges(gauge) => gauge,
+        super::Overlay::Visualizer(_) => panic!("the gauge renderer needs a gauge overlay"),
+    }
+}
+
 /// Captured sample time and redraw time can advance independently in tests.
 struct TestClock {
     origin: Instant,
@@ -213,7 +220,7 @@ fn profiles_moving_needles_at_240_fps() -> anyhow::Result<()> {
             &target,
             &output_view,
             Size::new(1280.0, 440.0),
-            &frame_kind.overlay,
+            gauges(&frame_kind.overlay),
         );
         device.queue.submit([encoder.finish()]);
         if frame >= FPS {
@@ -266,7 +273,7 @@ fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Resu
         clock.frame(1.0 / 240.0),
     );
     assert!(matches!(first.background, crate::render::Frame::Rebuilt(_)));
-    let first_tip = first.overlay.needles[0].screen_tip();
+    let first_tip = gauges(&first.overlay).needles[0].screen_tip();
     scene.reset();
     let moving = meter.draw(
         &mut scene,
@@ -279,7 +286,12 @@ fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Resu
         moving.background,
         crate::render::Frame::Unchanged(_)
     ));
-    assert!(moving.overlay.needles[0].screen_tip().distance(first_tip) > 0.2);
+    assert!(
+        gauges(&moving.overlay).needles[0]
+            .screen_tip()
+            .distance(first_tip)
+            > 0.2
+    );
     scene.reset();
     let shown = meter.draw(
         &mut scene,
@@ -672,6 +684,255 @@ fn renders_stereo_scales_text_needles_and_overload() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn ui_scale_is_independent_of_window_size_and_zoom() {
+    let mut view = View::fit(Size::new(1280.0, 440.0));
+    assert_eq!(view.ui_scale(), 1.0);
+    view.set_ui_scale(2.0);
+    assert_eq!(view.ui_scale(), 2.0);
+    view.zoom(Point::new(640.0, 220.0), 1.5);
+    assert_eq!(view.ui_scale(), 2.0);
+    view = View::fit(Size::new(640.0, 960.0));
+    assert_eq!(view.ui_scale(), 1.0);
+}
+
+#[test]
+fn text_scale_changes_the_visualizer_chrome_size() -> anyhow::Result<()> {
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: crate::visualizer::Presentation::Visualizer,
+        ..Default::default()
+    })?;
+    let smaller = meter
+        .text_scale
+        .adjusted(crate::frame_schedule::Adjustment::Decrease);
+    meter.set_text_scale(smaller);
+    assert_eq!(meter.text_scale, smaller);
+    assert!(meter.face_settings.is_none());
+    assert!(meter.text_scale.percent() < 100);
+    Ok(())
+}
+
+#[test]
+fn debug_refresh_cycles_from_fft_hop_to_slow_rates() {
+    use super::DebugRefresh;
+    let mut refresh = DebugRefresh::default();
+    assert_eq!(refresh, DebugRefresh::Hz10);
+    assert_eq!(refresh.interval(), Some(0.1));
+    refresh = refresh.next();
+    assert_eq!(refresh, DebugRefresh::Hz5);
+    refresh = refresh.next();
+    assert_eq!(refresh, DebugRefresh::Hz2);
+    refresh = refresh.next();
+    assert_eq!(refresh, DebugRefresh::Hz1);
+    refresh = refresh.next();
+    assert_eq!(refresh, DebugRefresh::PerHop);
+    assert_eq!(refresh.interval(), None);
+    refresh = refresh.next();
+    assert_eq!(refresh, DebugRefresh::Hz20);
+    refresh = refresh.next();
+    assert_eq!(refresh, DebugRefresh::Hz10);
+}
+
+#[test]
+fn switching_presentation_swaps_overlays_and_keeps_audio_running() -> anyhow::Result<()> {
+    use crate::visualizer::Presentation;
+    let mut clock = TestClock::new();
+    let mut meter = Meter::new(&crate::config::Config {
+        preamp_db: PreampDb::try_from(0.0)?,
+        ..Default::default()
+    })?;
+    meter.audio_event(AudioEvent::Config { samplerate: 48000 });
+    for _ in 0..8 {
+        clock.feed(&mut meter, &[[0.4, 0.8]; 800]);
+    }
+    clock.display = clock.origin + Duration::from_millis(120);
+    let view = View::fit(Size::new(1280.0, 440.0));
+    let mut scene = Scene::new();
+    let gauge_angle = {
+        let gauge = meter.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            None,
+            clock.frame(1.0 / 60.0),
+        );
+        gauges(&gauge.overlay).needles[0].angle
+    };
+    meter.set_presentation(Presentation::Visualizer);
+    assert_eq!(meter.presentation(), Presentation::Visualizer);
+    scene.reset();
+    {
+        let visualizer = meter.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            None,
+            clock.frame(1.0 / 60.0),
+        );
+        match &visualizer.overlay {
+            super::Overlay::Visualizer(frame) => assert!(frame.lines.len() >= 12),
+            super::Overlay::Gauges(_) => panic!("the wireframe presentation must supply lines"),
+        }
+    }
+    meter.set_presentation(Presentation::Gauges);
+    scene.reset();
+    let gauge = meter.draw(
+        &mut scene,
+        &view,
+        FrameRateLimit::Fps60,
+        None,
+        clock.frame(1.0 / 60.0),
+    );
+    let returned = gauges(&gauge.overlay);
+    assert!((returned.needles[0].angle - gauge_angle).abs() > 1e-6);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn renders_visualizer_face_and_wireframe_with_hud() -> anyhow::Result<()> {
+    use crate::visualizer::Presentation;
+    let width = 1280;
+    let height = 440;
+    let mut clock = TestClock::new();
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Visualizer,
+        preamp_db: PreampDb::try_from(0.0)?,
+        ..Default::default()
+    })?;
+    meter.audio_event(AudioEvent::Config { samplerate: 48000 });
+    meter.set_debug(true);
+    let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+    let mut scene = Scene::new();
+    for frame in 0..240 {
+        let buf: Vec<_> = (0..800)
+            .map(|index| {
+                let sample = frame * 800 + index;
+                let time = sample as f32 / 48000.0;
+                let block = sample % 9600;
+                let kick = if block < 3_000 {
+                    (1.0 - block as f32 / 3_000.0) * 0.9
+                } else {
+                    0.0
+                };
+                let tone = 0.22 * (std::f32::consts::TAU * 880.0 * time).sin()
+                    + 0.12 * (std::f32::consts::TAU * 220.0 * time).sin();
+                let low = kick * (std::f32::consts::TAU * 55.0 * time).sin();
+                [tone + low; 2]
+            })
+            .collect();
+        clock.feed(&mut meter, &buf);
+        scene.reset();
+        meter.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            None,
+            clock.frame(1.0 / 60.0),
+        );
+    }
+    let (lines, ribbons): (Vec<_>, Vec<_>) = {
+        scene.reset();
+        let frame = meter.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            None,
+            clock.frame(1.0 / 60.0),
+        );
+        match &frame.overlay {
+            super::Overlay::Visualizer(frame) => (frame.lines.to_vec(), frame.ribbons.to_vec()),
+            super::Overlay::Gauges(_) => panic!("the visualizer must supply line overlay"),
+        }
+    };
+    assert!(lines.len() >= 12);
+    let mut context = RenderContext::new();
+    let id = pollster::block_on(context.device(None)).expect("a compute-capable GPU is required");
+    let device = &context.devices[id];
+    let mut renderer = renderer(&device.device)?;
+    let params = RenderParams {
+        base_color: meter.theme.colors.background,
+        width,
+        height,
+        antialiasing_method: ANTIALIASING,
+    };
+    let background_texture = device.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Visualizer face"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let mut background = BackgroundCache::new();
+    let composite = background.compose(
+        &mut renderer,
+        device,
+        crate::render::Frame::Rebuilt(&meter.face),
+        &scene,
+        &params,
+    )?;
+    renderer.render_to_texture(
+        &device.device,
+        &device.queue,
+        composite,
+        &background_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        &params,
+    )?;
+    let output = device.device.create_texture(&texture_descriptor(
+        width,
+        height,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+    ));
+    let mut visualizer = crate::visualizer::Renderer::new(&device.device, output.format());
+    let mut encoder = device
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    visualizer.draw(
+        device,
+        &mut encoder,
+        &background_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        &output.create_view(&wgpu::TextureViewDescriptor::default()),
+        Size::new(f64::from(width), f64::from(height)),
+        crate::visualizer::Frame {
+            lines: &lines,
+            ribbons: &ribbons,
+        },
+    );
+    device.queue.submit([encoder.finish()]);
+    let pixels = read_texture(device, &output, width, height)?;
+    let background_rgb = meter.theme.colors.background.components;
+    let ink = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| {
+            pixel[..3]
+                .iter()
+                .zip(&background_rgb[..3])
+                .any(|(pixel, background)| (f32::from(*pixel) - background * 255.0).abs() > 20.0)
+        })
+        .count();
+    eprintln!("visualizer meter ink pixels: {ink}");
+    assert!(ink > 3_000);
+    if let Some(path) = std::env::var_os("VU_RENDER_PREVIEW_PATH") {
+        let path = std::path::PathBuf::from(path).with_extension("visualizer-meter.png");
+        let mut encoder = png::Encoder::new(BufWriter::new(File::create(path)?), width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header()?.write_image_data(&pixels)?;
+    }
+    Ok(())
+}
+
 fn render_frame(
     device: &DeviceHandle,
     renderer: &mut Renderer,
@@ -733,7 +994,7 @@ fn render_frame(
             &texture.create_view(&wgpu::TextureViewDescriptor::default()),
             &output.create_view(&wgpu::TextureViewDescriptor::default()),
             Size::new(f64::from(width), f64::from(height)),
-            &super::Overlay {
+            &super::GaugeOverlay {
                 needles,
                 colors: crate::theme::Theme::new(crate::theme::ThemeId::default()).colors,
             },
@@ -743,6 +1004,46 @@ fn render_frame(
     let source = output.as_ref().unwrap_or(&texture);
     encoder.copy_texture_to_buffer(
         source.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(height),
+            },
+        },
+        texture.size(),
+    );
+    device.queue.submit([encoder.finish()]);
+    let (tx, rx) = mpsc::channel();
+    buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+    device.device.poll(wgpu::PollType::wait_indefinitely())?;
+    rx.recv()??;
+    let pixels = buffer.slice(..).get_mapped_range()?.to_vec();
+    buffer.unmap();
+    Ok(pixels)
+}
+
+fn read_texture(
+    device: &DeviceHandle,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> anyhow::Result<Vec<u8>> {
+    let row_bytes = width * 4;
+    let buffer = device.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("VU texture readback"),
+        size: u64::from(row_bytes * height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
@@ -1212,7 +1513,9 @@ fn first_shutter_excludes_startup_history_and_mode_changes_keep_sample_time() ->
         clock.frame(1.0 / 240.0),
     );
     assert!(
-        (first.overlay.needles[0].edges[1] - first.overlay.needles[0].edges[0]).abs() < 0.001,
+        (gauges(&first.overlay).needles[0].edges[1] - gauges(&first.overlay).needles[0].edges[0])
+            .abs()
+            < 0.001,
         "first exposure must cover the settled current needle, not its startup sweep"
     );
     let before = meter.processor.audio_time();
@@ -1318,16 +1621,20 @@ fn steady_vu_tone_stays_smooth_across_capture_buffer_arrivals() -> anyhow::Resul
                 origin + Duration::from_secs_f64(samples as f64 / 48000.0),
             );
             scene.reset();
-            let expected = reference
-                .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
-                .overlay
-                .needles[0]
+            let expected = gauges(
+                &reference
+                    .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
+                    .overlay,
+            )
+            .needles[0]
                 .angle;
             scene.reset();
-            let actual = streamed
-                .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
-                .overlay
-                .needles[0]
+            let actual = gauges(
+                &streamed
+                    .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
+                    .overlay,
+            )
+            .needles[0]
                 .angle;
             if frame > 480 {
                 let error_pixels = (actual - expected) * super::NEEDLE_RADIUS;
@@ -1370,10 +1677,12 @@ fn playback_lookahead_is_sampled_at_frame_time_for_needles_and_lamps() -> anyhow
     let time = FrameTime::new(starts_at, starts_at + Duration::from_secs_f64(elapsed));
     let view = View::fit(Size::new(1280.0, 440.0));
     let mut scene = Scene::new();
-    let needle = meter
-        .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
-        .overlay
-        .needles[0];
+    let needle = gauges(
+        &meter
+            .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
+            .overlay,
+    )
+    .needles[0];
     let level = (1.5 * std::f64::consts::PI / (2.0 * 2.0_f64.sqrt())) as f32;
     let target = Mode::Vu.position(&meter.scale, level);
     let mut motion = super::Motion::new(
@@ -1432,10 +1741,12 @@ fn changing_vu_levels_keep_continuous_motion_and_full_shutter_between_buffers() 
                 origin + Duration::from_secs_f64(samples as f64 / 48000.0),
             );
             scene.reset();
-            let needle = meter
-                .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
-                .overlay
-                .needles[0];
+            let needle = gauges(
+                &meter
+                    .draw(&mut scene, &view, FrameRateLimit::Fps240, None, time)
+                    .overlay,
+            )
+            .needles[0];
             if frame > 240 {
                 if previous == Some(needle.angle) {
                     repeated += 1;

@@ -9,8 +9,10 @@ pub mod meter;
 pub mod processor;
 pub mod render;
 pub mod scales;
+pub mod shutter;
 pub mod text;
 pub mod theme;
+pub mod visualizer;
 
 pub enum AudioEvent {
     Config {

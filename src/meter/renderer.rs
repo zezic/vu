@@ -5,7 +5,7 @@ use vello::{
 };
 
 use super::{
-    motion::HINGE_RADIUS, NeedleAppearance, Overlay, BEND_ROUNDING, GLOW_RADIUS, LAMP_CENTER,
+    motion::HINGE_RADIUS, GaugeOverlay, NeedleAppearance, BEND_ROUNDING, GLOW_RADIUS, LAMP_CENTER,
     LAMP_RADIUS, NEEDLE_RADIUS,
 };
 
@@ -326,7 +326,7 @@ impl Renderer {
         background: &wgpu::TextureView,
         target: &wgpu::TextureView,
         viewport: Size,
-        overlay: &Overlay<'_>,
+        overlay: &GaugeOverlay<'_>,
     ) {
         self.draw_in_regions(
             device,
@@ -347,7 +347,7 @@ impl Renderer {
         background: &wgpu::TextureView,
         target: &wgpu::TextureView,
         viewport: Size,
-        overlay: &Overlay<'_>,
+        overlay: &GaugeOverlay<'_>,
         regions: &[Rect],
     ) {
         if self
@@ -361,7 +361,7 @@ impl Renderer {
                 background,
             ));
         }
-        let Overlay { needles, colors } = overlay;
+        let GaugeOverlay { needles, colors } = overlay;
         let uniforms = Uniforms {
             viewport: [viewport.width as f32, viewport.height as f32, 0.0, 0.0],
             ink: colors.needle.components,

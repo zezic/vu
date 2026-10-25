@@ -113,6 +113,10 @@ mod tests {
         config.edit().theme = config
             .theme
             .adjusted(crate::frame_schedule::Adjustment::Increase);
+        config.edit().presentation = crate::visualizer::Presentation::Visualizer;
+        config.edit().visualizer_text_scale = config
+            .visualizer_text_scale
+            .adjusted(crate::frame_schedule::Adjustment::Increase);
         config.flush_if_due(config.last_write + SAVE_INTERVAL - Duration::from_millis(1))?;
         assert!(!path.exists());
         config.flush_if_due(config.last_write + SAVE_INTERVAL)?;
@@ -138,6 +142,9 @@ mod tests {
             "(shutter_frames: 0.0)",
             "(shutter_frames: 17.0)",
             "(shutter_frames: NaN)",
+            "(visualizer_text_scale: 0.5)",
+            "(visualizer_text_scale: 2.5)",
+            "(visualizer_text_scale: NaN)",
             "(frame_rate_limit: Fps99)",
             "(mode: Unknown)",
             "(peak_movement: Unknown)",
@@ -149,11 +156,19 @@ mod tests {
         }
         let missing: Config = ron::from_str("(frame_rate_limit: Fps48)")?;
         assert_eq!(missing.preamp_db, PreampDb::default());
-        assert_eq!(missing.mode, crate::measurement::Mode::Rms);
-        assert_eq!(missing.peak_movement, crate::meter::PeakMovement::FullSpec);
+        assert_eq!(missing.mode, crate::measurement::Mode::Vu);
+        assert_eq!(missing.peak_movement, crate::meter::PeakMovement::VintageFr);
+        assert_eq!(
+            missing.presentation,
+            crate::visualizer::Presentation::Gauges
+        );
         assert_eq!(
             missing.shutter_frames,
             crate::config::ShutterFrames::default()
+        );
+        assert_eq!(
+            missing.visualizer_text_scale,
+            crate::config::VisualizerTextScale::default()
         );
         Ok(())
     }

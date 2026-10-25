@@ -2,21 +2,22 @@ use std::collections::{HashMap, VecDeque};
 
 use strum::VariantArray;
 use vello::{
-    kurbo::{Affine, Circle, Point, Rect, Size},
-    peniko::Fill,
+    kurbo::{Affine, Circle, Point, Rect, Size, Stroke},
+    peniko::{Color, Fill},
     Scene,
 };
 
 use crate::{
     audio::timeline::{AudioClock, AudioInterval, AudioTime},
-    config::{Config, PreampDb, ShutterFrames},
+    config::{Config, PreampDb, ShutterFrames, VisualizerTextScale},
     frame_schedule::{FrameRateLimit, FrameTime},
     measurement::Mode,
     processor::Processor,
     render::Frame,
     scales::{generate_scale, Mark, Scale, ScaleSetting},
-    text::{Fonts, Text},
-    theme::{MeterColors, Theme, ThemeId},
+    text::{Fonts, Text, UiFace},
+    theme::{mix, MeterColors, Theme, ThemeId},
+    visualizer::{self, Presentation, Visualizer},
     AudioEvent,
 };
 
@@ -31,8 +32,9 @@ const LAMP_RADIUS: f64 = 5.0;
 const GLOW_RADIUS: f64 = 40.0;
 
 mod motion;
+pub use crate::shutter::ShutterWindow;
+pub use motion::PeakMovement;
 use motion::{Bend, Motion, HINGE_RADIUS, STOP_RADIUS};
-pub use motion::{PeakMovement, ShutterWindow};
 mod renderer;
 pub use renderer::Renderer;
 
@@ -77,7 +79,9 @@ impl Layout {
 pub struct View {
     layout: Layout,
     transform: Affine,
+    fit_scale: f64,
     viewport: Size,
+    ui_scale: f64,
 }
 
 impl View {
@@ -101,7 +105,9 @@ impl View {
         Self {
             layout,
             transform,
+            fit_scale: scale,
             viewport,
+            ui_scale: 1.0,
         }
     }
 
@@ -111,6 +117,25 @@ impl View {
         self.transform *= Affine::translate(point.to_vec2())
             * Affine::scale(factor)
             * Affine::translate(-point.to_vec2());
+    }
+
+    /// Physical pixels per logical UI point, independent of window size.
+    pub fn ui_scale(&self) -> f64 {
+        self.ui_scale
+    }
+
+    pub fn set_ui_scale(&mut self, scale: f64) {
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "the UI scale must be finite and positive"
+        );
+        self.ui_scale = scale;
+    }
+
+    /// Interactive zoom relative to the fitted gauge size.
+    pub fn zoom_factor(&self) -> f64 {
+        let [a, b, ..] = self.transform.as_coeffs();
+        a.hypot(b) / self.fit_scale
     }
 }
 
@@ -297,10 +322,10 @@ impl ScaleReadout {
 
     fn text(fonts: &mut Fonts, setting: ScaleSetting, value: f32) -> Text {
         let label = match setting {
-            ScaleSetting::DbRange => format!("RANGE {value:.1} dB"),
-            ScaleSetting::Bend => format!("BEND {value:.2}"),
+            ScaleSetting::DbRange => format!("RANGE {value:>5.1} dB"),
+            ScaleSetting::Bend => format!("BEND {value:>6.2}"),
         };
-        fonts.layout(&label, 12.0)
+        fonts.layout_gauge(&label, 12.0)
     }
 
     fn advance(
@@ -362,6 +387,9 @@ struct FaceSettings {
     scale: Scale,
     limit: FrameRateLimit,
     colors: MeterColors,
+    presentation: Presentation,
+    debug: bool,
+    text_scale: VisualizerTextScale,
 }
 
 #[derive(Clone, Copy)]
@@ -427,7 +455,12 @@ pub struct MeterFrame<'a> {
     pub overlay: Overlay<'a>,
 }
 
-pub struct Overlay<'a> {
+pub enum Overlay<'a> {
+    Gauges(GaugeOverlay<'a>),
+    Visualizer(visualizer::Frame<'a>),
+}
+
+pub struct GaugeOverlay<'a> {
     pub needles: &'a [NeedleAppearance; 2],
     pub colors: MeterColors,
 }
@@ -477,15 +510,37 @@ impl Readout {
 
     fn new(fonts: &mut Fonts, caption: &str, hints: [&str; 2]) -> Self {
         Self {
-            caption: Some(fonts.layout(caption, 8.0)),
-            hints: hints.map(|hint| fonts.layout(hint, 10.0)).into(),
+            caption: Some(fonts.layout_ui(caption, 8.0, UiFace::Light)),
+            hints: hints
+                .map(|hint| fonts.layout_ui(hint, 10.0, UiFace::LightItalic))
+                .into(),
         }
     }
 
     fn inline<const N: usize>(fonts: &mut Fonts, hints: [&str; N]) -> Self {
         Self {
             caption: None,
-            hints: hints.map(|hint| fonts.layout(hint, 10.0)).into(),
+            hints: hints
+                .map(|hint| fonts.layout_ui(hint, 10.0, UiFace::LightItalic))
+                .into(),
+        }
+    }
+
+    fn gauge_value(fonts: &mut Fonts, text: &str) -> Text {
+        fonts.layout_gauge(text, 12.0)
+    }
+
+    fn gauge_new(fonts: &mut Fonts, caption: &str, hints: [&str; 2]) -> Self {
+        Self {
+            caption: Some(fonts.layout_gauge(caption, 8.0)),
+            hints: hints.map(|hint| fonts.layout_gauge(hint, 10.0)).into(),
+        }
+    }
+
+    fn gauge_inline<const N: usize>(fonts: &mut Fonts, hints: [&str; N]) -> Self {
+        Self {
+            caption: None,
+            hints: hints.map(|hint| fonts.layout_gauge(hint, 10.0)).into(),
         }
     }
 
@@ -514,6 +569,29 @@ impl Readout {
                 let offset = Self::hint_offset(value);
                 for (hint, x) in self.hints.iter().zip([-offset, offset]) {
                     hint.draw(scene, baseline * Affine::translate((x, 0.0)), colors.hint);
+                }
+            }
+            None => self.draw_inline(scene, transform, value, colors, HintOrder::BeforeValue),
+        }
+    }
+
+    /// Left-aligned caption, value and hints for the full-window HUD.
+    fn draw_left_aligned(
+        &self,
+        scene: &mut Scene,
+        transform: Affine,
+        value: &Text,
+        colors: &MeterColors,
+    ) {
+        let baseline = transform * Affine::translate((0.0, 12.0));
+        match &self.caption {
+            Some(caption) => {
+                caption.draw_left(scene, transform, colors.readout);
+                value.draw_left(scene, baseline, colors.readout);
+                let mut x = value.width() + 8.0;
+                for hint in &self.hints {
+                    hint.draw_left(scene, baseline * Affine::translate((x, 0.0)), colors.hint);
+                    x += hint.width() + 8.0;
                 }
             }
             None => self.draw_inline(scene, transform, value, colors, HintOrder::BeforeValue),
@@ -569,8 +647,79 @@ pub struct GaugeStyle {
     pub colors: Option<MeterColors>,
 }
 
+/// How often the retained debug face is refreshed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DebugRefresh {
+    /// Once per completed FFT hop.
+    PerHop,
+    Hz20,
+    #[default]
+    Hz10,
+    Hz5,
+    Hz2,
+    Hz1,
+}
+
+impl DebugRefresh {
+    fn interval(self) -> Option<f32> {
+        match self {
+            Self::PerHop => None,
+            Self::Hz20 => Some(0.05),
+            Self::Hz10 => Some(0.1),
+            Self::Hz5 => Some(0.2),
+            Self::Hz2 => Some(0.5),
+            Self::Hz1 => Some(1.0),
+        }
+    }
+
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::PerHop => Self::Hz20,
+            Self::Hz20 => Self::Hz10,
+            Self::Hz10 => Self::Hz5,
+            Self::Hz5 => Self::Hz2,
+            Self::Hz2 => Self::Hz1,
+            Self::Hz1 => Self::PerHop,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::PerHop => "Hop",
+            Self::Hz20 => "20Hz",
+            Self::Hz10 => "10Hz",
+            Self::Hz5 => "5Hz",
+            Self::Hz2 => "2Hz",
+            Self::Hz1 => "1Hz",
+        }
+    }
+}
+
 pub struct Meter {
     gauge_style: GaugeStyle,
+    presentation: Presentation,
+    presentation_readout: Readout,
+    presentation_value: Text,
+    scene_readout: Readout,
+    scene_value: Text,
+    scene_name: &'static str,
+    debug_readout: Readout,
+    debug_value: Text,
+    debug: bool,
+    debug_refresh: DebugRefresh,
+    debug_snapshot: Option<visualizer::DebugSnapshot>,
+    debug_clock: f32,
+    debug_analysis_revision: u64,
+    text_scale: VisualizerTextScale,
+    text_scale_readout: Readout,
+    text_scale_value: Text,
+    diagnosis_text: Option<Text>,
+    diagnosis_anchor: Point,
+    diagnosis_color: Color,
+    diagnosis_revision: u64,
+    diagnosis_visible_last_frame: bool,
+    visualizer: Visualizer,
     mode: Mode,
     mode_readout: Readout,
     mode_value: Text,
@@ -581,9 +730,13 @@ pub struct Meter {
     theme: Theme,
     theme_readout: Readout,
     theme_value: Text,
+    gauge_theme_readout: Readout,
+    gauge_theme_value: Text,
     shutter_frames: ShutterFrames,
     shutter_readout: Readout,
     shutter_value: Text,
+    gauge_shutter_readout: Readout,
+    gauge_shutter_value: Text,
     processor: Processor,
     audio_cursor: AudioReadCursor,
     pub scale: Scale,
@@ -591,8 +744,12 @@ pub struct Meter {
     fonts: Fonts,
     preamp_readout: Readout,
     preamp_value: Text,
+    gauge_preamp_readout: Readout,
+    gauge_preamp_value: Text,
     frame_readout: Readout,
     frame_values: HashMap<FrameRateLimit, Text>,
+    gauge_frame_readout: Readout,
+    gauge_frame_values: HashMap<FrameRateLimit, Text>,
     needles: [Needle; 2],
     face: Scene,
     face_settings: Option<FaceSettings>,
@@ -607,25 +764,57 @@ impl Meter {
         let selected = config.theme;
         let processor = Processor::new(preamp.gain(), config.mode);
         let mut fonts = Fonts::new()?;
-        let mode_readout = Readout::inline(&mut fonts, ["[M]"]);
-        let mode_value = Readout::value(&mut fonts, config.mode.name());
-        let peak_movement_readout = Readout::inline(&mut fonts, ["[N]"]);
-        let peak_movement_value = Readout::value(&mut fonts, config.peak_movement.name());
-        let units = fonts.layout(config.mode.units(), 14.0);
+        let presentation = config.presentation;
+        let presentation_readout = Readout::inline(&mut fonts, ["[F]"]);
+        let presentation_value = Readout::value(&mut fonts, presentation.name());
+        let scene_readout = Readout::inline(&mut fonts, ["FIGURE"]);
+        let scene_value = fonts.layout_ui("Cube", 12.0, UiFace::SemiBoldItalic);
+        let debug_readout = Readout::inline(&mut fonts, ["[D]", "[B]"]);
+        let debug_value = Readout::value(&mut fonts, "Debug Off");
+        let text_scale = config.visualizer_text_scale;
+        let text_scale_readout = Readout::inline(&mut fonts, ["[-]", "[+]"]);
+        let text_scale_value =
+            Readout::value(&mut fonts, &format!("Text {:>3}%", text_scale.percent()));
+        let visualizer = Visualizer::new();
+        let scene_name = visualizer.scene_name();
+        let mode_readout = Readout::gauge_inline(&mut fonts, ["[M]"]);
+        let mode_value = Readout::gauge_value(&mut fonts, config.mode.name());
+        let peak_movement_readout = Readout::gauge_inline(&mut fonts, ["[N]"]);
+        let peak_movement_value = Readout::gauge_value(&mut fonts, config.peak_movement.name());
+        let units = fonts.layout_gauge(config.mode.units(), 14.0);
         let theme_readout = Readout::inline(&mut fonts, ["[A]", "[S]"]);
         let theme_value = Readout::value(&mut fonts, selected.name());
+        let gauge_theme_readout = Readout::gauge_inline(&mut fonts, ["[A]", "[S]"]);
+        let gauge_theme_value = Readout::gauge_value(&mut fonts, selected.name());
         let shutter_readout = Readout::inline(&mut fonts, ["[C]", "[V]"]);
         let shutter_value = Readout::value(
             &mut fonts,
-            &format!("Shutter {:.1}f", config.shutter_frames.frames()),
+            &format!("Shutter {:>4.1}f", config.shutter_frames.frames()),
+        );
+        let gauge_shutter_readout = Readout::gauge_inline(&mut fonts, ["[C]", "[V]"]);
+        let gauge_shutter_value = Readout::gauge_value(
+            &mut fonts,
+            &format!("Shutter {:>4.1}f", config.shutter_frames.frames()),
         );
         let preamp_readout = Readout::new(&mut fonts, "Preamp", ["[Z]", "[X]"]);
+        let gauge_preamp_readout = Readout::gauge_new(&mut fonts, "Preamp", ["[Z]", "[X]"]);
         let frame_readout = Readout::new(&mut fonts, "FPS Limit", ["[Q]", "[W]"]);
+        let gauge_frame_readout = Readout::gauge_new(&mut fonts, "FPS Limit", ["[Q]", "[W]"]);
         let frame_values = FrameRateLimit::VARIANTS
             .iter()
-            .map(|&limit| (limit, Readout::value(&mut fonts, &limit.to_string())))
+            .map(|&limit| (limit, Readout::value(&mut fonts, &format!("{limit:>5}"))))
+            .collect();
+        let gauge_frame_values = FrameRateLimit::VARIANTS
+            .iter()
+            .map(|&limit| {
+                (
+                    limit,
+                    Readout::gauge_value(&mut fonts, &format!("{limit:>5}")),
+                )
+            })
             .collect();
         let preamp_value = Readout::value(&mut fonts, &format!("{:.1}dB", preamp.db()));
+        let gauge_preamp_value = Readout::gauge_value(&mut fonts, &format!("{:.1}dB", preamp.db()));
         let marks = generate_scale(&mut fonts, config.mode);
         let scale = Scale::new();
         let range_readout =
@@ -633,6 +822,28 @@ impl Meter {
         let bend_readout = ScaleReadout::new(&mut fonts, ScaleSetting::Bend, scale.bend);
         Ok(Self {
             gauge_style: GaugeStyle::default(),
+            presentation,
+            presentation_readout,
+            presentation_value,
+            scene_readout,
+            scene_value,
+            scene_name,
+            debug_readout,
+            debug_value,
+            debug: false,
+            debug_refresh: DebugRefresh::default(),
+            debug_snapshot: None,
+            debug_clock: 0.0,
+            debug_analysis_revision: 0,
+            text_scale,
+            text_scale_readout,
+            text_scale_value,
+            diagnosis_text: None,
+            diagnosis_anchor: Point::ORIGIN,
+            diagnosis_color: Color::new([1.0, 1.0, 1.0, 1.0]),
+            diagnosis_revision: 0,
+            diagnosis_visible_last_frame: false,
+            visualizer,
             mode: config.mode,
             mode_readout,
             mode_value,
@@ -643,9 +854,13 @@ impl Meter {
             theme: Theme::new(selected),
             theme_readout,
             theme_value,
+            gauge_theme_readout,
+            gauge_theme_value,
             shutter_frames: config.shutter_frames,
             shutter_readout,
             shutter_value,
+            gauge_shutter_readout,
+            gauge_shutter_value,
             processor,
             audio_cursor: AudioReadCursor::default(),
             scale,
@@ -653,8 +868,12 @@ impl Meter {
             fonts,
             preamp_readout,
             preamp_value,
+            gauge_preamp_readout,
+            gauge_preamp_value,
             frame_readout,
             frame_values,
+            gauge_frame_readout,
+            gauge_frame_values,
             needles: std::array::from_fn(|_| {
                 Needle::new(config.mode, config.peak_movement, AudioTime::ZERO)
             }),
@@ -670,6 +889,7 @@ impl Meter {
         match event {
             AudioEvent::Config { samplerate } => {
                 self.processor.set_samplerate(samplerate);
+                self.visualizer.set_samplerate(samplerate);
                 self.audio_cursor = AudioReadCursor::default();
                 self.needles = std::array::from_fn(|_| {
                     Needle::new(self.mode, self.peak_movement, AudioTime::ZERO)
@@ -691,6 +911,62 @@ impl Meter {
                 );
             }
         }
+        if self.presentation == Presentation::Visualizer {
+            self.visualizer.consume_buf(buf, self.processor.preamp);
+        }
+    }
+
+    pub fn presentation(&self) -> Presentation {
+        self.presentation
+    }
+
+    pub fn debug(&self) -> bool {
+        self.debug
+    }
+
+    pub fn set_debug(&mut self, debug: bool) {
+        if self.debug == debug {
+            return;
+        }
+        self.debug = debug;
+        let label = self.debug_label();
+        self.debug_value = Readout::value(&mut self.fonts, &label);
+        self.debug_snapshot = None;
+        self.debug_clock = 0.0;
+        self.face_settings = None;
+    }
+
+    pub fn cycle_debug_refresh(&mut self) {
+        self.debug_refresh = self.debug_refresh.next();
+        let label = self.debug_label();
+        self.debug_value = Readout::value(&mut self.fonts, &label);
+        self.debug_snapshot = None;
+        self.debug_clock = 0.0;
+        self.face_settings = None;
+    }
+
+    fn debug_label(&self) -> String {
+        if self.debug {
+            format!("Debug {}", self.debug_refresh.name())
+        } else {
+            "Debug Off".to_owned()
+        }
+    }
+
+    pub fn set_presentation(&mut self, presentation: Presentation) {
+        if self.presentation == presentation {
+            return;
+        }
+        self.presentation = presentation;
+        self.presentation_value = Readout::value(&mut self.fonts, presentation.name());
+        if presentation == Presentation::Visualizer {
+            self.visualizer.reset_audio();
+        } else {
+            self.appearance = None;
+            self.range_readout.opacity = 0.0;
+            self.bend_readout.opacity = 0.0;
+        }
+        self.face_settings = None;
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
@@ -699,8 +975,8 @@ impl Meter {
         self.needles = std::array::from_fn(|_| {
             Needle::new(mode, self.peak_movement, self.processor.audio_time())
         });
-        self.mode_value = Readout::value(&mut self.fonts, mode.name());
-        self.units = self.fonts.layout(mode.units(), 14.0);
+        self.mode_value = Readout::gauge_value(&mut self.fonts, mode.name());
+        self.units = self.fonts.layout_gauge(mode.units(), 14.0);
         self.marks = generate_scale(&mut self.fonts, mode);
         self.face_settings = None;
         self.appearance = None;
@@ -714,7 +990,7 @@ impl Meter {
             "peak movement selection belongs to a peak mode"
         );
         self.peak_movement = movement;
-        self.peak_movement_value = Readout::value(&mut self.fonts, movement.name());
+        self.peak_movement_value = Readout::gauge_value(&mut self.fonts, movement.name());
         for needle in &mut self.needles {
             needle.motion.set_peak_movement(movement);
         }
@@ -724,6 +1000,7 @@ impl Meter {
     pub fn set_theme(&mut self, selected: ThemeId) {
         self.theme.select(selected);
         self.theme_value = Readout::value(&mut self.fonts, selected.name());
+        self.gauge_theme_value = Readout::gauge_value(&mut self.fonts, selected.name());
         self.face_settings = None;
     }
 
@@ -731,14 +1008,30 @@ impl Meter {
         self.shutter_frames = shutter;
         self.shutter_value = Readout::value(
             &mut self.fonts,
-            &format!("Shutter {:.1}f", shutter.frames()),
+            &format!("Shutter {:>4.1}f", shutter.frames()),
+        );
+        self.gauge_shutter_value = Readout::gauge_value(
+            &mut self.fonts,
+            &format!("Shutter {:>4.1}f", shutter.frames()),
         );
         self.face_settings = None;
     }
 
     pub fn set_preamp(&mut self, preamp: PreampDb) {
         self.processor.preamp = preamp.gain();
-        self.preamp_value = Readout::value(&mut self.fonts, &format!("{:.1}dB", preamp.db()));
+        let value = format!("{:.1}dB", preamp.db());
+        self.preamp_value = Readout::value(&mut self.fonts, &value);
+        self.gauge_preamp_value = Readout::gauge_value(&mut self.fonts, &value);
+        self.face_settings = None;
+    }
+
+    pub fn set_text_scale(&mut self, scale: VisualizerTextScale) {
+        if self.text_scale == scale {
+            return;
+        }
+        self.text_scale = scale;
+        self.text_scale_value =
+            Readout::value(&mut self.fonts, &format!("Text {:>3}%", scale.percent()));
         self.face_settings = None;
     }
 
@@ -798,75 +1091,457 @@ impl Meter {
             None,
             &Rect::from_origin_size(Point::ORIGIN, view.viewport),
         );
-        let [a, b, ..] = view.transform.as_coeffs();
-        let theme_scale = a.hypot(b);
-        let theme_transform =
-            Affine::translate((24.0, view.viewport.height - 24.0)) * Affine::scale(theme_scale);
-        self.theme_readout
-            .draw(scene, theme_transform, &self.theme_value, colors);
-        self.mode_readout.draw(
-            scene,
-            theme_transform * Affine::translate((0.0, -24.0)),
-            &self.mode_value,
-            colors,
-        );
-        if self.mode.uses_peak_movement() {
-            self.peak_movement_readout.draw(
-                scene,
-                theme_transform * Affine::translate((0.0, -48.0)),
-                &self.peak_movement_value,
-                colors,
-            );
-        }
-        let shutter_width = self.shutter_readout.inline_width(&self.shutter_value) * theme_scale;
-        let shutter_transform = Affine::translate((
-            view.viewport.width - 24.0 - shutter_width,
-            view.viewport.height - 24.0,
-        )) * Affine::scale(theme_scale);
-        self.shutter_readout.draw_inline(
-            scene,
-            shutter_transform,
-            &self.shutter_value,
-            colors,
-            HintOrder::AfterValue,
-        );
-        let [preamp, frame] = view.layout.readouts();
-        self.preamp_readout.draw(
-            scene,
-            view.transform * Affine::translate(preamp.to_vec2()),
-            &self.preamp_value,
-            colors,
-        );
-        let frame_value = self
-            .frame_values
-            .get(&limit)
-            .expect("every frame limit has a prepared label");
-        self.frame_readout.draw(
-            scene,
-            view.transform * Affine::translate(frame.to_vec2()),
-            frame_value,
-            colors,
-        );
-        for pivot in view.layout.pivots() {
-            let meter = view.transform * Affine::translate(pivot.to_vec2());
-            Self::draw_gauge(
-                scene,
-                meter,
-                &self.marks,
-                &self.scale,
-                self.mode,
-                colors,
-                &self.units,
-                None,
-            );
+        match self.presentation {
+            Presentation::Gauges => {
+                let [a, b, ..] = view.transform.as_coeffs();
+                let theme_scale = a.hypot(b);
+                let theme_transform = Affine::translate((24.0, view.viewport.height - 24.0))
+                    * Affine::scale(theme_scale);
+                let shutter_width =
+                    self.shutter_readout.inline_width(&self.shutter_value) * theme_scale;
+                let shutter_transform = Affine::translate((
+                    view.viewport.width - 24.0 - shutter_width,
+                    view.viewport.height - 24.0,
+                )) * Affine::scale(theme_scale);
+                self.gauge_theme_readout.draw(
+                    scene,
+                    theme_transform,
+                    &self.gauge_theme_value,
+                    colors,
+                );
+                self.mode_readout.draw(
+                    scene,
+                    theme_transform * Affine::translate((0.0, -24.0)),
+                    &self.mode_value,
+                    colors,
+                );
+                if self.mode.uses_peak_movement() {
+                    self.peak_movement_readout.draw(
+                        scene,
+                        theme_transform * Affine::translate((0.0, -48.0)),
+                        &self.peak_movement_value,
+                        colors,
+                    );
+                }
+                self.gauge_shutter_readout.draw_inline(
+                    scene,
+                    shutter_transform,
+                    &self.gauge_shutter_value,
+                    colors,
+                    HintOrder::AfterValue,
+                );
+                let [preamp, frame] = view.layout.readouts();
+                self.gauge_preamp_readout.draw(
+                    scene,
+                    view.transform * Affine::translate(preamp.to_vec2()),
+                    &self.gauge_preamp_value,
+                    colors,
+                );
+                let frame_value = self
+                    .gauge_frame_values
+                    .get(&limit)
+                    .expect("every frame limit has a prepared label");
+                self.gauge_frame_readout.draw(
+                    scene,
+                    view.transform * Affine::translate(frame.to_vec2()),
+                    frame_value,
+                    colors,
+                );
+                for pivot in view.layout.pivots() {
+                    let meter = view.transform * Affine::translate(pivot.to_vec2());
+                    Self::draw_gauge(
+                        scene,
+                        meter,
+                        &self.marks,
+                        &self.scale,
+                        self.mode,
+                        colors,
+                        &self.units,
+                        None,
+                    );
+                }
+            }
+            Presentation::Visualizer => {
+                // Visualizer chrome uses fixed logical sizes, scaled by DPI and
+                // the user's text-size setting but never by window size.
+                let ui = view.ui_scale() * f64::from(self.text_scale.factor());
+                let hud_left = Affine::translate((24.0 * ui, view.viewport.height - 24.0 * ui))
+                    * Affine::scale(ui);
+                let shutter_width = self.shutter_readout.inline_width(&self.shutter_value) * ui;
+                let shutter_transform = Affine::translate((
+                    view.viewport.width - 24.0 * ui - shutter_width,
+                    view.viewport.height - 24.0 * ui,
+                )) * Affine::scale(ui);
+                let top_left = Affine::translate((24.0 * ui, 32.0 * ui)) * Affine::scale(ui);
+                let palette = self.visualizer.palette();
+                let hud_colors = MeterColors {
+                    readout: palette.neutral[0],
+                    hint: mix(palette.neutral[2], palette.neutral[0], 0.55),
+                    ..*colors
+                };
+                self.theme_readout
+                    .draw(scene, hud_left, &self.theme_value, &hud_colors);
+                self.presentation_readout.draw_inline(
+                    scene,
+                    hud_left * Affine::translate((0.0, -24.0)),
+                    &self.presentation_value,
+                    &hud_colors,
+                    HintOrder::BeforeValue,
+                );
+                self.scene_readout.draw_inline(
+                    scene,
+                    hud_left * Affine::translate((0.0, -48.0)),
+                    &self.scene_value,
+                    &hud_colors,
+                    HintOrder::BeforeValue,
+                );
+                self.debug_readout.draw_inline(
+                    scene,
+                    hud_left * Affine::translate((0.0, -72.0)),
+                    &self.debug_value,
+                    &hud_colors,
+                    HintOrder::BeforeValue,
+                );
+                self.text_scale_readout.draw_inline(
+                    scene,
+                    hud_left * Affine::translate((0.0, -96.0)),
+                    &self.text_scale_value,
+                    &hud_colors,
+                    HintOrder::BeforeValue,
+                );
+                self.shutter_readout.draw_inline(
+                    scene,
+                    shutter_transform,
+                    &self.shutter_value,
+                    &hud_colors,
+                    HintOrder::AfterValue,
+                );
+                self.preamp_readout.draw_left_aligned(
+                    scene,
+                    top_left,
+                    &self.preamp_value,
+                    &hud_colors,
+                );
+                let frame_value = self
+                    .frame_values
+                    .get(&limit)
+                    .expect("every frame limit has a prepared label");
+                self.frame_readout.draw_left_aligned(
+                    scene,
+                    top_left * Affine::translate((0.0, 44.0)),
+                    frame_value,
+                    &hud_colors,
+                );
+                if self.debug {
+                    if let Some(snapshot) = self.debug_snapshot {
+                        Self::draw_debug_panel(
+                            &mut self.fonts,
+                            snapshot,
+                            self.visualizer.palette(),
+                            *colors,
+                            scene,
+                            view,
+                            self.debug_refresh,
+                            self.text_scale,
+                        );
+                    }
+                }
+            }
         }
     }
 
-    fn expose_needles(
-        &mut self,
-        transforms: [Affine; 2],
-        frame_time: FrameTime,
-    ) -> [NeedleAppearance; 2] {
+    #[allow(clippy::too_many_arguments)]
+    fn debug_text(
+        fonts: &mut Fonts,
+        scene: &mut Scene,
+        text: &str,
+        x: f64,
+        baseline: f64,
+        size: f32,
+        face: UiFace,
+        color: Color,
+    ) {
+        let layout = fonts.layout_ui(text, size, face);
+        layout.draw_left(scene, Affine::translate((x, baseline)), color);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_debug_panel(
+        fonts: &mut Fonts,
+        snapshot: visualizer::DebugSnapshot,
+        palette: visualizer::Palette,
+        colors: MeterColors,
+        scene: &mut Scene,
+        view: &View,
+        refresh: DebugRefresh,
+        text_scale: VisualizerTextScale,
+    ) {
+        // Debug chrome follows DPI and the user text scale, not window size.
+        let scale = view.ui_scale() * f64::from(text_scale.factor());
+        let margin = 20.0 * scale;
+        let panel_width = (400.0 * scale).min(view.viewport.width * 0.9);
+        let row_height = 13.0 * scale;
+        let font = (10.0 * scale) as f32;
+        let header_height = 22.0 * scale;
+        let summary_lines = 10.0;
+        let panel_height = (header_height
+            + visualizer::BAND_COUNT as f64 * row_height
+            + 8.0 * scale
+            + summary_lines * 11.5 * scale
+            + 10.0 * scale)
+            .min(view.viewport.height - margin * 2.0);
+        let x0 = view.viewport.width - margin - panel_width;
+        let y0 = margin;
+        let panel =
+            Rect::from_origin_size(Point::new(x0, y0), Size::new(panel_width, panel_height));
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            mix(colors.background, palette.neutral[3], 0.18).with_alpha(0.9),
+            None,
+            &panel,
+        );
+        scene.stroke(
+            &Stroke::new(1.0),
+            Affine::IDENTITY,
+            palette.neutral[2].with_alpha(0.55),
+            None,
+            &panel,
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            palette.vivid(9).with_alpha(0.55),
+            None,
+            &Rect::from_origin_size(Point::new(x0, y0), Size::new(2.0 * scale, panel_height)),
+        );
+        let header = format!("ANALYZER 16 BANDS / FFT4096 HOP512 / {}", refresh.name());
+        Self::debug_text(
+            fonts,
+            scene,
+            &header,
+            x0 + 10.0 * scale,
+            y0 + 14.0 * scale,
+            font * 1.1,
+            UiFace::SemiBold,
+            mix(palette.neutral[0], palette.vivid(9), 0.5),
+        );
+        let mut baseline = y0 + header_height + f64::from(font);
+        let bar_x = x0 + panel_width - 86.0 * scale;
+        let bar_width = 64.0 * scale;
+        let bar_height = 4.0 * scale;
+        for (index, band) in snapshot.bands.iter().enumerate() {
+            if baseline > y0 + panel_height - 6.0 * scale {
+                break;
+            }
+            let accent = mix(palette.neutral[0], palette.vivid(index), 0.25);
+            let label = format!(
+                "{:02} {:>5.0}Hz {:<6} {:.2}/{:.2}",
+                index,
+                (band.low_hz + band.high_hz) * 0.5,
+                band.role.name(),
+                band.value,
+                band.raw
+            );
+            Self::debug_text(
+                fonts,
+                scene,
+                &label,
+                x0 + 10.0 * scale,
+                baseline,
+                font,
+                UiFace::Light,
+                accent,
+            );
+            let bar_top = baseline - bar_height - 1.0 * scale;
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                palette.neutral[0].with_alpha(0.18),
+                None,
+                &Rect::from_origin_size(
+                    Point::new(bar_x, bar_top),
+                    Size::new(bar_width, bar_height),
+                ),
+            );
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                palette.vivid(index).with_alpha(0.85),
+                None,
+                &Rect::from_origin_size(
+                    Point::new(bar_x, bar_top),
+                    Size::new(
+                        bar_width * f64::from(band.value.clamp(0.0, 1.0)),
+                        bar_height,
+                    ),
+                ),
+            );
+            scene.stroke(
+                &Stroke::new(1.0),
+                Affine::IDENTITY,
+                palette.neutral[0].with_alpha(0.9),
+                None,
+                &vello::kurbo::Line::new(
+                    Point::new(
+                        bar_x + bar_width * f64::from(band.raw.clamp(0.0, 1.0)),
+                        bar_top - 1.0 * scale,
+                    ),
+                    Point::new(
+                        bar_x + bar_width * f64::from(band.raw.clamp(0.0, 1.0)),
+                        bar_top + bar_height + 1.0 * scale,
+                    ),
+                ),
+            );
+            baseline += row_height;
+        }
+        baseline += 3.0 * scale;
+        scene.stroke(
+            &Stroke::new(1.0),
+            Affine::IDENTITY,
+            palette.neutral[2].with_alpha(0.55),
+            None,
+            &vello::kurbo::Line::new(
+                Point::new(x0 + 8.0 * scale, baseline),
+                Point::new(x0 + panel_width - 8.0 * scale, baseline),
+            ),
+        );
+        baseline += 10.0 * scale;
+        let bass_color = mix(
+            palette.neutral[0],
+            palette.vivid(6),
+            snapshot.bass_onset.flash,
+        );
+        let wide_color = mix(
+            palette.neutral[0],
+            palette.vivid(8),
+            snapshot.broadband_onset.flash,
+        );
+        let lines = [
+            (
+                format!(
+                    "PWR  S{:.2} R{:.2}   FLUX {:.2}",
+                    snapshot.power.smooth, snapshot.power.raw, snapshot.flux
+                ),
+                palette.neutral[0],
+            ),
+            (
+                format!(
+                    "BASS S{:.2} R{:.2}   BFLUX {:.2}",
+                    snapshot.bass.smooth, snapshot.bass.raw, snapshot.bass_flux
+                ),
+                palette.neutral[0],
+            ),
+            (
+                format!(
+                    "TREB S{:.2} R{:.2}",
+                    snapshot.treble.smooth, snapshot.treble.raw
+                ),
+                palette.neutral[0],
+            ),
+            (
+                format!(
+                    "B-ONSET L{:.2} F{:.2} BASE{:.2} THR{:.2} CD{:.2}/{:.2}",
+                    snapshot.bass_onset.level,
+                    snapshot.bass_onset.flux,
+                    snapshot.bass_onset.baseline,
+                    snapshot.bass_onset.threshold,
+                    snapshot.bass_onset.cooldown,
+                    snapshot.bass_onset.cooldown_time
+                ),
+                bass_color,
+            ),
+            (
+                format!(
+                    "W-ONSET L{:.2} F{:.2} BASE{:.2} THR{:.2} CD{:.2}/{:.2}",
+                    snapshot.broadband_onset.level,
+                    snapshot.broadband_onset.flux,
+                    snapshot.broadband_onset.baseline,
+                    snapshot.broadband_onset.threshold,
+                    snapshot.broadband_onset.cooldown,
+                    snapshot.broadband_onset.cooldown_time
+                ),
+                wide_color,
+            ),
+            (
+                format!(
+                    "KICK {:.2} COOL {:.2} HITS {:>3} TOT {:>6}:{:>6} FL {:.2}/{:.2}",
+                    snapshot.kick,
+                    snapshot.transition_cooldown,
+                    snapshot.hits_last_frame,
+                    snapshot.bass_hits,
+                    snapshot.broadband_hits,
+                    snapshot.bass_onset.flash,
+                    snapshot.broadband_onset.flash
+                ),
+                palette.neutral[0],
+            ),
+            (
+                match snapshot.last_hit {
+                    Some(hit) => format!(
+                        "HIT {:<4} {:.2}  SCENE {}",
+                        hit.kind, hit.strength, snapshot.scene
+                    ),
+                    None => format!("HIT {:<4} 0.00  SCENE {}", "--", snapshot.scene),
+                },
+                palette.neutral[0],
+            ),
+            (
+                match snapshot.outgoing {
+                    Some(outgoing) => format!(
+                        "XFADE {:<11} T{:.2}  PHASE {:.2}",
+                        outgoing, snapshot.transition, snapshot.phase
+                    ),
+                    None => format!(
+                        "XFADE {:<11} PHASE {:.2}  ENT {:.2}",
+                        "--", snapshot.phase, snapshot.entrance
+                    ),
+                },
+                palette.neutral[0],
+            ),
+            (
+                format!(
+                    "AX{:+5.1},{:+5.1},{:+5.1} TW{:+5.1} DF{:>4.1} AC{:>4.1}",
+                    snapshot.style.axis[0],
+                    snapshot.style.axis[1],
+                    snapshot.style.axis[2],
+                    snapshot.style.twist_sign,
+                    snapshot.style.deform_bias,
+                    snapshot.style.accent_bias
+                ),
+                palette.neutral[0],
+            ),
+            (
+                format!(
+                    "ZM{:>4.1} PA{:>4.1} L{:>4} R{:>5}",
+                    snapshot.style.zoom_bias,
+                    snapshot.style.palette_rate,
+                    snapshot.lines,
+                    snapshot.ribbons
+                ),
+                palette.neutral[0],
+            ),
+        ];
+        for (text, color) in lines {
+            if baseline > y0 + panel_height - 4.0 * scale {
+                break;
+            }
+            Self::debug_text(
+                fonts,
+                scene,
+                &text,
+                x0 + 10.0 * scale,
+                baseline,
+                font * 0.9,
+                UiFace::Light,
+                color,
+            );
+            baseline += 11.5 * scale;
+        }
+    }
+
+    /// Audio-time interval covered by one displayed frame.
+    fn display_interval(&mut self, frame_time: FrameTime) -> AudioInterval {
         let requested = AudioInterval::new(
             self.processor
                 .position_at(frame_time.start())
@@ -875,9 +1550,16 @@ impl Meter {
                 .position_at(frame_time.end())
                 .unwrap_or(AudioTime::ZERO),
         );
-        let frame =
-            self.audio_cursor
-                .frame(frame_time, requested, self.processor.available_interval());
+        self.audio_cursor
+            .frame(frame_time, requested, self.processor.available_interval())
+    }
+
+    fn expose_needles(
+        &mut self,
+        transforms: [Affine; 2],
+        frame_time: FrameTime,
+    ) -> [NeedleAppearance; 2] {
+        let frame = self.display_interval(frame_time);
         self.appearances_at(transforms, frame)
     }
     fn appearances_at(
@@ -916,6 +1598,109 @@ impl Meter {
         })
     }
 
+    fn update_visualizer_overlays(&mut self, dt: f32) {
+        let name = self.visualizer.scene_name();
+        if name != self.scene_name {
+            self.scene_name = name;
+            self.scene_value = self.fonts.layout_ui(name, 12.0, UiFace::SemiBoldItalic);
+            self.face_settings = None;
+        }
+        if self.debug {
+            self.debug_clock += dt;
+            let revision = self.visualizer.analysis_revision();
+            let new_analysis = revision != self.debug_analysis_revision;
+            let due = self
+                .debug_refresh
+                .interval()
+                .map_or(new_analysis, |interval| self.debug_clock >= interval);
+            if self.debug_snapshot.is_none() || due {
+                self.debug_clock = 0.0;
+                self.debug_analysis_revision = revision;
+                self.debug_snapshot = Some(self.visualizer.debug_snapshot());
+                self.face_settings = None;
+            }
+        }
+        if let Some(anchor) = self.visualizer.diagnosis_anchor() {
+            self.diagnosis_anchor = Point::new(anchor[0] as f64, anchor[1] as f64);
+        }
+        let diagnosis = self
+            .visualizer
+            .diagnosis()
+            .map(|readout| (readout.revision, readout.text.clone(), readout.color));
+        match diagnosis {
+            Some((revision, text, color)) if revision != self.diagnosis_revision => {
+                self.diagnosis_revision = revision;
+                self.diagnosis_text =
+                    Some(self.fonts.layout_ui(&text, 11.0, UiFace::SemiBoldItalic));
+                self.diagnosis_color = color;
+            }
+            None if self.diagnosis_text.is_some() => {
+                self.diagnosis_text = None;
+                self.diagnosis_revision = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_diagnosis(
+        scene: &mut Scene,
+        text: &Text,
+        anchor: Point,
+        color: Color,
+        palette: visualizer::Palette,
+        colors: MeterColors,
+        ui_scale: f64,
+    ) {
+        let scale = ui_scale;
+        let width = 340.0 * scale;
+        let height = 13.0 * scale;
+        let left = anchor.x;
+        let top = anchor.y - height * 0.5;
+        let box_rect = Rect::from_origin_size(
+            Point::new(left - 2.0 * scale, top - 2.0 * scale),
+            Size::new(width + 12.0 * scale, height + 4.0 * scale),
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            colors.background.with_alpha(0.84),
+            None,
+            &box_rect,
+        );
+        scene.stroke(
+            &Stroke::new(scale),
+            Affine::IDENTITY,
+            color.with_alpha(0.65),
+            None,
+            &box_rect,
+        );
+        scene.stroke(
+            &Stroke::new(1.4 * scale),
+            Affine::IDENTITY,
+            color,
+            None,
+            &vello::kurbo::Line::new(
+                Point::new(left, top - 3.0 * scale),
+                Point::new(left, top + height + 3.0 * scale),
+            ),
+        );
+        scene.stroke(
+            &Stroke::new(scale),
+            Affine::IDENTITY,
+            color.with_alpha(0.7),
+            None,
+            &vello::kurbo::Line::new(
+                Point::new(left - 4.0 * scale, anchor.y),
+                Point::new(left + 4.0 * scale, anchor.y),
+            ),
+        );
+        text.draw_left(
+            scene,
+            Affine::translate((left + 6.0 * scale, top + 9.0 * scale)) * Affine::scale(scale),
+            mix(color, palette.neutral[0], 0.45),
+        );
+    }
+
     pub fn draw(
         &mut self,
         scene: &mut Scene,
@@ -926,62 +1711,111 @@ impl Meter {
     ) -> MeterFrame<'_> {
         let dt = frame_time.seconds();
         self.theme.advance(dt);
+        if self.presentation == Presentation::Visualizer {
+            let frame_interval = self.display_interval(frame_time);
+            let palette = visualizer::Palette::from_theme(self.theme.selected());
+            self.visualizer.update(
+                frame_interval,
+                self.shutter_frames,
+                dt,
+                &self.theme.colors,
+                &palette,
+                (view.viewport.width as f32, view.viewport.height as f32),
+                view.zoom_factor() as f32,
+                view.ui_scale() as f32 * self.text_scale.factor(),
+            );
+            self.update_visualizer_overlays(dt);
+        }
         let settings = FaceSettings {
             view: *view,
             scale: self.scale,
             limit,
             colors: self.theme.colors,
+            presentation: self.presentation,
+            debug: self.debug,
+            text_scale: self.text_scale,
         };
         let rebuild = self.face_settings != Some(settings);
         if rebuild {
             self.draw_face(view, limit);
             self.face_settings = Some(settings);
         }
-        for readout in [&mut self.range_readout, &mut self.bend_readout] {
-            readout.advance(&mut self.fonts, &self.scale, adjusting, dt);
-            readout.draw(scene, view, &self.theme.colors);
-        }
-        let needles = self.expose_needles(
-            view.layout
-                .pivots()
-                .map(|pivot| view.transform * Affine::translate(pivot.to_vec2())),
-            frame_time,
-        );
-        let appearance = Appearance {
-            needles,
-            range_opacity: self.range_readout.opacity,
-            bend_opacity: self.bend_readout.opacity,
-        };
-        let background_changed = rebuild
-            || self.appearance.as_ref().is_none_or(|previous| {
-                appearance.range_opacity != previous.range_opacity
-                    || appearance.bend_opacity != previous.bend_opacity
-            });
-        let changed = background_changed
-            || self
-                .appearance
-                .as_ref()
-                .is_none_or(|previous| appearance.needles_differ(previous));
-        if changed {
-            self.appearance = Some(appearance);
-        }
-        let background = if rebuild {
-            Frame::Rebuilt(&self.face)
-        } else if background_changed {
-            Frame::Retained(&self.face)
-        } else {
-            Frame::Unchanged(&self.face)
-        };
-        MeterFrame {
-            background,
-            overlay: Overlay {
-                colors: self.theme.colors,
-                needles: &self
-                    .appearance
-                    .as_ref()
-                    .expect("the first frame prepares the needles")
-                    .needles,
-            },
+        match self.presentation {
+            Presentation::Gauges => {
+                for readout in [&mut self.range_readout, &mut self.bend_readout] {
+                    readout.advance(&mut self.fonts, &self.scale, adjusting, dt);
+                    readout.draw(scene, view, &self.theme.colors);
+                }
+                let needles = self.expose_needles(
+                    view.layout
+                        .pivots()
+                        .map(|pivot| view.transform * Affine::translate(pivot.to_vec2())),
+                    frame_time,
+                );
+                let appearance = Appearance {
+                    needles,
+                    range_opacity: self.range_readout.opacity,
+                    bend_opacity: self.bend_readout.opacity,
+                };
+                let background_changed = rebuild
+                    || self.appearance.as_ref().is_none_or(|previous| {
+                        appearance.range_opacity != previous.range_opacity
+                            || appearance.bend_opacity != previous.bend_opacity
+                    });
+                let changed = background_changed
+                    || self
+                        .appearance
+                        .as_ref()
+                        .is_none_or(|previous| appearance.needles_differ(previous));
+                if changed {
+                    self.appearance = Some(appearance);
+                }
+                let background = if rebuild {
+                    Frame::Rebuilt(&self.face)
+                } else if background_changed {
+                    Frame::Retained(&self.face)
+                } else {
+                    Frame::Unchanged(&self.face)
+                };
+                MeterFrame {
+                    background,
+                    overlay: Overlay::Gauges(GaugeOverlay {
+                        colors: self.theme.colors,
+                        needles: &self
+                            .appearance
+                            .as_ref()
+                            .expect("the first frame prepares the needles")
+                            .needles,
+                    }),
+                }
+            }
+            Presentation::Visualizer => {
+                if let Some(text) = &self.diagnosis_text {
+                    Self::draw_diagnosis(
+                        scene,
+                        text,
+                        self.diagnosis_anchor,
+                        self.diagnosis_color,
+                        self.visualizer.palette(),
+                        self.theme.colors,
+                        view.ui_scale() * f64::from(self.text_scale.factor()),
+                    );
+                }
+                let diagnosis_visible = self.diagnosis_text.is_some();
+                let foreground_changed = diagnosis_visible || self.diagnosis_visible_last_frame;
+                self.diagnosis_visible_last_frame = diagnosis_visible;
+                let background = if rebuild {
+                    Frame::Rebuilt(&self.face)
+                } else if foreground_changed {
+                    Frame::Retained(&self.face)
+                } else {
+                    Frame::Unchanged(&self.face)
+                };
+                MeterFrame {
+                    background,
+                    overlay: Overlay::Visualizer(self.visualizer.frame()),
+                }
+            }
         }
     }
 }
@@ -1005,6 +1839,9 @@ impl Meter {
         }
     }
     pub fn configure(&mut self, config: &Config) {
+        if self.presentation != config.presentation {
+            self.set_presentation(config.presentation);
+        }
         if self.mode != config.mode {
             self.set_mode(config.mode);
         }
@@ -1019,6 +1856,9 @@ impl Meter {
         }
         if self.theme.selected() != config.theme {
             self.set_theme(config.theme);
+        }
+        if self.text_scale != config.visualizer_text_scale {
+            self.set_text_scale(config.visualizer_text_scale);
         }
     }
     pub fn draw_gauge_faces(&self, scene: &mut Scene, transforms: [Affine; 2]) {

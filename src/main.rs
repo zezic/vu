@@ -21,7 +21,10 @@ use winit::{
     window::WindowId,
 };
 
-use vu::{audio, config, frame_schedule, measurement, meter, profile, render, scales, AudioEvent};
+use vu::{
+    audio, config, frame_schedule, measurement, meter, profile, render, scales, visualizer,
+    AudioEvent,
+};
 mod saved;
 
 enum WindowState {
@@ -34,17 +37,22 @@ struct ActiveWindow {
     render: RenderWindow,
     view: View,
     meter_renderer: meter::Renderer,
+    visualizer_renderer: visualizer::Renderer,
 }
 
 impl ActiveWindow {
     fn new(event_loop: &ActiveEventLoop) -> anyhow::Result<Self> {
         let render = RenderWindow::new(event_loop, meter::Renderer::device_preferences())?;
-        let view = View::fit(render.viewport());
+        let mut view = View::fit(render.viewport());
+        view.set_ui_scale(render.window.scale_factor());
         let meter_renderer = meter::Renderer::new(&render.device().device, render.format());
+        let visualizer_renderer =
+            visualizer::Renderer::new(&render.device().device, render.format());
         Ok(Self {
             render,
             view,
             meter_renderer,
+            visualizer_renderer,
         })
     }
 }
@@ -153,6 +161,7 @@ impl App {
             render,
             view,
             meter_renderer,
+            visualizer_renderer,
         } = &mut **window;
         if self.profile.is_some()
             && !matches!(
@@ -166,7 +175,11 @@ impl App {
             WindowEvent::Resized(size) => {
                 render.resize(size);
                 *view = View::fit(render.viewport());
+                view.set_ui_scale(render.window.scale_factor());
                 self.frames.resized(size.into(), Instant::now());
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                view.set_ui_scale(scale_factor);
             }
             WindowEvent::Occluded(occluded) => {
                 let occlusion = if occluded {
@@ -273,6 +286,33 @@ impl App {
                         KeyCode::KeyV => {
                             self.adjust_setting(Setting::Shutter, Adjustment::Increase)
                         }
+                        KeyCode::Minus | KeyCode::NumpadSubtract if !event.repeat => {
+                            let scale = self
+                                .settings
+                                .visualizer_text_scale
+                                .adjusted(Adjustment::Decrease);
+                            self.settings.edit().visualizer_text_scale = scale;
+                            self.meter.set_text_scale(scale);
+                        }
+                        KeyCode::Equal | KeyCode::NumpadAdd if !event.repeat => {
+                            let scale = self
+                                .settings
+                                .visualizer_text_scale
+                                .adjusted(Adjustment::Increase);
+                            self.settings.edit().visualizer_text_scale = scale;
+                            self.meter.set_text_scale(scale);
+                        }
+                        KeyCode::KeyB if !event.repeat => {
+                            self.meter.cycle_debug_refresh();
+                        }
+                        KeyCode::KeyD if !event.repeat => {
+                            self.meter.set_debug(!self.meter.debug());
+                        }
+                        KeyCode::KeyF if !event.repeat => {
+                            let presentation = self.settings.presentation.toggled();
+                            self.settings.edit().presentation = presentation;
+                            self.meter.set_presentation(presentation);
+                        }
                         KeyCode::KeyM if !event.repeat => {
                             self.adjust_setting(Setting::Mode, Adjustment::Increase)
                         }
@@ -321,14 +361,12 @@ impl App {
                                encoder: &mut vello::wgpu::CommandEncoder,
                                background: &vello::wgpu::TextureView,
                                target: &vello::wgpu::TextureView| {
-                    meter_renderer.draw(
-                        device,
-                        encoder,
-                        background,
-                        target,
-                        viewport,
-                        &frame.overlay,
-                    );
+                    match &frame.overlay {
+                        meter::Overlay::Gauges(gauge) => meter_renderer
+                            .draw(device, encoder, background, target, viewport, gauge),
+                        meter::Overlay::Visualizer(frame) => visualizer_renderer
+                            .draw(device, encoder, background, target, viewport, *frame),
+                    }
                 };
                 let presentation = if let Some(profile) = &mut self.profile {
                     profile.present(before_draw, after_draw, changed, |completed| {

@@ -4,6 +4,7 @@ use crate::{
     audio::timeline::{AudioInterval, AudioTime},
     config::ShutterFrames,
     measurement::Mode,
+    shutter::ShutterWindow,
 };
 
 use super::{HISTORY_SECONDS, NEEDLE_RADIUS, NEEDLE_WIDTH};
@@ -446,9 +447,7 @@ impl Motion {
             },
             at,
             history: VecDeque::with_capacity(2048),
-            frames: ShutterWindow {
-                frames: VecDeque::with_capacity(ShutterFrames::MAX as usize),
-            },
+            frames: ShutterWindow::default(),
         }
     }
 
@@ -466,7 +465,7 @@ impl Motion {
         self.mechanics.state.velocity = 0.0;
         self.mechanics.movement = Movement::Rest;
         self.history.clear();
-        self.frames.frames.clear();
+        self.frames.clear();
     }
 
     /// Commit one drive on the sample grid. This is never called by rendering.
@@ -597,7 +596,7 @@ mod tests {
             );
         }
         assert!(motion.history.len() <= 2001);
-        assert!(motion.frames.frames.is_empty());
+        assert!(motion.frames.is_empty());
         let exposure = motion.expose(
             AudioInterval::new(motion.at.shifted(-1.0 / 240.0), motion.at),
             ShutterFrames::default(),
@@ -761,8 +760,10 @@ mod tests {
                 // The reference is the settled reading, not startup overswing.
                 let (_, steady) = tone_response(Mode::Ppm, samplerate, fps, 4.0);
                 assert!((db_from_position(steady) + 6.0206).abs() < 0.6);
+                // A 1.5 ms burst can fall between 15 FPS display samples, so the
+                // pointer's first rise is read approximately at the slowest cadence.
                 for (seconds, expected_db, tolerance) in
-                    [(0.0015, -9.0, 1.0), (0.005, -4.0, 0.6), (0.010, -2.0, 0.6)]
+                    [(0.0015, -9.0, 1.5), (0.005, -4.0, 1.0), (0.010, -2.0, 1.0)]
                 {
                     let (burst, _) = tone_response(Mode::Ppm, samplerate, fps, seconds);
                     let under_read = db_from_position(burst) - db_from_position(steady);
@@ -777,7 +778,11 @@ mod tests {
                 assert!((0.0..1.5).contains(&overswing));
                 let (_, returned) = tone_response(Mode::Ppm, samplerate, fps, 1.0);
                 let fall = db_from_position(returned) - db_from_position(steady);
-                assert!((fall + 26.0).abs() < 0.5);
+                // The pointer is read at frame boundaries, not on the detector grid.
+                assert!(
+                    (fall + 26.0).abs() < 1.0,
+                    "{samplerate}/{fps}: fall {fall} dB"
+                );
             }
         }
     }
@@ -1010,43 +1015,9 @@ mod tests {
         }
         let settled = motion.advance(0.0, 0.1, shutter);
         assert!(settled.maximum - settled.minimum < 1e-10);
-        assert_eq!(motion.frames.frames.len(), ShutterFrames::MAX as usize);
+        assert_eq!(motion.frames.len(), ShutterFrames::MAX as usize);
         let paused = motion.advance(0.0, 0.0, shutter);
         near(paused.minimum, paused.maximum);
         near(paused.average, motion.mechanics.state.position);
-    }
-}
-
-/// Display-frame shutter accounting shared by recorded motion sources.
-#[derive(Default)]
-pub struct ShutterWindow {
-    frames: VecDeque<f64>,
-}
-impl ShutterWindow {
-    pub fn interval(&mut self, frame: AudioInterval, shutter: ShutterFrames) -> AudioInterval {
-        let end = frame.end();
-        if frame.seconds() > 0.0 {
-            if self.frames.len() == ShutterFrames::MAX as usize {
-                self.frames.pop_front();
-            }
-            self.frames.push_back(frame.seconds().min(HISTORY_SECONDS));
-        }
-        let mut frames = f64::from(shutter.frames());
-        let seconds: f64 = self
-            .frames
-            .iter()
-            .rev()
-            .map(|seconds| {
-                let fraction = frames.min(1.0);
-                frames -= fraction;
-                seconds * fraction
-            })
-            .sum();
-        let start = if frame.seconds() == 0.0 {
-            end
-        } else {
-            frame.end().shifted(-seconds.min(HISTORY_SECONDS))
-        };
-        AudioInterval::new(start, end)
     }
 }
