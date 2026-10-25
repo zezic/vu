@@ -20,6 +20,7 @@ On macOS, allow system audio recording when prompted.
 - `B` - cycles the visualizer's analysis refresh rate: FFT hop, 20, 10, 5, 2,
 and 1 Hz.
 - `D` - toggles the visualizer's analysis debug panel.
+- `Esc` - closes the analysis inspector without leaving the debug panel.
 - `F` - toggles between the physical gauges and the wireframe visualizer.
 - `M` - cycles VU, BBC-style PPM, custom 300 ms RMS, and Sample Peak.
 - `N` - In PPM and Sample Peak, switches the physical needle between **Full Spec**
@@ -147,14 +148,69 @@ tesseract therefore draws all of its edges in one color instead of striping the
 nested cubes. No edge color is blended with the background or neutral tones. Theme
 changes crossfade both the gauge colors and the wireframe palette.
 
-Press `D` to show the live analysis panel. It refreshes at 10 Hz by default; `B`
-cycles through FFT-hop, 20, 10, 5, 2, and 1 Hz. The panel renders:
+Press `D` to show the live analysis panel. It refreshes once per completed FFT
+hop by default; `B` cycles through FFT-hop, 20, 10, 5, 2, and 1 Hz. The panel
+renders:
 
-- all sixteen smoothed bands with raw values and their scene roles
-- broadband, bass, and treble envelopes with raw levels
-- spectral flux, bass flux, onset baselines, thresholds, cooldowns, and flashes
-- kick, transition cooldown, hits last frame, hit totals, last hit, scene and crossfade state
-- the current style values plus line and ribbon counts
+- all sixteen smoothed bands with raw values and their scene roles. Each row
+  names what the band drives: `V` marks a dependency on the band value, `B` a
+  dependency through the bass onset detector, and `W` a dependency through the
+  wide onset detector.
+- the live animation properties in a two-column grid: pulse, spin, pitch, roll,
+  twist, bulge, ripple, shear, zoom, accent, line energy, jitter, phase, kick,
+  crossfade, style morph, and entrance
+- broadband, bass, and treble envelopes with raw levels in the footer, plus the
+  last hit, hit totals, scene name, and line and ribbon counts
+
+Hover a band or property to highlight it. Hovering a property also shows its
+description in the footer. Click an item to pin the inspector below the panel;
+click it again (or press `Esc`) to close it. Clicking empty panel space clears
+the selection.
+
+The inspector follows the selection:
+
+- selecting a band draws its smoothed and raw FFT history, any onset detector it
+  feeds, and every animation property whose state depends on that band
+- selecting a property draws its own history plus a graph for every band and
+  envelope that feeds its computation
+- every dependency graph carries a short caption naming how its result reaches
+  the selected property, for example `×0.18 add to energy`, `rate ×1.8 add`, or
+  `switch: level & flux, gates KICK`
+- four or more dependency graphs wrap into two rows so their traces and captions
+  stay legible
+- selecting a property also opens its computation tree on the left side of the
+  screen, clear of the hotkey cheatsheet. If the window is too narrow for both
+  panes, the graph inspector gives up width first instead of hiding the tree.
+  The tree shows the full algebra from inputs to the property value:
+  multipliers (`×`), adders (`+`), clamps, smoothing/integration, and onset
+  switches with their thresholds, baselines, flux gates, and cooldown. Analysis
+  leaves show their live values, and onset leaves report `IDLE`, `ARMED`, or
+  `COOLDOWN`. Tree rows use the same line height as the analyzer band list.
+- clicking a component row opens its adjustable parameters at the bottom of the
+  tree pane: band source, envelope attack/release, the component's multiplier
+  gain in the selected property, the kick decay, or the corresponding style
+  value. For example the SPIN band row exposes a BAND selector, attack, release,
+  and the band gain. Changing BAND reroutes that semantic component to another
+  of the sixteen FFT bands, and the tree labels, band dependency text, and
+  inspector graphs follow the new route. Drag a slider to change the live value.
+- each enveloped component also exposes its pre-envelope input shaping:
+  `LOW REF` / `HIGH REF` rescale the raw value into 0..1, `CURVE` selects
+  linear, inflated, deflated, or S-curve response, and `CURVE AMT` blends the
+  selected bend. The curves use cheap arithmetic (`sqrt`, square, and a cubic
+  smoothstep) before envelope smoothing.
+- attack uses a logarithmic slider over 0.1 to 50.0; release uses 0.1 to 20.0 so the short
+  envelope times get most of the slider travel. Slider tracks and line-shaped
+  thumbs are tall enough for comfortable dragging.
+- clicking a detector row or its `DETECTOR` leaf opens a dedicated detector pane
+  below the existing debug panes. It exposes threshold, minimum flux, baseline
+  ratio, and cooldown. The main analyzer list compacts to its bands while this
+  pane is open so the graph inspector and detector controls both fit.
+- threshold changes made with sliders update the HUD readouts and persist through
+  the same config field as the `G` / `H` and `J` / `K` hotkeys. Envelope rates,
+  kick decay, style values, component gains, band routing, and input shaping are
+  runtime tuning and reset on restart.
+- onset graphs carry the detector baseline and threshold, and every graph uses
+  the same four-second display-rate history
 
 ![Wireframe visualizer with analysis debug panel](./assets/visualizer-debug.png)
 
@@ -173,7 +229,9 @@ Italic faces assigned by role. The bundled Iosevka files are stripped glyph
 subsets, so `Fonts::new` supplies their family, width, weight, and style metadata
 during registration. Visualizer chrome uses fixed logical pixel sizes: it scales
 with the display's DPI factor and the `-` / `=` text-size setting, but never with
-window size.
+window size. Overlay rows are centered by the font's cap height rather than its
+tall ascender, so uppercase labels and the vertex readout sit optically centered
+in their boxes.
 
 ## Config
 

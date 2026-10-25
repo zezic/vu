@@ -154,14 +154,16 @@ impl App {
                 self.frames.limit_changed(Instant::now());
             }
             Setting::BassThreshold => {
-                settings.onset_thresholds.bass =
-                    settings.onset_thresholds.bass.adjusted(adjustment);
-                self.meter.set_onset_thresholds(settings.onset_thresholds);
+                let mut thresholds = self.meter.onset_thresholds();
+                thresholds.bass = thresholds.bass.adjusted(adjustment);
+                settings.onset_thresholds = thresholds;
+                self.meter.set_onset_thresholds(thresholds);
             }
             Setting::BroadbandThreshold => {
-                settings.onset_thresholds.broadband =
-                    settings.onset_thresholds.broadband.adjusted(adjustment);
-                self.meter.set_onset_thresholds(settings.onset_thresholds);
+                let mut thresholds = self.meter.onset_thresholds();
+                thresholds.broadband = thresholds.broadband.adjusted(adjustment);
+                settings.onset_thresholds = thresholds;
+                self.meter.set_onset_thresholds(thresholds);
             }
             Setting::DepthFade => {
                 settings.depth_fade = settings.depth_fade.adjusted(adjustment);
@@ -220,16 +222,22 @@ impl App {
                 let now = Instant::now();
                 match state {
                     ElementState::Pressed => {
-                        if self
-                            .last_click
-                            .take()
-                            .is_some_and(|click| click.follows(self.mouse, now))
-                        {
-                            self.meter.reset_scale();
+                        if self.meter.click_debug(view, self.mouse) {
+                            self.drag = DragState::Idle;
+                            self.last_click = None;
+                        } else {
+                            if self
+                                .last_click
+                                .take()
+                                .is_some_and(|click| click.follows(self.mouse, now))
+                            {
+                                self.meter.reset_scale();
+                            }
+                            self.drag = DragState::Pending(self.mouse);
                         }
-                        self.drag = DragState::Pending(self.mouse);
                     }
                     ElementState::Released => {
+                        self.meter.end_slider_drag();
                         if matches!(self.drag, DragState::Pending(_)) {
                             self.meter.repair_needles();
                             self.last_click = Some(Click {
@@ -268,12 +276,19 @@ impl App {
                     }
                     (_, None) => {}
                 }
+                self.meter.set_pointer(Some(position));
                 self.mouse = position;
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.meter.set_pointer(None);
+                self.meter.end_slider_drag();
             }
             WindowEvent::Focused(false) => {
                 self.modifiers = ModifiersState::empty();
                 self.drag = DragState::Idle;
                 self.last_click = None;
+                self.meter.set_pointer(None);
+                self.meter.end_slider_drag();
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
@@ -288,6 +303,7 @@ impl App {
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     match key {
+                        KeyCode::Escape => self.meter.clear_debug_selection(),
                         KeyCode::Equal if self.settings.mode != measurement::Mode::Vu => {
                             self.meter.scale.negative_db_range =
                                 (self.meter.scale.negative_db_range + 0.1).min(100.0)
@@ -384,6 +400,10 @@ impl App {
             WindowEvent::RedrawRequested => {
                 while let Ok(event) = self.rx.try_recv() {
                     self.meter.audio_event(event);
+                }
+                let thresholds = self.meter.onset_thresholds();
+                if self.settings.onset_thresholds != thresholds {
+                    self.settings.edit().onset_thresholds = thresholds;
                 }
                 let now = Instant::now();
                 let frame_time = FrameTime::new(self.previous_frame, now);

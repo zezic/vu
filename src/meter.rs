@@ -31,6 +31,7 @@ const LAMP_CENTER: Point = Point::new(0.0, CENTER_Y * -0.4);
 const LAMP_RADIUS: f64 = 5.0;
 const GLOW_RADIUS: f64 = 40.0;
 
+mod debug;
 mod motion;
 pub use crate::shutter::ShutterWindow;
 pub use motion::PeakMovement;
@@ -696,6 +697,11 @@ impl DebugRefresh {
     }
 }
 
+struct SliderDrag {
+    parameter: visualizer::Parameter,
+    track: Rect,
+}
+
 pub struct Meter {
     gauge_style: GaugeStyle,
     presentation: Presentation,
@@ -709,6 +715,10 @@ pub struct Meter {
     debug: bool,
     debug_refresh: DebugRefresh,
     debug_snapshot: Option<visualizer::DebugSnapshot>,
+    debug_selection: Option<visualizer::DebugSelection>,
+    tree_target: Option<visualizer::TreeTarget>,
+    debug_pointer: Option<Point>,
+    slider_drag: Option<SliderDrag>,
     debug_clock: f32,
     debug_analysis_revision: u64,
     text_scale: VisualizerTextScale,
@@ -863,6 +873,10 @@ impl Meter {
             debug: false,
             debug_refresh: DebugRefresh::default(),
             debug_snapshot: None,
+            debug_selection: None,
+            tree_target: None,
+            debug_pointer: None,
+            slider_drag: None,
             debug_clock: 0.0,
             debug_analysis_revision: 0,
             text_scale,
@@ -973,8 +987,163 @@ impl Meter {
         let label = self.debug_label();
         self.debug_value = Readout::value(&mut self.fonts, &label);
         self.debug_snapshot = None;
+        self.debug_selection = None;
+        self.tree_target = None;
+        self.slider_drag = None;
         self.debug_clock = 0.0;
         self.face_settings = None;
+    }
+
+    /// Hover state for the analysis panel. The meter owns the layout, so the
+    /// host only forwards the physical pointer position.
+    pub fn set_pointer(&mut self, pointer: Option<Point>) {
+        if self.debug_pointer == pointer {
+            return;
+        }
+        self.debug_pointer = pointer;
+        self.update_sliders(pointer);
+        if self.debug && self.presentation == Presentation::Visualizer {
+            self.face_settings = None;
+        }
+    }
+
+    /// Selects or clears an analysis item under the pointer. Returns true when
+    /// the panel consumed the click so the host can skip its drag gesture.
+    pub fn click_debug(&mut self, view: &View, position: Point) -> bool {
+        if !self.debug
+            || self.presentation != Presentation::Visualizer
+            || self.debug_snapshot.is_none()
+        {
+            return false;
+        }
+        let property = match self.debug_selection {
+            Some(visualizer::DebugSelection::Property(property)) => Some(property),
+            _ => None,
+        };
+        let detector = self.detector_selected();
+        let compact = detector.is_some();
+        let scale = view.ui_scale() * f64::from(self.text_scale.factor());
+        if let Some(property) = property {
+            let tree =
+                debug::tree_layout(view, self.text_scale, property, self.tree_target, compact);
+            if tree.rect.width() >= debug::TREE_MIN_VISIBLE_WIDTH * scale
+                && tree.rect.height() >= 200.0 * scale
+                && tree.rect.contains(position)
+            {
+                if let Some(slider) = tree.slider_at(position) {
+                    self.begin_slider(slider.parameter, slider.track, position);
+                    return true;
+                }
+                if let Some(row) = tree.row_at(position) {
+                    let target = if let Some(detector) = row.node.detector {
+                        Some(visualizer::TreeTarget::Detector(detector))
+                    } else {
+                        row.node.input.map(|input| {
+                            input.detector().map_or(
+                                visualizer::TreeTarget::Component(input),
+                                visualizer::TreeTarget::Detector,
+                            )
+                        })
+                    };
+                    self.tree_target = target;
+                    self.slider_drag = None;
+                    self.face_settings = None;
+                }
+                return true;
+            }
+        }
+        if let Some(detector) = detector {
+            let pane = debug::detector_layout(view, self.text_scale, detector);
+            if pane.pane.contains(position) {
+                if let Some(slider) = pane.slider_at(position) {
+                    self.begin_slider(slider.parameter, slider.track, position);
+                }
+                return true;
+            }
+        }
+        let layout = debug::Layout::new(view, self.text_scale, compact);
+        if !layout.panel.contains(position) {
+            return false;
+        }
+        let selection = match layout.item_at(position) {
+            Some(item) if self.debug_selection == Some(item) => None,
+            Some(item) => Some(item),
+            None => None,
+        };
+        if selection != self.debug_selection {
+            self.tree_target = None;
+            self.slider_drag = None;
+        }
+        self.debug_selection = selection;
+        self.face_settings = None;
+        true
+    }
+
+    fn detector_selected(&self) -> Option<visualizer::Detector> {
+        match (self.debug_selection, self.tree_target) {
+            (
+                Some(visualizer::DebugSelection::Property(_)),
+                Some(visualizer::TreeTarget::Detector(detector)),
+            ) => Some(detector),
+            _ => None,
+        }
+    }
+
+    fn begin_slider(&mut self, parameter: visualizer::Parameter, track: Rect, position: Point) {
+        self.slider_drag = Some(SliderDrag { parameter, track });
+        let value = Self::slider_value(parameter, track, position.x);
+        self.set_parameter(parameter, value);
+    }
+
+    /// Clears the inspector selection without changing the debug panel toggle.
+    pub fn clear_debug_selection(&mut self) {
+        if self.debug_selection.take().is_some() {
+            self.tree_target = None;
+            self.slider_drag = None;
+            self.face_settings = None;
+        }
+    }
+
+    /// Live thresholds, including slider edits, for config synchronization.
+    pub fn onset_thresholds(&self) -> visualizer::OnsetThresholds {
+        self.onset_thresholds
+    }
+
+    fn set_parameter(&mut self, parameter: visualizer::Parameter, value: f32) {
+        if let visualizer::Parameter::OnsetThreshold(detector) = parameter {
+            let threshold = visualizer::OnsetThreshold::try_from(value)
+                .expect("slider thresholds stay normalized");
+            let mut thresholds = self.onset_thresholds;
+            match detector {
+                visualizer::Detector::Bass => thresholds.bass = threshold,
+                visualizer::Detector::Wide => thresholds.broadband = threshold,
+            }
+            self.set_onset_thresholds(thresholds);
+        } else {
+            self.visualizer.set_parameter(parameter, value);
+        }
+        self.face_settings = None;
+    }
+
+    pub fn end_slider_drag(&mut self) {
+        self.slider_drag = None;
+    }
+
+    fn slider_value(parameter: visualizer::Parameter, track: Rect, x: f64) -> f32 {
+        let fraction = ((x - track.x0) / track.width().max(1.0)).clamp(0.0, 1.0) as f32;
+        parameter.from_fraction(fraction)
+    }
+
+    fn update_sliders(&mut self, pointer: Option<Point>) {
+        let Some(drag) = &self.slider_drag else {
+            return;
+        };
+        let (parameter, track) = (drag.parameter, drag.track);
+        let Some(pointer) = pointer else {
+            return;
+        };
+        let value = Self::slider_value(parameter, track, pointer.x);
+        self.set_parameter(parameter, value);
     }
 
     pub fn cycle_debug_refresh(&mut self) {
@@ -1336,301 +1505,27 @@ impl Meter {
                 );
                 if self.debug {
                     if let Some(snapshot) = self.debug_snapshot {
-                        Self::draw_debug_panel(
+                        let history = self.visualizer.debug_history();
+                        let palette = self.visualizer.palette();
+                        let visualizer = &self.visualizer;
+                        debug::draw(
                             &mut self.fonts,
-                            snapshot,
-                            self.visualizer.palette(),
-                            *colors,
                             scene,
                             view,
+                            &snapshot,
+                            history,
+                            visualizer,
+                            palette,
+                            *colors,
                             self.debug_refresh,
                             self.text_scale,
+                            self.debug_selection,
+                            self.debug_pointer,
+                            self.tree_target,
                         );
                     }
                 }
             }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn debug_text(
-        fonts: &mut Fonts,
-        scene: &mut Scene,
-        text: &str,
-        x: f64,
-        baseline: f64,
-        size: f32,
-        face: UiFace,
-        color: Color,
-    ) {
-        let layout = fonts.layout_ui(text, size, face);
-        layout.draw_left(scene, Affine::translate((x, baseline)), color);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn draw_debug_panel(
-        fonts: &mut Fonts,
-        snapshot: visualizer::DebugSnapshot,
-        palette: visualizer::Palette,
-        colors: MeterColors,
-        scene: &mut Scene,
-        view: &View,
-        refresh: DebugRefresh,
-        text_scale: VisualizerTextScale,
-    ) {
-        // Debug chrome follows DPI and the user text scale, not window size.
-        let scale = view.ui_scale() * f64::from(text_scale.factor());
-        let margin = 20.0 * scale;
-        let panel_width = (400.0 * scale).min(view.viewport.width * 0.9);
-        let row_height = 13.0 * scale;
-        let font = (10.0 * scale) as f32;
-        let header_height = 22.0 * scale;
-        let summary_lines = 10.0;
-        let panel_height = (header_height
-            + visualizer::BAND_COUNT as f64 * row_height
-            + 8.0 * scale
-            + summary_lines * 11.5 * scale
-            + 10.0 * scale)
-            .min(view.viewport.height - margin * 2.0);
-        let x0 = view.viewport.width - margin - panel_width;
-        let y0 = margin;
-        let panel =
-            Rect::from_origin_size(Point::new(x0, y0), Size::new(panel_width, panel_height));
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            colors.background.with_alpha(0.9),
-            None,
-            &panel,
-        );
-        scene.stroke(
-            &Stroke::new(1.0),
-            Affine::IDENTITY,
-            palette.neutral[2].with_alpha(0.55),
-            None,
-            &panel,
-        );
-        scene.fill(
-            Fill::NonZero,
-            Affine::IDENTITY,
-            palette.vivid(9).with_alpha(0.55),
-            None,
-            &Rect::from_origin_size(Point::new(x0, y0), Size::new(2.0 * scale, panel_height)),
-        );
-        let header = format!("ANALYZER 16 BANDS / FFT4096 HOP512 / {}", refresh.name());
-        Self::debug_text(
-            fonts,
-            scene,
-            &header,
-            x0 + 10.0 * scale,
-            y0 + 14.0 * scale,
-            font * 1.1,
-            UiFace::SemiBold,
-            palette.vivid(9),
-        );
-        let mut baseline = y0 + header_height + f64::from(font);
-        let bar_x = x0 + panel_width - 86.0 * scale;
-        let bar_width = 64.0 * scale;
-        let bar_height = 4.0 * scale;
-        for (index, band) in snapshot.bands.iter().enumerate() {
-            if baseline > y0 + panel_height - 6.0 * scale {
-                break;
-            }
-            let accent = palette.vivid(index);
-            let label = format!(
-                "{:02} {:>5.0}Hz {:<6} {:.2}/{:.2}",
-                index,
-                (band.low_hz + band.high_hz) * 0.5,
-                band.role.name(),
-                band.value,
-                band.raw
-            );
-            Self::debug_text(
-                fonts,
-                scene,
-                &label,
-                x0 + 10.0 * scale,
-                baseline,
-                font,
-                UiFace::Light,
-                accent,
-            );
-            let bar_top = baseline - bar_height - 1.0 * scale;
-            scene.fill(
-                Fill::NonZero,
-                Affine::IDENTITY,
-                palette.neutral[0].with_alpha(0.18),
-                None,
-                &Rect::from_origin_size(
-                    Point::new(bar_x, bar_top),
-                    Size::new(bar_width, bar_height),
-                ),
-            );
-            scene.fill(
-                Fill::NonZero,
-                Affine::IDENTITY,
-                palette.vivid(index).with_alpha(0.85),
-                None,
-                &Rect::from_origin_size(
-                    Point::new(bar_x, bar_top),
-                    Size::new(
-                        bar_width * f64::from(band.value.clamp(0.0, 1.0)),
-                        bar_height,
-                    ),
-                ),
-            );
-            scene.stroke(
-                &Stroke::new(1.0),
-                Affine::IDENTITY,
-                palette.neutral[0].with_alpha(0.9),
-                None,
-                &vello::kurbo::Line::new(
-                    Point::new(
-                        bar_x + bar_width * f64::from(band.raw.clamp(0.0, 1.0)),
-                        bar_top - 1.0 * scale,
-                    ),
-                    Point::new(
-                        bar_x + bar_width * f64::from(band.raw.clamp(0.0, 1.0)),
-                        bar_top + bar_height + 1.0 * scale,
-                    ),
-                ),
-            );
-            baseline += row_height;
-        }
-        baseline += 3.0 * scale;
-        scene.stroke(
-            &Stroke::new(1.0),
-            Affine::IDENTITY,
-            palette.neutral[2].with_alpha(0.55),
-            None,
-            &vello::kurbo::Line::new(
-                Point::new(x0 + 8.0 * scale, baseline),
-                Point::new(x0 + panel_width - 8.0 * scale, baseline),
-            ),
-        );
-        baseline += 10.0 * scale;
-        let bass_color = palette.vivid(6);
-        let wide_color = palette.vivid(8);
-        let lines = [
-            (
-                format!(
-                    "PWR  S{:.2} R{:.2}   FLUX {:.2}",
-                    snapshot.power.smooth, snapshot.power.raw, snapshot.flux
-                ),
-                palette.neutral[0],
-            ),
-            (
-                format!(
-                    "BASS S{:.2} R{:.2}   BFLUX {:.2}",
-                    snapshot.bass.smooth, snapshot.bass.raw, snapshot.bass_flux
-                ),
-                palette.neutral[0],
-            ),
-            (
-                format!(
-                    "TREB S{:.2} R{:.2}",
-                    snapshot.treble.smooth, snapshot.treble.raw
-                ),
-                palette.neutral[0],
-            ),
-            (
-                format!(
-                    "B-ONSET L{:.2} F{:.2} BASE{:.2} THR{:.2} CD{:.2}/{:.2}",
-                    snapshot.bass_onset.level,
-                    snapshot.bass_onset.flux,
-                    snapshot.bass_onset.baseline,
-                    snapshot.bass_onset.threshold,
-                    snapshot.bass_onset.cooldown,
-                    snapshot.bass_onset.cooldown_time
-                ),
-                bass_color,
-            ),
-            (
-                format!(
-                    "W-ONSET L{:.2} F{:.2} BASE{:.2} THR{:.2} CD{:.2}/{:.2}",
-                    snapshot.broadband_onset.level,
-                    snapshot.broadband_onset.flux,
-                    snapshot.broadband_onset.baseline,
-                    snapshot.broadband_onset.threshold,
-                    snapshot.broadband_onset.cooldown,
-                    snapshot.broadband_onset.cooldown_time
-                ),
-                wide_color,
-            ),
-            (
-                format!(
-                    "KICK {:.2} COOL {:.2} HITS {:>3} TOT {:>6}:{:>6} FL {:.2}/{:.2}",
-                    snapshot.kick,
-                    snapshot.transition_cooldown,
-                    snapshot.hits_last_frame,
-                    snapshot.bass_hits,
-                    snapshot.broadband_hits,
-                    snapshot.bass_onset.flash,
-                    snapshot.broadband_onset.flash
-                ),
-                palette.neutral[0],
-            ),
-            (
-                match snapshot.last_hit {
-                    Some(hit) => format!(
-                        "HIT {:<4} {:.2}  SCENE {}",
-                        hit.kind, hit.strength, snapshot.scene
-                    ),
-                    None => format!("HIT {:<4} 0.00  SCENE {}", "--", snapshot.scene),
-                },
-                palette.neutral[0],
-            ),
-            (
-                match snapshot.outgoing {
-                    Some(outgoing) => format!(
-                        "XFADE {:<11} T{:.2}  PHASE {:.2}",
-                        outgoing, snapshot.transition, snapshot.phase
-                    ),
-                    None => format!(
-                        "XFADE {:<11} PHASE {:.2}  ENT {:.2}",
-                        "--", snapshot.phase, snapshot.entrance
-                    ),
-                },
-                palette.neutral[0],
-            ),
-            (
-                format!(
-                    "AX{:+5.1},{:+5.1},{:+5.1} TW{:+5.1} DF{:>4.1} SH{:+5.1}",
-                    snapshot.style.axis[0],
-                    snapshot.style.axis[1],
-                    snapshot.style.axis[2],
-                    snapshot.style.twist_sign,
-                    snapshot.style.deform_bias,
-                    snapshot.style.shear_sign
-                ),
-                palette.neutral[0],
-            ),
-            (
-                format!(
-                    "ZM{:>4.1} PR{:>4.1} L{:>4} R{:>5}",
-                    snapshot.style.zoom_bias,
-                    snapshot.style.phase_rate,
-                    snapshot.lines,
-                    snapshot.ribbons
-                ),
-                palette.neutral[0],
-            ),
-        ];
-        for (text, color) in lines {
-            if baseline > y0 + panel_height - 4.0 * scale {
-                break;
-            }
-            Self::debug_text(
-                fonts,
-                scene,
-                &text,
-                x0 + 10.0 * scale,
-                baseline,
-                font * 0.9,
-                UiFace::Light,
-                color,
-            );
-            baseline += 11.5 * scale;
         }
     }
 
@@ -1787,9 +1682,11 @@ impl Meter {
                 Point::new(left + 4.0 * scale, anchor.y),
             ),
         );
+        let center = top + height * 0.5;
+        let baseline = center + text.cap_height() * scale * 0.5;
         text.draw_left(
             scene,
-            Affine::translate((left + 6.0 * scale, top + 9.0 * scale)) * Affine::scale(scale),
+            Affine::translate((left + 6.0 * scale, baseline)) * Affine::scale(scale),
             color,
         );
     }
@@ -1804,7 +1701,14 @@ impl Meter {
     ) -> MeterFrame<'_> {
         let dt = frame_time.seconds();
         self.theme.advance(dt);
+        let tree_open = self.presentation == Presentation::Visualizer
+            && self.debug
+            && matches!(
+                self.debug_selection,
+                Some(visualizer::DebugSelection::Property(_))
+            );
         if self.presentation == Presentation::Visualizer {
+            self.visualizer.set_diagnosis_suppressed(tree_open);
             let frame_interval = self.display_interval(frame_time);
             let palette = visualizer::Palette::from_theme(self.theme.selected());
             self.visualizer.update(
@@ -1882,17 +1786,19 @@ impl Meter {
                 }
             }
             Presentation::Visualizer => {
-                if let Some(text) = &self.diagnosis_text {
-                    Self::draw_diagnosis(
-                        scene,
-                        text,
-                        self.diagnosis_anchor,
-                        self.diagnosis_color,
-                        self.theme.colors,
-                        view.ui_scale() * f64::from(self.text_scale.factor()),
-                    );
+                if !tree_open {
+                    if let Some(text) = &self.diagnosis_text {
+                        Self::draw_diagnosis(
+                            scene,
+                            text,
+                            self.diagnosis_anchor,
+                            self.diagnosis_color,
+                            self.theme.colors,
+                            view.ui_scale() * f64::from(self.text_scale.factor()),
+                        );
+                    }
                 }
-                let diagnosis_visible = self.diagnosis_text.is_some();
+                let diagnosis_visible = !tree_open && self.diagnosis_text.is_some();
                 let foreground_changed = diagnosis_visible || self.diagnosis_visible_last_frame;
                 self.diagnosis_visible_last_frame = diagnosis_visible;
                 let background = if rebuild {

@@ -163,6 +163,26 @@ impl Text {
         f64::from(self.layout.width())
     }
 
+    /// Height of capital letters above the baseline. Centering type by its
+    /// typographic ascent leaves uppercase labels visibly high because the
+    /// bundled Iosevka faces report a tall ascender; this metric is the actual
+    /// optical top of a capital.
+    pub fn cap_height(&self) -> f64 {
+        let line = self
+            .layout
+            .lines()
+            .next()
+            .expect("meter labels contain one line");
+        line.items()
+            .find_map(|item| match item {
+                PositionedLayoutItem::GlyphRun(glyph_run) => {
+                    glyph_run.run().metrics().cap_height.map(f64::from)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| 0.72 * f64::from(line.metrics().ascent))
+    }
+
     /// Draws a single-line label with its left edge and baseline at the origin.
     pub fn draw_left(&self, scene: &mut Scene, transform: Affine, color: Color) {
         self.draw(

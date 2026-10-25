@@ -1,12 +1,19 @@
 //! Spectrum-driven pseudo-3D wireframe presentation.
 
+mod computation;
 mod geometry;
 mod renderer;
 mod spectrum;
 
+pub use computation::{
+    BandComponent, BandRouting, ComputeNode, Curve, Detector, EnvelopeTarget, Gain, Gains, Input,
+    InputShape, Parameter, StyleInput, TreeTarget,
+};
+
 use std::{collections::VecDeque, f32::consts::TAU};
 
 use serde::{Deserialize, Serialize};
+use strum::{EnumCount, VariantArray};
 use vello::peniko::Color;
 
 use crate::{
@@ -31,6 +38,9 @@ const MAX_RIBBONS: usize = 8192;
 const MAX_PENDING_HITS: usize = 64;
 const MAX_HISTORY: usize = 17;
 const HISTORY_SECONDS: f64 = 2.0;
+/// Inspector traces are sampled independently of the panel refresh rate.
+const DEBUG_SAMPLE_INTERVAL: f32 = 1.0 / 60.0;
+const DEBUG_HISTORY_SECONDS: f32 = 4.0;
 /// Keep the animation phase bounded without breaking the many non-integer
 /// sine/cosine frequencies derived from it. All current multipliers are
 /// hundredths, so one hundred turns is a whole period for every one of them.
@@ -374,6 +384,292 @@ impl BandRole {
     }
 }
 
+/// One animation value that the analyzer drives. The rendering code keeps no
+/// separate registry: this enum owns the name, the description shown in the
+/// inspector, and the analysis sources that feed its current value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, EnumCount, VariantArray)]
+pub enum Property {
+    Pulse,
+    Spin,
+    Pitch,
+    Roll,
+    Twist,
+    Bulge,
+    Ripple,
+    Shear,
+    Zoom,
+    Accent,
+    Line,
+    Jitter,
+    Phase,
+    Kick,
+    Crossfade,
+    Morph,
+    Entrance,
+}
+
+/// One analysis value that a [`Property`] reads. `BassBands` is the low four
+/// bands that form the bass envelope. `BassOnset` and `WideOnset` mark the
+/// detectors whose baselines and thresholds the inspector overlays on the
+/// corresponding level graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Dependency {
+    Band(BandComponent),
+    BassBands,
+    Power,
+    Bass,
+    Kick,
+    BassOnset,
+    WideOnset,
+}
+
+impl Property {
+    pub fn index(self) -> usize {
+        Self::VARIANTS
+            .iter()
+            .position(|property| *property == self)
+            .expect("every property variant is listed in VARIANTS")
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pulse => "PULSE",
+            Self::Spin => "SPIN",
+            Self::Pitch => "PITCH",
+            Self::Roll => "ROLL",
+            Self::Twist => "TWIST",
+            Self::Bulge => "BULGE",
+            Self::Ripple => "RIPPLE",
+            Self::Shear => "SHEAR",
+            Self::Zoom => "ZOOM",
+            Self::Accent => "ACCENT",
+            Self::Line => "LINE",
+            Self::Jitter => "JITTER",
+            Self::Phase => "PHASE",
+            Self::Kick => "KICK",
+            Self::Crossfade => "CROSSFADE",
+            Self::Morph => "MORPH",
+            Self::Entrance => "ENTRANCE",
+        }
+    }
+
+    /// One line explaining what the property does to the figure or to the
+    /// animation. The inspector shows this when the property is selected.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Pulse => {
+                "Bass, broadband and kick energy swell the figure and thicken its edges."
+            }
+            Self::Spin => "Band 04 speeds the continuous yaw rotation; the style axis weights it.",
+            Self::Pitch => "Band 05 tilts the camera; the style Y axis scales the tilt.",
+            Self::Roll => "Band 06 rolls the camera; the style Z axis scales the roll.",
+            Self::Twist => {
+                "Band 07 twists vertices around the vertical axis; twist sign reverses it."
+            }
+            Self::Bulge => "Band 08 inflates the figure radially; deform bias scales the bulge.",
+            Self::Ripple => "Band 09 adds a travelling radial wave to every vertex.",
+            Self::Shear => "Band 10 slants X by Y; shear sign reverses the slant.",
+            Self::Zoom => "Band 11 pulls the camera closer and enlarges the projected figure.",
+            Self::Accent => "Band 12 picks the vivid tint of the next spawned figure.",
+            Self::Line => "Band 13 raises edge opacity above the near-opacity floor.",
+            Self::Jitter => "Band 14 adds per-vertex noise; jitter bias scales it.",
+            Self::Phase => {
+                "Band 15 speeds the phase clock behind ripple, jitter and tesseract rotation."
+            }
+            Self::Kick => "The bass onset detector latches a decaying kick that swells the figure.",
+            Self::Crossfade => {
+                "Bass and wide onsets retarget the scene; power and kick set the fade rate."
+            }
+            Self::Morph => {
+                "Power sets how quickly style parameters ease toward a hit's new target."
+            }
+            Self::Entrance => "Power sets how quickly a newly spawned figure fades in.",
+        }
+    }
+
+    /// Fixed plot range for the property history. Values outside the range are
+    /// clamped, which keeps one trace from flattening every other trace.
+    pub fn range(self) -> (f32, f32) {
+        match self {
+            Self::Pulse => (0.3, 1.5),
+            Self::Spin => (0.0, 4.5),
+            Self::Pitch => (-1.2, 0.8),
+            Self::Roll => (-1.2, 1.2),
+            Self::Twist => (-2.5, 2.5),
+            Self::Bulge => (0.0, 0.6),
+            Self::Ripple => (0.0, 1.2),
+            Self::Shear => (-0.8, 0.8),
+            Self::Zoom => (1.0, 1.2),
+            Self::Accent | Self::Line | Self::Crossfade | Self::Entrance => (0.0, 1.0),
+            Self::Jitter => (0.0, 0.08),
+            Self::Phase => (0.0, 6.0),
+            Self::Kick => (0.0, 1.5),
+            Self::Morph => (1.0, 4.2),
+        }
+    }
+
+    /// The analyzer values read while this property is computed.
+    pub fn dependencies(self) -> &'static [Dependency] {
+        match self {
+            Self::Pulse => &[
+                Dependency::Power,
+                Dependency::Bass,
+                Dependency::BassBands,
+                Dependency::Kick,
+                Dependency::Band(BandComponent::Zoom),
+            ],
+            Self::Spin => &[Dependency::Band(BandComponent::Spin), Dependency::Power],
+            Self::Pitch => &[Dependency::Band(BandComponent::Pitch), Dependency::Power],
+            Self::Roll => &[Dependency::Band(BandComponent::Roll), Dependency::Power],
+            Self::Twist => &[Dependency::Band(BandComponent::Twist)],
+            Self::Bulge => &[Dependency::Band(BandComponent::Bulge)],
+            Self::Ripple => &[Dependency::Band(BandComponent::Ripple)],
+            Self::Shear => &[Dependency::Band(BandComponent::Shear)],
+            Self::Zoom => &[Dependency::Band(BandComponent::Zoom)],
+            Self::Accent => &[Dependency::Band(BandComponent::Accent)],
+            Self::Line => &[Dependency::Band(BandComponent::Line)],
+            Self::Jitter => &[Dependency::Band(BandComponent::Jitter)],
+            Self::Phase => &[Dependency::Band(BandComponent::Phase), Dependency::Power],
+            Self::Kick => &[Dependency::BassBands, Dependency::BassOnset],
+            Self::Crossfade => &[
+                Dependency::Power,
+                Dependency::BassOnset,
+                Dependency::WideOnset,
+                Dependency::Kick,
+            ],
+            Self::Morph => &[Dependency::Power],
+            Self::Entrance => &[Dependency::Power],
+        }
+    }
+
+    /// True when the band's smoothed value reaches this property directly or
+    /// through the bass envelope.
+    pub fn depends_on_band_value(self, band: usize, routing: &BandRouting) -> bool {
+        self.dependencies()
+            .iter()
+            .any(|dependency| match dependency {
+                Dependency::Band(component) => routing[*component] == band,
+                Dependency::BassBands => band < 4,
+                _ => false,
+            })
+    }
+
+    pub fn depends_on_bass_onset(self, band: usize) -> bool {
+        band < 4 && self.dependencies().contains(&Dependency::BassOnset)
+    }
+
+    pub fn depends_on_wide_onset(self) -> bool {
+        self.dependencies().contains(&Dependency::WideOnset)
+    }
+
+    pub fn depends_on_band(self, band: usize, routing: &BandRouting) -> bool {
+        self.depends_on_band_value(band, routing)
+            || self.depends_on_bass_onset(band)
+            || self.depends_on_wide_onset()
+    }
+
+    /// Multipliers attached to one component in this property's tree.
+    pub fn component_gains(self, input: Input) -> Vec<Gain> {
+        match (self, input) {
+            (Self::Pulse, Input::Power) => vec![Gain::PulsePower],
+            (Self::Pulse, Input::Bass) => vec![Gain::PulseBass],
+            (Self::Pulse, Input::Kick) => vec![Gain::PulseKick],
+            (Self::Pulse, Input::Property(Self::Entrance)) => vec![Gain::PulseEntrance],
+            (Self::Pulse | Self::Zoom, Input::Band(BandComponent::Zoom)) => vec![Gain::ZoomBand],
+            (Self::Spin, Input::Power) => vec![Gain::SpinPower],
+            (Self::Spin, Input::Band(BandComponent::Spin)) => vec![Gain::SpinBand],
+            (Self::Pitch, Input::Band(BandComponent::Pitch) | Input::Style(StyleInput::AxisY)) => {
+                vec![Gain::PitchBand]
+            }
+            (Self::Pitch, Input::Power) => vec![Gain::PitchPowerRate],
+            (Self::Pitch, Input::PhaseClock) => vec![Gain::PitchOscillator],
+            (Self::Roll, Input::Band(BandComponent::Roll) | Input::Style(StyleInput::AxisZ)) => {
+                vec![Gain::RollBand]
+            }
+            (Self::Roll, Input::Power) => vec![Gain::RollPowerRate],
+            (Self::Twist, Input::Band(BandComponent::Twist)) => vec![Gain::TwistBand],
+            (Self::Bulge, Input::Band(BandComponent::Bulge)) => vec![Gain::BulgeBand],
+            (Self::Ripple, Input::Band(BandComponent::Ripple)) => vec![Gain::RippleBand],
+            (Self::Shear, Input::Band(BandComponent::Shear)) => vec![Gain::ShearBand],
+            (Self::Line, Input::Band(BandComponent::Line)) => vec![Gain::LineEnergy],
+            (Self::Jitter, Input::Band(BandComponent::Jitter)) => vec![Gain::JitterBand],
+            (Self::Phase, Input::Power) => vec![Gain::PhasePower],
+            (Self::Phase, Input::Band(BandComponent::Phase)) => vec![Gain::PhaseBand],
+            (Self::Kick, Input::BassFlux) => vec![Gain::KickFlux],
+            (Self::Crossfade, Input::Power) => vec![Gain::XfadePower],
+            (Self::Crossfade, Input::Kick) => vec![Gain::XfadeKick],
+            (Self::Morph, Input::Power) => vec![Gain::MorphPower],
+            (Self::Entrance, Input::Power) => vec![Gain::EntrancePower],
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// A band or a property selected in the analysis panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugSelection {
+    Band(usize),
+    Property(Property),
+}
+
+impl DebugSelection {
+    pub fn color(self, palette: Palette) -> Color {
+        match self {
+            Self::Band(index) => palette.vivid(index),
+            Self::Property(property) => palette.vivid(property.index()),
+        }
+    }
+}
+
+/// One sampled frame of every analysis value shown by the inspector. Samples
+/// are recorded at display rate, independent of the panel's refresh rate.
+#[derive(Clone, Copy, Debug)]
+pub struct DebugSample {
+    /// Display time in seconds.
+    pub at: f32,
+    pub bands: [f32; BAND_COUNT],
+    pub raw_bands: [f32; BAND_COUNT],
+    pub power: f32,
+    pub raw_power: f32,
+    pub bass: f32,
+    pub raw_bass: f32,
+    pub kick: f32,
+    pub bass_onset_baseline: f32,
+    pub bass_onset_threshold: f32,
+    pub wide_onset_baseline: f32,
+    pub wide_onset_threshold: f32,
+    pub properties: [f32; Property::COUNT],
+}
+
+impl DebugSample {
+    pub fn property(self, property: Property) -> f32 {
+        self.properties[property.index()]
+    }
+}
+
+#[derive(Default)]
+pub struct DebugHistory {
+    samples: VecDeque<DebugSample>,
+}
+
+impl DebugHistory {
+    pub fn samples(&self) -> impl DoubleEndedIterator<Item = &DebugSample> + '_ {
+        self.samples.iter()
+    }
+
+    pub fn latest(&self) -> Option<&DebugSample> {
+        self.samples.back()
+    }
+
+    /// Time covered by the newest sample and the oldest sample still retained.
+    pub fn span(&self) -> Option<(f32, f32)> {
+        Some((self.samples.front()?.at, self.samples.back()?.at))
+    }
+
+    fn clear(&mut self) {
+        self.samples.clear();
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct BandDebug {
     pub value: f32,
@@ -395,6 +691,8 @@ pub struct OnsetDebug {
     pub flux: f32,
     pub baseline: f32,
     pub threshold: f32,
+    pub minimum_flux: f32,
+    pub baseline_ratio: f32,
     pub cooldown: f32,
     pub cooldown_time: f32,
     pub flash: f32,
@@ -420,6 +718,7 @@ pub struct HitDebug {
 #[derive(Clone, Copy, Debug)]
 pub struct DebugSnapshot {
     pub bands: [BandDebug; BAND_COUNT],
+    pub properties: [f32; Property::COUNT],
     pub power: EnvelopeDebug,
     pub bass: EnvelopeDebug,
     pub treble: EnvelopeDebug,
@@ -550,6 +849,8 @@ impl DiagnosisMode {
 
 struct Diagnosis {
     active: bool,
+    /// The inspector tree owns the left side while a property is selected.
+    suppressed: bool,
     vertex: usize,
     mode: DiagnosisMode,
     next_in: f32,
@@ -566,6 +867,7 @@ impl Diagnosis {
     fn new() -> Self {
         Self {
             active: false,
+            suppressed: false,
             vertex: 0,
             mode: DiagnosisMode::Position,
             next_in: 2.5,
@@ -607,6 +909,13 @@ pub struct Visualizer {
     scene: Scene,
     frames: ShutterWindow,
     kick: f32,
+    kick_decay: f32,
+    gains: Gains,
+    routing: BandRouting,
+    band_shapes: [InputShape; BAND_COUNT],
+    power_shape: InputShape,
+    bass_shape: InputShape,
+    treble_shape: InputShape,
     time: f32,
     transition_cooldown: f32,
     palette: Palette,
@@ -621,6 +930,7 @@ pub struct Visualizer {
     bass_hits: u32,
     broadband_hits: u32,
     diagnosis: Diagnosis,
+    debug_history: DebugHistory,
     lines: Vec<LineInstance>,
     ribbons: Vec<RibbonInstance>,
 }
@@ -636,7 +946,7 @@ impl Visualizer {
             analyzer: SpectrumAnalyzer::new(48_000),
             bands,
             power: Envelope::new(18.0, 4.5),
-            bass: Envelope::new(90.0, 7.0),
+            bass: Envelope::new(20.0, 7.0),
             treble: Envelope::new(16.0, 3.5),
             bass_onset: Onset::bass(thresholds.bass),
             broadband_onset: Onset::broadband(thresholds.broadband),
@@ -645,6 +955,13 @@ impl Visualizer {
             scene,
             frames: ShutterWindow::default(),
             kick: 0.0,
+            kick_decay: 3.2,
+            gains: Gains::default(),
+            routing: BandRouting::default(),
+            band_shapes: [InputShape::default(); BAND_COUNT],
+            power_shape: InputShape::default(),
+            bass_shape: InputShape::default(),
+            treble_shape: InputShape::default(),
             time: 0.0,
             transition_cooldown: 0.0,
             palette: Palette::from_theme(ThemeId::default()),
@@ -659,6 +976,7 @@ impl Visualizer {
             bass_hits: 0,
             broadband_hits: 0,
             diagnosis: Diagnosis::new(),
+            debug_history: DebugHistory::default(),
             lines: Vec::with_capacity(MAX_LINES),
             ribbons: Vec::with_capacity(MAX_RIBBONS),
         }
@@ -687,6 +1005,7 @@ impl Visualizer {
         self.bass_hits = 0;
         self.broadband_hits = 0;
         self.diagnosis.reset();
+        self.debug_history.clear();
     }
 
     fn reset_analysis(&mut self) {
@@ -716,18 +1035,22 @@ impl Visualizer {
         self.last_spectrum = spectrum;
         self.bass_hit_flash *= (-hop * 7.0).exp();
         self.broadband_hit_flash *= (-hop * 7.0).exp();
-        for (band, target) in self.bands.iter_mut().zip(spectrum.bands) {
-            band.advance(target, hop);
+        let band_shapes = self.band_shapes;
+        for (index, (band, target)) in self.bands.iter_mut().zip(spectrum.bands).enumerate() {
+            band.advance(band_shapes[index].apply(target), hop);
         }
-        self.power.advance(spectrum.power, hop);
-        self.bass.advance(spectrum.bass, hop);
-        self.treble.advance(spectrum.treble, hop);
+        self.power
+            .advance(self.power_shape.apply(spectrum.power), hop);
+        self.bass.advance(self.bass_shape.apply(spectrum.bass), hop);
+        self.treble
+            .advance(self.treble_shape.apply(spectrum.treble), hop);
+        let flux_gain = self.gains[Gain::KickFlux];
         let bass_hit = self
             .bass_onset
-            .observe(spectrum.bass, spectrum.bass_flux, hop);
-        let broadband_hit = self
-            .broadband_onset
-            .observe(spectrum.power, spectrum.flux, hop);
+            .observe(spectrum.bass, spectrum.bass_flux, hop, flux_gain);
+        let broadband_hit =
+            self.broadband_onset
+                .observe(spectrum.power, spectrum.flux, hop, flux_gain);
         if let Some(strength) = bass_hit {
             self.bass_hits = self.bass_hits.saturating_add(1);
             self.bass_hit_flash = 1.0;
@@ -785,6 +1108,125 @@ impl Visualizer {
         self.broadband_onset.threshold = thresholds.broadband.value();
     }
 
+    pub fn routing(&self) -> &BandRouting {
+        &self.routing
+    }
+
+    pub fn band_for(&self, component: BandComponent) -> usize {
+        self.routing[component]
+    }
+
+    /// Current value of one adjustable computation parameter.
+    pub fn parameter_value(&self, parameter: Parameter) -> f32 {
+        match parameter {
+            Parameter::OnsetThreshold(detector) => self.onset(detector).threshold,
+            Parameter::OnsetMinFlux(detector) => self.onset(detector).min_flux,
+            Parameter::OnsetBaselineRatio(detector) => self.onset(detector).baseline_ratio,
+            Parameter::OnsetCooldown(detector) => self.onset(detector).cooldown_time,
+            Parameter::Attack(target) => self.envelope(target).attack,
+            Parameter::Release(target) => self.envelope(target).release,
+            Parameter::KickDecay => self.kick_decay,
+            Parameter::Style(style) => style_value(&self.scene.current.style, style),
+            Parameter::Gain(gain) => self.gains[gain],
+            Parameter::BandSource(component) => self.routing[component] as f32,
+            Parameter::InputLow(target) => self.shape(target).low,
+            Parameter::InputHigh(target) => self.shape(target).high,
+            Parameter::InputCurve(target) => self.shape(target).curve.index() as f32,
+            Parameter::InputAmount(target) => self.shape(target).amount,
+        }
+    }
+
+    /// Applies one slider value, clamped to the parameter's declared range.
+    pub fn set_parameter(&mut self, parameter: Parameter, value: f32) {
+        let (minimum, maximum) = parameter.range();
+        let value = value.clamp(minimum, maximum);
+        match parameter {
+            Parameter::OnsetThreshold(detector) => self.onset_mut(detector).threshold = value,
+            Parameter::OnsetMinFlux(detector) => self.onset_mut(detector).min_flux = value,
+            Parameter::OnsetBaselineRatio(detector) => {
+                self.onset_mut(detector).baseline_ratio = value;
+            }
+            Parameter::OnsetCooldown(detector) => {
+                self.onset_mut(detector).cooldown_time = value;
+            }
+            Parameter::Attack(target) => self.envelope_mut(target).attack = value,
+            Parameter::Release(target) => self.envelope_mut(target).release = value,
+            Parameter::KickDecay => self.kick_decay = value,
+            Parameter::Style(style) => {
+                set_style_value(&mut self.scene.current.style, style, value);
+                set_style_value(&mut self.scene.current.target_style, style, value);
+            }
+            Parameter::Gain(gain) => self.gains[gain] = value,
+            Parameter::BandSource(component) => {
+                self.routing[component] = (value.round() as usize).min(BAND_COUNT - 1)
+            }
+            Parameter::InputLow(target) => {
+                let shape = self.shape_mut(target);
+                shape.low = value.clamp(0.0, shape.high - 0.01);
+            }
+            Parameter::InputHigh(target) => {
+                let shape = self.shape_mut(target);
+                shape.high = value.clamp(shape.low + 0.01, 1.0);
+            }
+            Parameter::InputCurve(target) => {
+                self.shape_mut(target).curve = Curve::from_index(value.round() as usize);
+            }
+            Parameter::InputAmount(target) => {
+                self.shape_mut(target).amount = value;
+            }
+        }
+    }
+
+    fn onset(&self, detector: Detector) -> &Onset {
+        match detector {
+            Detector::Bass => &self.bass_onset,
+            Detector::Wide => &self.broadband_onset,
+        }
+    }
+
+    fn onset_mut(&mut self, detector: Detector) -> &mut Onset {
+        match detector {
+            Detector::Bass => &mut self.bass_onset,
+            Detector::Wide => &mut self.broadband_onset,
+        }
+    }
+
+    fn envelope(&self, target: EnvelopeTarget) -> &Envelope {
+        match target {
+            EnvelopeTarget::Band(component) => &self.bands[self.routing[component]],
+            EnvelopeTarget::Power => &self.power,
+            EnvelopeTarget::Bass => &self.bass,
+            EnvelopeTarget::Treble => &self.treble,
+        }
+    }
+
+    fn envelope_mut(&mut self, target: EnvelopeTarget) -> &mut Envelope {
+        match target {
+            EnvelopeTarget::Band(component) => &mut self.bands[self.routing[component]],
+            EnvelopeTarget::Power => &mut self.power,
+            EnvelopeTarget::Bass => &mut self.bass,
+            EnvelopeTarget::Treble => &mut self.treble,
+        }
+    }
+
+    fn shape(&self, target: EnvelopeTarget) -> &InputShape {
+        match target {
+            EnvelopeTarget::Band(component) => &self.band_shapes[self.routing[component]],
+            EnvelopeTarget::Power => &self.power_shape,
+            EnvelopeTarget::Bass => &self.bass_shape,
+            EnvelopeTarget::Treble => &self.treble_shape,
+        }
+    }
+
+    fn shape_mut(&mut self, target: EnvelopeTarget) -> &mut InputShape {
+        match target {
+            EnvelopeTarget::Band(component) => &mut self.band_shapes[self.routing[component]],
+            EnvelopeTarget::Power => &mut self.power_shape,
+            EnvelopeTarget::Bass => &mut self.bass_shape,
+            EnvelopeTarget::Treble => &mut self.treble_shape,
+        }
+    }
+
     pub fn depth_fade(&self) -> DepthFade {
         self.depth_fade
     }
@@ -802,13 +1244,89 @@ impl Visualizer {
     }
 
     pub fn diagnosis(&self) -> Option<&DiagnosisReadout> {
-        self.diagnosis.readout.as_ref()
+        if self.diagnosis.suppressed {
+            None
+        } else {
+            self.diagnosis.readout.as_ref()
+        }
+    }
+
+    /// Hides the random vertex diagnosis while the computation tree is open.
+    pub fn set_diagnosis_suppressed(&mut self, suppressed: bool) {
+        self.diagnosis.suppressed = suppressed;
     }
 
     pub fn diagnosis_anchor(&self) -> Option<[f32; 2]> {
         self.diagnosis
             .active
             .then_some([self.diagnosis.anchor.x, self.diagnosis.anchor.y])
+    }
+
+    fn property_values(&self) -> [f32; Property::COUNT] {
+        let current = &self.scene.current;
+        std::array::from_fn(|index| match Property::VARIANTS[index] {
+            Property::Pulse => current.pose.scale,
+            Property::Spin => current.spin_speed,
+            Property::Pitch => current.pose.pitch,
+            Property::Roll => current.pose.roll,
+            Property::Twist => current.deformation.twist,
+            Property::Bulge => current.deformation.bulge,
+            Property::Ripple => current.deformation.ripple,
+            Property::Shear => current.deformation.shear,
+            Property::Zoom => current.camera_zoom,
+            Property::Accent => self.bands[self.routing[BandComponent::Accent]].value,
+            Property::Line => self.bands[self.routing[BandComponent::Line]].value,
+            Property::Jitter => current.deformation.jitter,
+            Property::Phase => current.phase_speed,
+            Property::Kick => self.kick,
+            Property::Crossfade => {
+                if self.scene.outgoing.is_some() {
+                    self.scene.transition
+                } else {
+                    1.0
+                }
+            }
+            Property::Morph => current.morph_rate,
+            Property::Entrance => current.entrance,
+        })
+    }
+
+    fn debug_sample(&self, at: f32) -> DebugSample {
+        DebugSample {
+            at,
+            bands: self.bands.map(|band| band.value),
+            raw_bands: self.last_spectrum.bands,
+            power: self.power.value,
+            raw_power: self.last_spectrum.power,
+            bass: self.bass.value,
+            raw_bass: self.last_spectrum.bass,
+            kick: self.kick,
+            bass_onset_baseline: self.bass_onset.baseline,
+            bass_onset_threshold: self.bass_onset.threshold,
+            wide_onset_baseline: self.broadband_onset.baseline,
+            wide_onset_threshold: self.broadband_onset.threshold,
+            properties: self.property_values(),
+        }
+    }
+
+    fn record_debug_sample(&mut self) {
+        if self
+            .debug_history
+            .latest()
+            .is_some_and(|sample| self.time - sample.at < DEBUG_SAMPLE_INTERVAL)
+        {
+            return;
+        }
+        let sample = self.debug_sample(self.time);
+        self.debug_history.samples.push_back(sample);
+        while self
+            .debug_history
+            .samples
+            .front()
+            .is_some_and(|sample| self.time - sample.at > DEBUG_HISTORY_SECONDS)
+        {
+            self.debug_history.samples.pop_front();
+        }
     }
 
     pub fn debug_snapshot(&self) -> DebugSnapshot {
@@ -827,6 +1345,8 @@ impl Visualizer {
             flux: self.last_spectrum.bass_flux,
             baseline: self.bass_onset.baseline,
             threshold: self.bass_onset.threshold,
+            minimum_flux: self.bass_onset.min_flux,
+            baseline_ratio: self.bass_onset.baseline_ratio,
             cooldown: self.bass_onset.cooldown,
             cooldown_time: self.bass_onset.cooldown_time,
             flash: self.bass_hit_flash,
@@ -836,6 +1356,8 @@ impl Visualizer {
             flux: self.last_spectrum.flux,
             baseline: self.broadband_onset.baseline,
             threshold: self.broadband_onset.threshold,
+            minimum_flux: self.broadband_onset.min_flux,
+            baseline_ratio: self.broadband_onset.baseline_ratio,
             cooldown: self.broadband_onset.cooldown,
             cooldown_time: self.broadband_onset.cooldown_time,
             flash: self.broadband_hit_flash,
@@ -843,6 +1365,7 @@ impl Visualizer {
         let style = self.scene.current.style;
         DebugSnapshot {
             bands,
+            properties: self.property_values(),
             power: EnvelopeDebug {
                 smooth: self.power.value,
                 raw: self.last_spectrum.power,
@@ -887,6 +1410,11 @@ impl Visualizer {
         }
     }
 
+    /// Rolling display-rate history feeding the debug inspector graphs.
+    pub fn debug_history(&self) -> &DebugHistory {
+        &self.debug_history
+    }
+
     /// Advance the scene from the latest analysis and rebuild the line overlay.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
@@ -910,11 +1438,11 @@ impl Visualizer {
                 strongest = Some(hit);
             }
         }
-        let accent = self.bands[12].value;
+        let accent = self.bands[self.routing[BandComponent::Accent]].value;
         if let Some(hit) = strongest {
             self.handle_hit(hit, accent);
         }
-        self.kick *= (-dt * 3.2).exp();
+        self.kick *= (-dt * self.kick_decay).exp();
         self.bass_hit_flash *= (-dt * 5.0).exp();
         self.broadband_hit_flash *= (-dt * 5.0).exp();
         let exposure = self.frames.interval(frame, shutter);
@@ -931,6 +1459,8 @@ impl Visualizer {
         self.scene.update(
             dt,
             &music,
+            &self.gains,
+            &self.routing,
             exposure.start(),
             frame.end(),
             camera,
@@ -953,6 +1483,7 @@ impl Visualizer {
         );
         self.lines.truncate(MAX_LINES);
         self.ribbons.truncate(MAX_RIBBONS);
+        self.record_debug_sample();
         let ui_scale = ui_scale.max(0.25);
         self.update_diagnosis(dt, viewport, self.palette, ui_scale);
         self.append_diagnosis(viewport, ui_scale);
@@ -1056,7 +1587,7 @@ impl Visualizer {
     }
 
     fn append_diagnosis(&mut self, viewport: (f32, f32), ui_scale: f32) {
-        if !self.diagnosis.active {
+        if !self.diagnosis.active || self.diagnosis.suppressed {
             return;
         }
         let Some(data) = self.scene.current.vertex_diagnosis(self.diagnosis.vertex) else {
@@ -1222,6 +1753,7 @@ enum Transition {
 }
 
 fn roll_transition(kind: HitKind, rng: &mut Rng) -> Option<Transition> {
+    // The parameter roll is a fresh draw made only after the scene roll fails.
     let (scene_chance, parameter_chance) = match kind {
         HitKind::Bass => (0.55, 0.85),
         HitKind::Broadband => (0.18, 0.45),
@@ -1319,7 +1851,7 @@ impl Onset {
         }
     }
 
-    fn observe(&mut self, value: f32, flux: f32, dt: f32) -> Option<f32> {
+    fn observe(&mut self, value: f32, flux: f32, dt: f32, flux_gain: f32) -> Option<f32> {
         self.cooldown = (self.cooldown - dt).max(0.0);
         let baseline = self.baseline;
         let blend = 1.0 - (-dt / 0.7).exp();
@@ -1331,7 +1863,7 @@ impl Onset {
             && value >= baseline * self.baseline_ratio + 0.015
         {
             self.cooldown = self.cooldown_time;
-            Some((value + flux * 2.0).clamp(0.25, 1.5))
+            Some((value + flux * flux_gain).clamp(0.25, 1.5))
         } else {
             None
         }
@@ -1392,6 +1924,8 @@ impl Scene {
         &mut self,
         dt: f32,
         music: &Music,
+        gains: &Gains,
+        routing: &BandRouting,
         exposure_start: AudioTime,
         frame_end: AudioTime,
         camera: Camera,
@@ -1404,7 +1938,8 @@ impl Scene {
         out_ribbons: &mut Vec<RibbonInstance>,
     ) {
         if self.outgoing.is_some() {
-            let rate = 1.2 + 2.8 * music.power + 1.7 * music.kick;
+            let rate =
+                1.2 + gains[Gain::XfadePower] * music.power + gains[Gain::XfadeKick] * music.kick;
             self.transition = (self.transition + dt * rate).min(1.0);
             let progress = smoothstep(self.transition);
             if let Some(outgoing) = &mut self.outgoing {
@@ -1417,6 +1952,8 @@ impl Scene {
         self.current.update(
             dt,
             music,
+            gains,
+            routing,
             exposure_start,
             frame_end,
             camera,
@@ -1432,6 +1969,8 @@ impl Scene {
             outgoing.update(
                 dt,
                 music,
+                gains,
+                routing,
                 exposure_start,
                 frame_end,
                 camera,
@@ -1460,6 +1999,12 @@ struct FigureRuntime {
     target_style: Style,
     tint: FigureTint,
     phase: f32,
+    /// Latest values written by `update` and read by the debug inspector.
+    deformation: Deformation,
+    spin_speed: f32,
+    phase_speed: f32,
+    camera_zoom: f32,
+    morph_rate: f32,
     entrance: f32,
     opacity: f32,
     history: VecDeque<PoseSnapshot>,
@@ -1506,6 +2051,11 @@ impl FigureRuntime {
             target_style,
             tint,
             phase: 0.0,
+            deformation: Deformation::default(),
+            spin_speed: 0.0,
+            phase_speed: 0.0,
+            camera_zoom: 1.0,
+            morph_rate: 1.1,
             entrance: opacity,
             opacity,
             history: VecDeque::with_capacity(MAX_HISTORY),
@@ -1531,6 +2081,8 @@ impl FigureRuntime {
         &mut self,
         dt: f32,
         music: &Music,
+        gains: &Gains,
+        routing: &BandRouting,
         exposure_start: AudioTime,
         frame_end: AudioTime,
         camera: Camera,
@@ -1542,38 +2094,70 @@ impl FigureRuntime {
         out: &mut Vec<LineInstance>,
         out_ribbons: &mut Vec<RibbonInstance>,
     ) {
-        self.entrance = (self.entrance + dt * (1.4 + 2.5 * music.power)).min(1.0);
-        self.style
-            .approach(self.target_style, dt, 1.1 + 3.0 * music.power);
-        let spin = (0.16 + 1.9 * music.power + 0.7 * music.band(4)) * self.style.phase_rate;
+        self.entrance =
+            (self.entrance + dt * (1.4 + gains[Gain::EntrancePower] * music.power)).min(1.0);
+        self.morph_rate = 1.1 + gains[Gain::MorphPower] * music.power;
+        self.style.approach(self.target_style, dt, self.morph_rate);
+        let spin = (0.16
+            + gains[Gain::SpinPower] * music.power
+            + gains[Gain::SpinBand] * music.band(routing[BandComponent::Spin]))
+            * self.style.phase_rate;
+        self.spin_speed = spin;
         self.pose.yaw =
             (self.pose.yaw + dt * spin * (0.3 + self.style.axis.x.abs())).rem_euclid(TAU);
         let pitch_target = -0.24
-            + music.band(5) * 0.55 * self.style.axis.y
-            + (time * 0.47 + self.phase).sin() * 0.08;
-        self.pose.pitch = self
-            .pitch
-            .approach(pitch_target, dt, 1.6 + 1.8 * music.power);
-        let roll_target = music.band(6) * 0.9 * self.style.axis.z;
-        self.pose.roll = self.roll.approach(roll_target, dt, 1.3 + 1.6 * music.power);
-        self.phase = (self.phase
-            + dt * (0.35 + 2.6 * music.power + 0.7 * music.band(15)) * self.style.phase_rate)
-            .rem_euclid(PHASE_PERIOD);
-        let entrance_scale = 0.62 + 0.38 * smoothstep(self.entrance);
-        let camera_zoom = 1.0 + music.band(11) * 0.18;
+            + music.band(routing[BandComponent::Pitch])
+                * gains[Gain::PitchBand]
+                * self.style.axis.y
+            + (time * 0.47 + self.phase).sin() * gains[Gain::PitchOscillator];
+        self.pose.pitch = self.pitch.approach(
+            pitch_target,
+            dt,
+            1.6 + gains[Gain::PitchPowerRate] * music.power,
+        );
+        let roll_target =
+            music.band(routing[BandComponent::Roll]) * gains[Gain::RollBand] * self.style.axis.z;
+        self.pose.roll = self.roll.approach(
+            roll_target,
+            dt,
+            1.3 + gains[Gain::RollPowerRate] * music.power,
+        );
+        self.phase_speed = (0.35
+            + gains[Gain::PhasePower] * music.power
+            + gains[Gain::PhaseBand] * music.band(routing[BandComponent::Phase]))
+            * self.style.phase_rate;
+        self.phase = (self.phase + dt * self.phase_speed).rem_euclid(PHASE_PERIOD);
+        let entrance_scale = 0.62 + gains[Gain::PulseEntrance] * smoothstep(self.entrance);
+        let camera_zoom = 1.0 + music.band(routing[BandComponent::Zoom]) * gains[Gain::ZoomBand];
+        self.camera_zoom = camera_zoom;
         let scale = entrance_scale
-            * (0.9 + 0.18 * music.power + 0.11 * music.bass + 0.12 * music.kick)
+            * (0.9
+                + gains[Gain::PulsePower] * music.power
+                + gains[Gain::PulseBass] * music.bass
+                + gains[Gain::PulseKick] * music.kick)
             * self.style.zoom_bias
             * camera_zoom;
         self.pose.scale = soft_saturate(scale, 1.45).max(0.35);
         let deformation = Deformation {
-            twist: music.band(7) * 1.7 * self.style.deform_bias * self.style.twist_sign,
-            bulge: music.band(8) * 0.32 * self.style.deform_bias,
-            ripple: music.band(9) * 0.75 * self.style.deform_bias,
-            shear: music.band(10) * 0.55 * self.style.shear_sign,
-            jitter: music.band(14) * 0.055 * self.style.jitter_bias,
+            twist: music.band(routing[BandComponent::Twist])
+                * gains[Gain::TwistBand]
+                * self.style.deform_bias
+                * self.style.twist_sign,
+            bulge: music.band(routing[BandComponent::Bulge])
+                * gains[Gain::BulgeBand]
+                * self.style.deform_bias,
+            ripple: music.band(routing[BandComponent::Ripple])
+                * gains[Gain::RippleBand]
+                * self.style.deform_bias,
+            shear: music.band(routing[BandComponent::Shear])
+                * gains[Gain::ShearBand]
+                * self.style.shear_sign,
+            jitter: music.band(routing[BandComponent::Jitter])
+                * gains[Gain::JitterBand]
+                * self.style.jitter_bias,
             phase: self.phase,
         };
+        self.deformation = deformation;
         self.world_vertices.clear();
         self.vertices.clear();
         for index in 0..self.wireframe.vertex_count() {
@@ -1611,10 +2195,10 @@ impl FigureRuntime {
             self.history.pop_front();
         }
         let exposure = self.exposure_poses(exposure_start, frame_end);
-        let line_energy = music.band(13);
+        let line_energy = music.band(routing[BandComponent::Line]);
         for (index, current) in self.current.iter().enumerate() {
             let rgb = self.tint.edge_rgb(index, palette);
-            let base_opacity = (0.6 + 0.4 * line_energy).max(near_opacity);
+            let base_opacity = (0.6 + gains[Gain::LineEnergy] * line_energy).max(near_opacity);
             let alpha = self.opacity * base_opacity;
             let width = base_width * (1.0 + music.kick * 0.25);
             let alpha = alpha.clamp(0.0, 1.0);
@@ -1944,6 +2528,34 @@ impl Style {
         self.zoom_bias += (target.zoom_bias - self.zoom_bias) * blend;
         self.phase_rate += (target.phase_rate - self.phase_rate) * blend;
         self.jitter_bias += (target.jitter_bias - self.jitter_bias) * blend;
+    }
+}
+
+fn style_value(style: &Style, input: StyleInput) -> f32 {
+    match input {
+        StyleInput::AxisX => style.axis.x,
+        StyleInput::AxisY => style.axis.y,
+        StyleInput::AxisZ => style.axis.z,
+        StyleInput::PhaseRate => style.phase_rate,
+        StyleInput::TwistSign => style.twist_sign,
+        StyleInput::ShearSign => style.shear_sign,
+        StyleInput::DeformBias => style.deform_bias,
+        StyleInput::ZoomBias => style.zoom_bias,
+        StyleInput::JitterBias => style.jitter_bias,
+    }
+}
+
+fn set_style_value(style: &mut Style, input: StyleInput, value: f32) {
+    match input {
+        StyleInput::AxisX => style.axis.x = value,
+        StyleInput::AxisY => style.axis.y = value,
+        StyleInput::AxisZ => style.axis.z = value,
+        StyleInput::PhaseRate => style.phase_rate = value,
+        StyleInput::TwistSign => style.twist_sign = value,
+        StyleInput::ShearSign => style.shear_sign = value,
+        StyleInput::DeformBias => style.deform_bias = value,
+        StyleInput::ZoomBias => style.zoom_bias = value,
+        StyleInput::JitterBias => style.jitter_bias = value,
     }
 }
 
@@ -2636,6 +3248,122 @@ mod tests {
         assert!(!snapshot.scene.is_empty());
         assert!(snapshot.lines + snapshot.ribbons > 0);
         assert!(snapshot.ribbons > 0);
+        assert!(snapshot.properties.iter().all(|value| value.is_finite()));
+        let history = visualizer.debug_history();
+        assert!(history.samples().count() >= 3);
+        let latest = history.latest().expect("the display recorded a sample");
+        assert!(latest.properties.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn adjustable_parameters_round_trip_and_clamp() {
+        let mut visualizer = Visualizer::new();
+        let attack = Parameter::Attack(EnvelopeTarget::Power);
+        let original = visualizer.parameter_value(attack);
+        visualizer.set_parameter(attack, 9.0);
+        assert_eq!(visualizer.parameter_value(attack), 9.0);
+        visualizer.set_parameter(attack, 10_000.0);
+        assert_eq!(visualizer.parameter_value(attack), 50.0);
+        assert_eq!(attack.fraction(0.1), 0.0);
+        assert_eq!(attack.fraction(50.0), 1.0);
+        assert!(attack.from_fraction(0.5) < 3.0);
+
+        let threshold = Parameter::OnsetThreshold(Detector::Wide);
+        visualizer.set_parameter(threshold, 0.73);
+        assert!((visualizer.parameter_value(threshold) - 0.73).abs() < 1e-6);
+        let ratio = Parameter::OnsetBaselineRatio(Detector::Bass);
+        visualizer.set_parameter(ratio, 100.0);
+        assert_eq!(visualizer.parameter_value(ratio), 2.0);
+
+        let style = Parameter::Style(StyleInput::PhaseRate);
+        visualizer.set_parameter(style, 2.25);
+        assert!((visualizer.parameter_value(style) - 2.25).abs() < 1e-6);
+        assert!((visualizer.parameter_value(attack) - original).abs() > 0.0);
+
+        let curve = Parameter::InputCurve(EnvelopeTarget::Power);
+        visualizer.set_parameter(curve, 3.0);
+        assert_eq!(visualizer.parameter_value(curve), 3.0);
+        let low = Parameter::InputLow(EnvelopeTarget::Power);
+        let high = Parameter::InputHigh(EnvelopeTarget::Power);
+        visualizer.set_parameter(low, 0.8);
+        visualizer.set_parameter(high, 0.2);
+        assert!(visualizer.parameter_value(low) < visualizer.parameter_value(high));
+    }
+
+    #[test]
+    fn component_gains_change_the_property_value() {
+        let mut visualizer = Visualizer::new();
+        let palette = Palette::from_theme(crate::theme::ThemeId::default());
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        visualizer.debug_music([0.6; BAND_COUNT], 0.6);
+        visualizer.update(
+            frame,
+            ShutterFrames::try_from(2.0).unwrap(),
+            1.0 / 60.0,
+            &palette,
+            (1280.0, 440.0),
+            1.0,
+            1.0,
+        );
+        let before = visualizer.debug_snapshot().properties[Property::Spin.index()];
+        visualizer.set_parameter(Parameter::Gain(Gain::SpinPower), 0.0);
+        visualizer.set_parameter(Parameter::Gain(Gain::SpinBand), 0.0);
+        frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        visualizer.update(
+            frame,
+            ShutterFrames::try_from(2.0).unwrap(),
+            1.0 / 60.0,
+            &palette,
+            (1280.0, 440.0),
+            1.0,
+            1.0,
+        );
+        let after = visualizer.debug_snapshot().properties[Property::Spin.index()];
+        assert!(after < before);
+        let jitter = Parameter::Gain(Gain::JitterBand);
+        visualizer.set_parameter(jitter, 100.0);
+        assert_eq!(visualizer.parameter_value(jitter), 0.5);
+    }
+
+    #[test]
+    fn band_components_can_be_rerouted() {
+        let mut visualizer = Visualizer::new();
+        assert!(Property::Spin.depends_on_band(4, visualizer.routing()));
+        visualizer.set_parameter(Parameter::BandSource(BandComponent::Spin), 7.0);
+        assert_eq!(visualizer.band_for(BandComponent::Spin), 7);
+        assert!(!Property::Spin.depends_on_band(4, visualizer.routing()));
+        assert!(Property::Spin.depends_on_band(7, visualizer.routing()));
+        assert_eq!(
+            Property::Spin.component_gains(Input::Band(BandComponent::Spin)),
+            vec![Gain::SpinBand]
+        );
+    }
+
+    #[test]
+    fn every_property_has_a_source_a_description_and_a_reachable_band() {
+        for &property in Property::VARIANTS {
+            assert!(!property.dependencies().is_empty(), "{}", property.name());
+            assert!(!property.description().is_empty(), "{}", property.name());
+            let (minimum, maximum) = property.range();
+            assert!(
+                minimum < maximum,
+                "{} has an empty plot range",
+                property.name()
+            );
+        }
+        let routing = BandRouting::default();
+        for band in 0..BAND_COUNT {
+            assert!(
+                Property::VARIANTS
+                    .iter()
+                    .copied()
+                    .any(|property| property.depends_on_band(band, &routing)),
+                "band {band} must reach at least one animation property"
+            );
+        }
+        assert!(Property::Kick.depends_on_bass_onset(0));
+        assert!(!Property::Kick.depends_on_bass_onset(4));
+        assert!(Property::Crossfade.depends_on_wide_onset());
     }
 
     #[test]
