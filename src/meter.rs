@@ -16,7 +16,7 @@ use crate::{
     render::Frame,
     scales::{generate_scale, Mark, Scale, ScaleSetting},
     text::{Fonts, Text, UiFace},
-    theme::{mix, MeterColors, Theme, ThemeId},
+    theme::{MeterColors, Theme, ThemeId},
     visualizer::{self, Presentation, Visualizer},
     AudioEvent,
 };
@@ -651,9 +651,9 @@ pub struct GaugeStyle {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DebugRefresh {
     /// Once per completed FFT hop.
+    #[default]
     PerHop,
     Hz20,
-    #[default]
     Hz10,
     Hz5,
     Hz2,
@@ -1254,7 +1254,7 @@ impl Meter {
                 let palette = self.visualizer.palette();
                 let hud_colors = MeterColors {
                     readout: palette.neutral[0],
-                    hint: mix(palette.neutral[2], palette.neutral[0], 0.55),
+                    hint: palette.neutral[2],
                     ..*colors
                 };
                 self.theme_readout
@@ -1399,7 +1399,7 @@ impl Meter {
         scene.fill(
             Fill::NonZero,
             Affine::IDENTITY,
-            mix(colors.background, palette.neutral[3], 0.18).with_alpha(0.9),
+            colors.background.with_alpha(0.9),
             None,
             &panel,
         );
@@ -1426,7 +1426,7 @@ impl Meter {
             y0 + 14.0 * scale,
             font * 1.1,
             UiFace::SemiBold,
-            mix(palette.neutral[0], palette.vivid(9), 0.5),
+            palette.vivid(9),
         );
         let mut baseline = y0 + header_height + f64::from(font);
         let bar_x = x0 + panel_width - 86.0 * scale;
@@ -1436,7 +1436,7 @@ impl Meter {
             if baseline > y0 + panel_height - 6.0 * scale {
                 break;
             }
-            let accent = mix(palette.neutral[0], palette.vivid(index), 0.25);
+            let accent = palette.vivid(index);
             let label = format!(
                 "{:02} {:>5.0}Hz {:<6} {:.2}/{:.2}",
                 index,
@@ -1509,16 +1509,8 @@ impl Meter {
             ),
         );
         baseline += 10.0 * scale;
-        let bass_color = mix(
-            palette.neutral[0],
-            palette.vivid(6),
-            snapshot.bass_onset.flash,
-        );
-        let wide_color = mix(
-            palette.neutral[0],
-            palette.vivid(8),
-            snapshot.broadband_onset.flash,
-        );
+        let bass_color = palette.vivid(6);
+        let wide_color = palette.vivid(8);
         let lines = [
             (
                 format!(
@@ -1749,7 +1741,6 @@ impl Meter {
         text: &Text,
         anchor: Point,
         color: Color,
-        palette: visualizer::Palette,
         colors: MeterColors,
         ui_scale: f64,
     ) {
@@ -1799,7 +1790,7 @@ impl Meter {
         text.draw_left(
             scene,
             Affine::translate((left + 6.0 * scale, top + 9.0 * scale)) * Affine::scale(scale),
-            mix(color, palette.neutral[0], 0.45),
+            color,
         );
     }
 
@@ -1897,7 +1888,6 @@ impl Meter {
                         text,
                         self.diagnosis_anchor,
                         self.diagnosis_color,
-                        self.visualizer.palette(),
                         self.theme.colors,
                         view.ui_scale() * f64::from(self.text_scale.factor()),
                     );

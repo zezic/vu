@@ -308,17 +308,6 @@ impl Palette {
     pub fn vivid(&self, index: usize) -> Color {
         self.vivid[index % self.vivid.len()]
     }
-
-    /// Continuous sample of the vivid ring, so palette drift never snaps between
-    /// neighbouring hues.
-    pub fn vivid_blend(&self, angle: f32) -> Color {
-        let scaled = ((angle.sin() * 0.5 + 0.5) * Self::VIVID_COUNT as f32)
-            .rem_euclid(Self::VIVID_COUNT as f32);
-        let base = (scaled.floor() as usize).min(Self::VIVID_COUNT - 1);
-        let next = (base + 1) % Self::VIVID_COUNT;
-        let fraction = scaled.fract();
-        mix(self.vivid[base], self.vivid[next], fraction)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1055,9 +1044,7 @@ impl Visualizer {
         if self.diagnosis.refresh_timer >= 0.1 {
             self.diagnosis.refresh_timer = 0.0;
             if let Some(data) = self.scene.current.vertex_diagnosis(self.diagnosis.vertex) {
-                let color = palette.vivid_blend(
-                    self.diagnosis.vertex as f32 * 1.7 + self.diagnosis.mode.index() as f32 * 2.1,
-                );
+                let color = palette.vivid(self.diagnosis.vertex + self.diagnosis.mode.index() * 4);
                 self.diagnosis.revision += 1;
                 self.diagnosis.readout = Some(DiagnosisReadout {
                     revision: self.diagnosis.revision,
@@ -2347,16 +2334,6 @@ mod tests {
         assert!(short_count > 0);
         assert!(long_count > 0);
         assert!(long_spread > short_spread);
-    }
-
-    #[test]
-    fn palette_phase_wraps_continuously() {
-        let palette = Palette::from_theme(crate::theme::ThemeId::default());
-        let before = palette.vivid_blend(TAU - 0.0001);
-        let after = palette.vivid_blend(0.0);
-        for channel in 0..3 {
-            assert!((before.components[channel] - after.components[channel]).abs() < 1e-3);
-        }
     }
 
     #[test]
