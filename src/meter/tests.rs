@@ -906,10 +906,59 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
         meter.tree_target,
         meter.visualizer.mixer(),
     );
-    assert_eq!(tree.sliders.len(), 4);
+    assert_eq!(tree.sliders.len(), 5);
     let before = meter.onset_thresholds().broadband;
     assert!(meter.click_debug(&view, tree.sliders[0].track.center()));
     assert_ne!(meter.onset_thresholds().broadband, before);
+    meter.end_slider_drag();
+    Ok(())
+}
+
+#[test]
+fn tree_base_terms_expose_an_editable_value() -> anyhow::Result<()> {
+    use crate::config::VisualizerTextScale;
+    use crate::visualizer::{
+        Contribution, DebugSelection, MixPoint, Parameter, Presentation, Property, TreeTarget,
+    };
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Visualizer,
+        ..Default::default()
+    })?;
+    meter.set_debug(true);
+    meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
+    let view = View::fit(Size::new(1280.0, 440.0));
+    let text_scale = VisualizerTextScale::default();
+    meter.debug_selection = Some(DebugSelection::Property(Property::Spin));
+
+    let contribution = Contribution::Fixed(MixPoint::SpinSpeed, 2);
+    let target = TreeTarget::Contribution(contribution);
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Spin,
+        None,
+        meter.visualizer.mixer(),
+    );
+    assert!(meter.click_debug(&view, tree.row_center_for(target)));
+    assert_eq!(meter.tree_target, Some(target));
+
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Spin,
+        meter.tree_target,
+        meter.visualizer.mixer(),
+    );
+    let parameter = Parameter::Constant(contribution);
+    let slider = tree
+        .sliders
+        .iter()
+        .find(|slider| slider.parameter == parameter)
+        .expect("the BASE row exposes a value slider");
+    let before = meter.visualizer.parameter_value(parameter);
+    assert!((before - 0.16).abs() < 1e-6);
+    assert!(meter.click_debug(&view, slider.track.center()));
+    assert_ne!(meter.visualizer.parameter_value(parameter), before);
     meter.end_slider_drag();
     Ok(())
 }
@@ -1002,6 +1051,69 @@ fn tree_mix_actions_toggle_mixing_and_add_extra_inputs() -> anyhow::Result<()> {
     assert!(meter.click_debug(&view, remove));
     assert_eq!(meter.visualizer.mixer().extras(point).count(), 0);
     assert_eq!(meter.tree_target, Some(TreeTarget::MixPoint(point)));
+    Ok(())
+}
+
+#[test]
+fn onset_processor_graphs_draw_in_the_inspector() -> anyhow::Result<()> {
+    use crate::visualizer::{DebugSelection, Presentation, Property};
+    let mut clock = TestClock::new();
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Visualizer,
+        ..Default::default()
+    })?;
+    meter.set_debug(true);
+    meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
+    let view = View::fit(Size::new(1280.0, 440.0));
+    let mut scene = Scene::new();
+    for property in [Property::Kick, Property::Crossfade] {
+        meter.debug_selection = Some(DebugSelection::Property(property));
+        scene.reset();
+        meter.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            None,
+            clock.frame(1.0 / 60.0),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn property_rows_expose_mute_and_solo_buttons() -> anyhow::Result<()> {
+    use crate::config::VisualizerTextScale;
+    use crate::visualizer::{DebugSelection, Presentation, Property};
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Visualizer,
+        ..Default::default()
+    })?;
+    meter.set_debug(true);
+    meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
+    let view = View::fit(Size::new(1280.0, 440.0));
+    let layout = super::debug::Layout::new(&view, VisualizerTextScale::default());
+    let property = Property::Spin;
+
+    assert!(meter.click_debug(&view, layout.property_mute_center(property)));
+    assert!(meter.visualizer.property_muted(property));
+    assert_eq!(meter.debug_selection, None);
+
+    assert!(meter.click_debug(&view, layout.property_solo_center(property)));
+    assert!(meter.visualizer.property_soloed(property));
+    assert!(meter.click_debug(&view, layout.property_mute_center(property)));
+    assert!(!meter.visualizer.property_muted(property));
+
+    assert!(meter.click_debug(&view, layout.property_center(property)));
+    assert_eq!(
+        meter.debug_selection,
+        Some(DebugSelection::Property(property))
+    );
+    assert!(meter.click_debug(&view, layout.property_mute_center(property)));
+    assert!(meter.visualizer.property_muted(property));
+    assert_eq!(
+        meter.debug_selection,
+        Some(DebugSelection::Property(property))
+    );
     Ok(())
 }
 

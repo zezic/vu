@@ -1085,6 +1085,15 @@ impl Meter {
         if !layout.panel.contains(position) {
             return false;
         }
+        if let Some((property, button)) = layout.property_button_at(position) {
+            match button {
+                debug::PropertyButton::Mute => self.visualizer.toggle_property_mute(property),
+                debug::PropertyButton::Solo => self.visualizer.toggle_property_solo(property),
+            }
+            self.slider_drag = None;
+            self.face_settings = None;
+            return true;
+        }
         let selection = match layout.item_at(position) {
             Some(item) if self.debug_selection == Some(item) => None,
             Some(item) => Some(item),

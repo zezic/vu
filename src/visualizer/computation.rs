@@ -33,10 +33,11 @@ impl Detector {
         }
     }
 
-    pub fn parameters(self) -> [Parameter; 4] {
+    pub fn parameters(self) -> [Parameter; 5] {
         [
             Parameter::OnsetThreshold(self),
             Parameter::OnsetMinFlux(self),
+            Parameter::OnsetFluxGain(self),
             Parameter::OnsetBaselineRatio(self),
             Parameter::OnsetCooldown(self),
         ]
@@ -287,8 +288,7 @@ impl std::ops::IndexMut<Gain> for Gains {
     }
 }
 
-/// One adjustable scalar in a computation tree.
-/// Cheap pre-envelope response curves.
+/// Pre-envelope response curve applied to a normalized 0..1 input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Curve {
     Linear,
@@ -298,6 +298,10 @@ pub enum Curve {
 }
 
 impl Curve {
+    /// Upper bound of the curve amount. The S-curve applies one smoothstep
+    /// per unit, so the slider range also bounds the iteration count.
+    const MAX_AMOUNT: f32 = 8.0;
+
     pub fn from_index(index: usize) -> Self {
         match index {
             1 => Self::Inflated,
@@ -326,14 +330,34 @@ impl Curve {
     }
 
     fn apply(self, value: f32, amount: f32) -> f32 {
-        let amount = amount.clamp(0.0, 8.0);
-        let shaped = match self {
+        assert!(
+            (0.0..=Self::MAX_AMOUNT).contains(&amount),
+            "curve amount {amount} is outside 0..={}",
+            Self::MAX_AMOUNT
+        );
+        match self {
             Self::Linear => value,
-            Self::Inflated => value.sqrt(),
-            Self::Deflated => value * value,
-            Self::SCurve => value * value * (3.0 - 2.0 * value),
-        };
-        value + (shaped - value) * amount
+            // The exponent keeps the square-root bend at amount 1 and keeps
+            // lifting lower values as the amount grows.
+            Self::Inflated => value.powf(1.0 / (1.0 + amount)),
+            // The exponent keeps the square bend at amount 1 and keeps
+            // pressing lower values down as the amount grows.
+            Self::Deflated => value.powf(1.0 + amount),
+            // Every whole unit applies the smoothstep again; the remainder
+            // blends toward the next pass so the amount stays continuous.
+            Self::SCurve => {
+                let whole = amount.floor();
+                let mut shaped = value;
+                for _ in 0..whole as usize {
+                    shaped = super::smoothstep(shaped);
+                }
+                let fraction = amount - whole;
+                if fraction > 0.0 {
+                    shaped += (super::smoothstep(shaped) - shaped) * fraction;
+                }
+                shaped
+            }
+        }
     }
 }
 
@@ -362,6 +386,8 @@ pub struct InputShape {
     pub low: f32,
     pub high: f32,
     pub curve: Curve,
+    /// How far the curve departs from linear. Zero is linear, one is the
+    /// named bend, and larger values keep bending.
     pub amount: f32,
     /// When adaptive, the low/high references follow the incoming values
     /// instead of staying at the slider positions.
@@ -399,7 +425,7 @@ impl InputShape {
             "input shape reference points must be ordered"
         );
         let normalized = ((value - self.low) / (self.high - self.low)).clamp(0.0, 1.0);
-        self.curve.apply(normalized, self.amount).clamp(0.0, 1.0)
+        self.curve.apply(normalized, self.amount)
     }
 
     /// Advances one raw input sample. An adaptive shape tracks the references
@@ -441,6 +467,7 @@ impl InputShape {
 pub enum Parameter {
     OnsetThreshold(Detector),
     OnsetMinFlux(Detector),
+    OnsetFluxGain(Detector),
     OnsetBaselineRatio(Detector),
     OnsetCooldown(Detector),
     Attack(EnvelopeTarget),
@@ -453,6 +480,8 @@ pub enum Parameter {
     InputHigh(EnvelopeTarget),
     InputCurve(EnvelopeTarget),
     InputAmount(EnvelopeTarget),
+    /// Value of a constant term in a mix point.
+    Constant(Contribution),
     ExtraSource(ExtraRef),
     ExtraGain(ExtraRef),
 }
@@ -462,6 +491,7 @@ impl Parameter {
         match self {
             Self::OnsetThreshold(_) => "THRESHOLD",
             Self::OnsetMinFlux(_) => "MIN FLUX",
+            Self::OnsetFluxGain(_) => "FLUX GAIN",
             Self::OnsetBaselineRatio(_) => "BASELINE x",
             Self::OnsetCooldown(_) => "COOLDOWN s",
             Self::Attack(_) => "ATTACK",
@@ -482,6 +512,7 @@ impl Parameter {
             Self::InputHigh(_) => "HIGH REF",
             Self::InputCurve(_) => "CURVE",
             Self::InputAmount(_) => "CURVE AMT",
+            Self::Constant(_) => "VALUE",
             Self::ExtraSource(_) => "INPUT",
             Self::ExtraGain(_) => "EXTRA GAIN",
         }
@@ -491,6 +522,7 @@ impl Parameter {
         match self {
             Self::OnsetThreshold(_) => (0.0, 1.0),
             Self::OnsetMinFlux(_) => (0.0, 0.2),
+            Self::OnsetFluxGain(_) => (0.0, 5.0),
             Self::OnsetBaselineRatio(_) => (1.0, 2.0),
             Self::OnsetCooldown(_) => (0.0, 1.0),
             Self::Attack(_) => (0.1, 50.0),
@@ -507,7 +539,8 @@ impl Parameter {
             Self::InputLow(_) => (0.0, 0.99),
             Self::InputHigh(_) => (0.01, 1.0),
             Self::InputCurve(_) => (0.0, 3.0),
-            Self::InputAmount(_) => (0.0, 8.0),
+            Self::InputAmount(_) => (0.0, Curve::MAX_AMOUNT),
+            Self::Constant(_) => (-2.0, 2.0),
             Self::ExtraSource(_) => (0.0, (SELECTABLE_INPUTS.len() - 1) as f32),
             Self::ExtraGain(_) => (0.0, 5.0),
         }
@@ -517,12 +550,14 @@ impl Parameter {
         match self {
             Self::OnsetThreshold(_) | Self::OnsetBaselineRatio(_) | Self::OnsetCooldown(_) => 0.01,
             Self::OnsetMinFlux(_) => 0.001,
+            Self::OnsetFluxGain(_) => 0.01,
             Self::Attack(_) | Self::Release(_) => 0.5,
             Self::KickDecay => 0.1,
             Self::Style(_) => 0.01,
             Self::Gain(gain) => gain.step(),
             Self::BandSource(_) | Self::InputCurve(_) | Self::ExtraSource(_) => 1.0,
             Self::InputLow(_) | Self::InputHigh(_) | Self::InputAmount(_) => 0.01,
+            Self::Constant(_) => 0.01,
             Self::ExtraGain(_) => 0.01,
         }
     }
@@ -806,6 +841,14 @@ impl ContributionSpec {
             Source::Constant(_) => None,
         }
     }
+
+    /// The built-in value of a constant term, before any runtime override.
+    pub fn constant(self) -> Option<f32> {
+        match self.source {
+            Source::Constant(value) => Some(value),
+            _ => None,
+        }
+    }
 }
 
 /// A term value before its gain and mix operation are applied.
@@ -847,6 +890,7 @@ const EXTRA_GAIN: f32 = 0.1;
 #[derive(Clone, Debug, Default)]
 pub struct Mixer {
     modes: BTreeMap<(MixPoint, usize), Mix>,
+    constants: BTreeMap<(MixPoint, usize), f32>,
     extras: BTreeMap<MixPoint, Vec<(ExtraRef, Extra)>>,
     serials: BTreeMap<MixPoint, u32>,
 }
@@ -874,6 +918,32 @@ impl Mixer {
             }
             Contribution::Extra(extra) => self.extra_mut(extra).mix = mode,
         }
+    }
+
+    /// Current value of a constant term, including a runtime override. Input,
+    /// oscillator, and extra terms have no adjustable constant value.
+    pub fn constant_value(&self, contribution: Contribution) -> Option<f32> {
+        let Contribution::Fixed(point, index) = contribution else {
+            return None;
+        };
+        let default = point.contributions()[index].constant()?;
+        Some(
+            self.constants
+                .get(&(point, index))
+                .copied()
+                .unwrap_or(default),
+        )
+    }
+
+    pub fn set_constant_value(&mut self, contribution: Contribution, value: f32) {
+        let Contribution::Fixed(point, index) = contribution else {
+            panic!("extra inputs have no constant value");
+        };
+        assert!(
+            point.contributions()[index].constant().is_some(),
+            "only constant terms have an adjustable value"
+        );
+        self.constants.insert((point, index), value);
     }
 
     pub fn toggle_mode(&mut self, contribution: Contribution) -> Mix {
@@ -967,8 +1037,10 @@ impl Mixer {
         let mut product = 1.0;
         let mut multiplied = false;
         for (index, spec) in point.contributions().iter().enumerate() {
-            let value = spec.value(context);
-            match self.mode(Contribution::Fixed(point, index)) {
+            let contribution = Contribution::Fixed(point, index);
+            let constant = self.constants.get(&(point, index)).copied();
+            let value = spec.value(context, constant);
+            match self.mode(contribution) {
                 Mix::Add => {
                     sum += value;
                     summed = true;
@@ -1002,10 +1074,10 @@ impl Mixer {
 }
 
 impl ContributionSpec {
-    fn value(self, context: &MixContext) -> f32 {
+    fn value(self, context: &MixContext, constant_override: Option<f32>) -> f32 {
         let mut value = match self.source {
             Source::Input(input) => context.input(input),
-            Source::Constant(value) => value,
+            Source::Constant(default) => constant_override.unwrap_or(default),
             Source::Smoothstep(input) => super::smoothstep(context.input(input)),
             Source::SinOscillator => (context.time * 0.47 + context.phase).sin(),
         };
@@ -1097,12 +1169,12 @@ const fn input_term(
     term(label, note, Source::Input(input), gain, None, mix)
 }
 
-const fn constant_term(value: f32, label: &'static str, note: &'static str) -> ContributionSpec {
-    term(label, note, Source::Constant(value), None, None, Mix::Add)
+const fn constant_term(value: f32, label: &'static str) -> ContributionSpec {
+    term(label, "", Source::Constant(value), None, None, Mix::Add)
 }
 
 static PULSE_ENTRANCE_TERMS: [ContributionSpec; 2] = [
-    constant_term(0.62, "BASE", "+0.62"),
+    constant_term(0.62, "BASE"),
     term(
         "ENTRANCE",
         "smoothstep ×gain",
@@ -1135,7 +1207,7 @@ static PULSE_ENERGY_TERMS: [ContributionSpec; 4] = [
         Some(Gain::PulseKick),
         Mix::Add,
     ),
-    constant_term(0.9, "BASE", "+0.9"),
+    constant_term(0.9, "BASE"),
 ];
 
 static PULSE_CAMERA_TERMS: [ContributionSpec; 2] = [
@@ -1146,7 +1218,7 @@ static PULSE_CAMERA_TERMS: [ContributionSpec; 2] = [
         Some(Gain::ZoomBand),
         Mix::Add,
     ),
-    constant_term(1.0, "BASE", "+1.0"),
+    constant_term(1.0, "BASE"),
 ];
 
 static SPIN_SPEED_TERMS: [ContributionSpec; 4] = [
@@ -1164,7 +1236,7 @@ static SPIN_SPEED_TERMS: [ContributionSpec; 4] = [
         Some(Gain::SpinBand),
         Mix::Add,
     ),
-    constant_term(0.16, "BASE", "+0.16"),
+    constant_term(0.16, "BASE"),
     input_term(
         Input::Style(StyleInput::PhaseRate),
         "PHASE RATE",
@@ -1183,7 +1255,7 @@ static PITCH_TARGET_TERMS: [ContributionSpec; 3] = [
         Some(StyleInput::AxisY),
         Mix::Add,
     ),
-    constant_term(-0.24, "BASE", "-0.24"),
+    constant_term(-0.24, "BASE"),
     term(
         "OSCILLATOR",
         "sin(time×0.47+phase) ×gain",
@@ -1202,7 +1274,7 @@ static PITCH_RATE_TERMS: [ContributionSpec; 2] = [
         Some(Gain::PitchPowerRate),
         Mix::Add,
     ),
-    constant_term(1.6, "BASE", "+1.6"),
+    constant_term(1.6, "BASE"),
 ];
 
 static ROLL_TARGET_TERMS: [ContributionSpec; 1] = [term(
@@ -1222,7 +1294,7 @@ static ROLL_RATE_TERMS: [ContributionSpec; 2] = [
         Some(Gain::RollPowerRate),
         Mix::Add,
     ),
-    constant_term(1.3, "BASE", "+1.3"),
+    constant_term(1.3, "BASE"),
 ];
 
 static TWIST_TERMS: [ContributionSpec; 3] = [
@@ -1325,7 +1397,7 @@ static ZOOM_TERMS: [ContributionSpec; 2] = [
         Some(Gain::ZoomBand),
         Mix::Add,
     ),
-    constant_term(1.0, "BASE", "+1.0"),
+    constant_term(1.0, "BASE"),
 ];
 
 static ACCENT_TERMS: [ContributionSpec; 1] = [input_term(
@@ -1344,7 +1416,7 @@ static LINE_TERMS: [ContributionSpec; 2] = [
         Some(Gain::LineEnergy),
         Mix::Add,
     ),
-    constant_term(0.6, "BASE", "+0.6"),
+    constant_term(0.6, "BASE"),
 ];
 
 static PHASE_SPEED_TERMS: [ContributionSpec; 4] = [
@@ -1362,7 +1434,7 @@ static PHASE_SPEED_TERMS: [ContributionSpec; 4] = [
         Some(Gain::PhaseBand),
         Mix::Add,
     ),
-    constant_term(0.35, "BASE", "+0.35"),
+    constant_term(0.35, "BASE"),
     input_term(
         Input::Style(StyleInput::PhaseRate),
         "PHASE RATE",
@@ -1398,7 +1470,7 @@ static CROSSFADE_RATE_TERMS: [ContributionSpec; 3] = [
         Some(Gain::XfadeKick),
         Mix::Add,
     ),
-    constant_term(1.2, "BASE", "+1.2"),
+    constant_term(1.2, "BASE"),
 ];
 
 static MORPH_RATE_TERMS: [ContributionSpec; 2] = [
@@ -1409,7 +1481,7 @@ static MORPH_RATE_TERMS: [ContributionSpec; 2] = [
         Some(Gain::MorphPower),
         Mix::Add,
     ),
-    constant_term(1.1, "BASE", "+1.1"),
+    constant_term(1.1, "BASE"),
 ];
 
 static ENTRANCE_RATE_TERMS: [ContributionSpec; 2] = [
@@ -1420,7 +1492,7 @@ static ENTRANCE_RATE_TERMS: [ContributionSpec; 2] = [
         Some(Gain::EntrancePower),
         Mix::Add,
     ),
-    constant_term(1.4, "BASE", "+1.4"),
+    constant_term(1.4, "BASE"),
 ];
 
 impl MixPoint {
@@ -1740,7 +1812,7 @@ static KICK: ComputeNode = branch(
                                 leaf(Input::BassBands, "BANDS 00-03 RAW", "max"),
                             ],
                         ),
-                        leaf(Input::BassFlux, "BASS flux", "≥ min flux"),
+                        leaf(Input::BassFlux, "BASS flux", "× FLUX GAIN; ≥ min flux"),
                         leaf(Input::Constant("== 0"), "ONSET COOLDOWN", "must hold"),
                     ],
                 ),
@@ -1773,7 +1845,7 @@ static CROSSFADE: ComputeNode = branch(
                             "BASS level",
                             "≥ THR; ≥ baseline×ratio+.015",
                         ),
-                        leaf(Input::BassFlux, "BASS flux", "≥ min flux"),
+                        leaf(Input::BassFlux, "BASS flux", "× FLUX GAIN; ≥ min flux"),
                     ],
                 ),
                 detector_branch(
@@ -1787,7 +1859,7 @@ static CROSSFADE: ComputeNode = branch(
                             "PWR level",
                             "≥ THR; ≥ baseline×ratio+.015",
                         ),
-                        leaf(Input::Flux, "FLUX", "≥ min flux"),
+                        leaf(Input::Flux, "FLUX", "× FLUX GAIN; ≥ min flux"),
                     ],
                 ),
                 leaf(
@@ -1857,6 +1929,64 @@ mod tests {
             ..full
         };
         assert!((off.apply(0.5) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn curves_keep_bending_past_the_named_amount() {
+        let probe = 0.25;
+        for curve in [Curve::Inflated, Curve::Deflated, Curve::SCurve] {
+            let mut previous = 0.0;
+            for amount in [1.0, 2.0, 4.0, 8.0] {
+                let shape = InputShape {
+                    curve,
+                    amount,
+                    ..InputShape::default()
+                };
+                assert_eq!(shape.apply(0.0), 0.0, "{} keeps its low end", curve.name());
+                assert_eq!(shape.apply(1.0), 1.0, "{} keeps its high end", curve.name());
+                let departure = (shape.apply(probe) - probe).abs();
+                assert!(
+                    departure > previous,
+                    "{} at amount {amount} must bend further than at the previous amount",
+                    curve.name()
+                );
+                previous = departure;
+            }
+        }
+    }
+
+    #[test]
+    fn curves_stay_ordered_and_use_their_whole_range() {
+        for curve in [
+            Curve::Linear,
+            Curve::Inflated,
+            Curve::Deflated,
+            Curve::SCurve,
+        ] {
+            for amount in [0.0, 0.5, 1.0, 2.0, 4.0, 8.0] {
+                let shape = InputShape {
+                    curve,
+                    amount,
+                    ..InputShape::default()
+                };
+                let mut previous = shape.apply(0.0);
+                for step in 1..=100 {
+                    let shaped = shape.apply(step as f32 / 100.0);
+                    assert!(
+                        shaped >= previous,
+                        "{} at amount {amount} must never fall back",
+                        curve.name()
+                    );
+                    assert!((0.0..=1.0).contains(&shaped));
+                    previous = shaped;
+                }
+                assert!(
+                    shape.apply(0.25) < shape.apply(0.5) && shape.apply(0.5) < shape.apply(0.75),
+                    "{} at amount {amount} must not flatten to its bounds",
+                    curve.name()
+                );
+            }
+        }
     }
 
     #[test]
@@ -2003,6 +2133,22 @@ mod tests {
             + gains[Gain::PulseBass] * context.bass
             + gains[Gain::PulseKick] * context.kick;
         assert!((mixer.value(MixPoint::PulseEnergy, &context) - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn constant_terms_accept_a_runtime_value() {
+        let context = test_context(0.4, 0.3, 0.2);
+        let point = MixPoint::PulseEnergy;
+        let base = Contribution::Fixed(point, 3);
+        assert_eq!(point.contributions()[3].label, "BASE");
+        let mut mixer = Mixer::default();
+        assert!((mixer.constant_value(base).unwrap() - 0.9).abs() < 1e-6);
+        let before = mixer.value(point, &context);
+        mixer.set_constant_value(base, 0.4);
+        let after = mixer.value(point, &context);
+        assert!((before - after - 0.5).abs() < 1e-6);
+        assert_eq!(mixer.constant_value(base), Some(0.4));
+        assert_eq!(mixer.constant_value(Contribution::Fixed(point, 0)), None);
     }
 
     #[test]

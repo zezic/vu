@@ -510,6 +510,15 @@ impl Property {
         }
     }
 
+    /// Value the property contributes while it is muted. Scale, opacity, and
+    /// progress multipliers use one; angles, deformations, and rates use zero.
+    fn neutral(self) -> f32 {
+        match self {
+            Self::Pulse | Self::Zoom | Self::Line | Self::Crossfade | Self::Entrance => 1.0,
+            _ => 0.0,
+        }
+    }
+
     /// The analyzer values read while this property is computed.
     pub fn dependencies(self) -> &'static [Dependency] {
         match self {
@@ -590,6 +599,52 @@ impl Property {
     }
 }
 
+/// Mute and solo state for the properties in the inspector list.
+#[derive(Clone, Copy, Debug, Default)]
+struct PropertyGates {
+    muted: [bool; Property::COUNT],
+    soloed: [bool; Property::COUNT],
+}
+
+impl PropertyGates {
+    fn is_muted(self, property: Property) -> bool {
+        self.muted[property.index()]
+    }
+
+    fn is_soloed(self, property: Property) -> bool {
+        self.soloed[property.index()]
+    }
+
+    fn any_solo(self) -> bool {
+        self.soloed.iter().any(|&solo| solo)
+    }
+
+    /// A property plays unless it is muted, and soloing any property silences
+    /// every property that is not soloed.
+    fn plays(self, property: Property) -> bool {
+        !self.is_muted(property) && (!self.any_solo() || self.is_soloed(property))
+    }
+
+    /// The live value while the property plays, its neutral value otherwise.
+    fn drive(self, property: Property, value: f32) -> f32 {
+        if self.plays(property) {
+            value
+        } else {
+            property.neutral()
+        }
+    }
+
+    fn toggle_mute(&mut self, property: Property) {
+        let muted = &mut self.muted[property.index()];
+        *muted = !*muted;
+    }
+
+    fn toggle_solo(&mut self, property: Property) {
+        let soloed = &mut self.soloed[property.index()];
+        *soloed = !*soloed;
+    }
+}
+
 /// Analysis values that one input reads. Extra mix inputs reuse this mapping so
 /// the band dependency panel and the graph inspector follow them.
 fn input_dependencies(input: Input) -> Vec<Dependency> {
@@ -642,10 +697,8 @@ pub struct DebugSample {
     pub bass: f32,
     pub raw_bass: f32,
     pub kick: f32,
-    pub bass_onset_baseline: f32,
-    pub bass_onset_threshold: f32,
-    pub wide_onset_baseline: f32,
-    pub wide_onset_threshold: f32,
+    pub bass_onset: OnsetDebug,
+    pub wide_onset: OnsetDebug,
     pub properties: [f32; Property::COUNT],
 }
 
@@ -701,10 +754,26 @@ pub struct OnsetDebug {
     pub baseline: f32,
     pub threshold: f32,
     pub minimum_flux: f32,
+    pub flux_gain: f32,
     pub baseline_ratio: f32,
     pub cooldown: f32,
     pub cooldown_time: f32,
     pub flash: f32,
+}
+
+impl OnsetDebug {
+    pub const ZERO: Self = Self {
+        level: 0.0,
+        flux: 0.0,
+        baseline: 0.0,
+        threshold: 0.0,
+        minimum_flux: 0.0,
+        flux_gain: 1.0,
+        baseline_ratio: 0.0,
+        cooldown: 0.0,
+        cooldown_time: 0.0,
+        flash: 0.0,
+    };
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -922,6 +991,7 @@ pub struct Visualizer {
     gains: Gains,
     routing: BandRouting,
     mixer: Mixer,
+    property_gates: PropertyGates,
     band_shapes: [InputShape; BAND_COUNT],
     power_shape: InputShape,
     bass_shape: InputShape,
@@ -969,6 +1039,7 @@ impl Visualizer {
             gains: Gains::default(),
             routing: BandRouting::default(),
             mixer: Mixer::default(),
+            property_gates: PropertyGates::default(),
             band_shapes: [InputShape::default(); BAND_COUNT],
             power_shape: InputShape::default(),
             bass_shape: InputShape::default(),
@@ -1121,6 +1192,15 @@ impl Visualizer {
         )
     }
 
+    fn accent(&self) -> f32 {
+        if self.property_gates.plays(Property::Accent) {
+            self.mixer
+                .value(MixPoint::Accent, &self.current_mix_context())
+        } else {
+            Property::Accent.neutral()
+        }
+    }
+
     fn push_hit(&mut self, kind: HitKind, strength: f32) {
         if self.pending_hits.len() == MAX_PENDING_HITS {
             self.pending_hits.pop_front();
@@ -1165,6 +1245,11 @@ impl Visualizer {
 
     pub fn band_for(&self, component: BandComponent) -> usize {
         self.routing[component]
+    }
+
+    /// Current pre-envelope shaping for one FFT band.
+    pub fn band_shape(&self, index: usize) -> InputShape {
+        self.band_shapes[index]
     }
 
     /// Current pre-envelope shaping for one input component.
@@ -1213,11 +1298,34 @@ impl Visualizer {
         self.shape_mut(target).toggle_adaptive();
     }
 
+    pub fn toggle_property_mute(&mut self, property: Property) {
+        self.property_gates.toggle_mute(property);
+    }
+
+    pub fn toggle_property_solo(&mut self, property: Property) {
+        self.property_gates.toggle_solo(property);
+    }
+
+    pub fn property_muted(&self, property: Property) -> bool {
+        self.property_gates.is_muted(property)
+    }
+
+    pub fn property_soloed(&self, property: Property) -> bool {
+        self.property_gates.is_soloed(property)
+    }
+
+    /// Whether the property currently drives the scene instead of staying at
+    /// its neutral value.
+    pub fn property_active(&self, property: Property) -> bool {
+        self.property_gates.plays(property)
+    }
+
     /// Current value of one adjustable computation parameter.
     pub fn parameter_value(&self, parameter: Parameter) -> f32 {
         match parameter {
             Parameter::OnsetThreshold(detector) => self.onset(detector).threshold,
             Parameter::OnsetMinFlux(detector) => self.onset(detector).min_flux,
+            Parameter::OnsetFluxGain(detector) => self.onset(detector).flux_gain,
             Parameter::OnsetBaselineRatio(detector) => self.onset(detector).baseline_ratio,
             Parameter::OnsetCooldown(detector) => self.onset(detector).cooldown_time,
             Parameter::Attack(target) => self.envelope(target).attack,
@@ -1230,6 +1338,10 @@ impl Visualizer {
             Parameter::InputHigh(target) => self.shape(target).high,
             Parameter::InputCurve(target) => self.shape(target).curve.index() as f32,
             Parameter::InputAmount(target) => self.shape(target).amount,
+            Parameter::Constant(contribution) => self
+                .mixer
+                .constant_value(contribution)
+                .expect("constant parameters only target constant terms"),
             Parameter::ExtraSource(extra) => self
                 .mixer
                 .extra(extra)
@@ -1248,6 +1360,7 @@ impl Visualizer {
         match parameter {
             Parameter::OnsetThreshold(detector) => self.onset_mut(detector).threshold = value,
             Parameter::OnsetMinFlux(detector) => self.onset_mut(detector).min_flux = value,
+            Parameter::OnsetFluxGain(detector) => self.onset_mut(detector).flux_gain = value,
             Parameter::OnsetBaselineRatio(detector) => {
                 self.onset_mut(detector).baseline_ratio = value;
             }
@@ -1278,6 +1391,9 @@ impl Visualizer {
             }
             Parameter::InputAmount(target) => {
                 self.shape_mut(target).amount = value;
+            }
+            Parameter::Constant(contribution) => {
+                self.mixer.set_constant_value(contribution, value);
             }
             Parameter::ExtraSource(extra) => {
                 self.mixer
@@ -1386,9 +1502,7 @@ impl Visualizer {
             Property::Ripple => current.deformation.ripple,
             Property::Shear => current.deformation.shear,
             Property::Zoom => current.camera_zoom,
-            Property::Accent => self
-                .mixer
-                .value(MixPoint::Accent, &self.current_mix_context()),
+            Property::Accent => self.accent(),
             Property::Line => current.line_energy,
             Property::Jitter => current.deformation.jitter,
             Property::Phase => current.phase_speed,
@@ -1405,6 +1519,34 @@ impl Visualizer {
         })
     }
 
+    fn onset_debug(&self, detector: Detector) -> OnsetDebug {
+        let onset = self.onset(detector);
+        let (level, flux, flash) = match detector {
+            Detector::Bass => (
+                self.last_spectrum.bass,
+                self.last_spectrum.bass_flux,
+                self.bass_hit_flash,
+            ),
+            Detector::Wide => (
+                self.last_spectrum.power,
+                self.last_spectrum.flux,
+                self.broadband_hit_flash,
+            ),
+        };
+        OnsetDebug {
+            level,
+            flux,
+            baseline: onset.baseline,
+            threshold: onset.threshold,
+            minimum_flux: onset.min_flux,
+            flux_gain: onset.flux_gain,
+            baseline_ratio: onset.baseline_ratio,
+            cooldown: onset.cooldown,
+            cooldown_time: onset.cooldown_time,
+            flash,
+        }
+    }
+
     fn debug_sample(&self, at: f32) -> DebugSample {
         DebugSample {
             at,
@@ -1415,10 +1557,8 @@ impl Visualizer {
             bass: self.bass.value,
             raw_bass: self.last_spectrum.bass,
             kick: self.kick,
-            bass_onset_baseline: self.bass_onset.baseline,
-            bass_onset_threshold: self.bass_onset.threshold,
-            wide_onset_baseline: self.broadband_onset.baseline,
-            wide_onset_threshold: self.broadband_onset.threshold,
+            bass_onset: self.onset_debug(Detector::Bass),
+            wide_onset: self.onset_debug(Detector::Wide),
             properties: self.property_values(),
         }
     }
@@ -1454,28 +1594,8 @@ impl Visualizer {
                 role: BandRole::for_index(index),
             }
         });
-        let bass_onset = OnsetDebug {
-            level: self.last_spectrum.bass,
-            flux: self.last_spectrum.bass_flux,
-            baseline: self.bass_onset.baseline,
-            threshold: self.bass_onset.threshold,
-            minimum_flux: self.bass_onset.min_flux,
-            baseline_ratio: self.bass_onset.baseline_ratio,
-            cooldown: self.bass_onset.cooldown,
-            cooldown_time: self.bass_onset.cooldown_time,
-            flash: self.bass_hit_flash,
-        };
-        let broadband_onset = OnsetDebug {
-            level: self.last_spectrum.power,
-            flux: self.last_spectrum.flux,
-            baseline: self.broadband_onset.baseline,
-            threshold: self.broadband_onset.threshold,
-            minimum_flux: self.broadband_onset.min_flux,
-            baseline_ratio: self.broadband_onset.baseline_ratio,
-            cooldown: self.broadband_onset.cooldown,
-            cooldown_time: self.broadband_onset.cooldown_time,
-            flash: self.broadband_hit_flash,
-        };
+        let bass_onset = self.onset_debug(Detector::Bass);
+        let broadband_onset = self.onset_debug(Detector::Wide);
         let style = self.scene.current.style;
         DebugSnapshot {
             bands,
@@ -1552,13 +1672,14 @@ impl Visualizer {
                 strongest = Some(hit);
             }
         }
-        let accent = self
-            .mixer
-            .value(MixPoint::Accent, &self.current_mix_context());
+        let accent = self.accent();
         if let Some(hit) = strongest {
             self.handle_hit(hit, accent);
         }
         self.kick *= (-dt * self.kick_decay).exp();
+        if !self.property_gates.plays(Property::Kick) {
+            self.kick = 0.0;
+        }
         self.bass_hit_flash *= (-dt * 5.0).exp();
         self.broadband_hit_flash *= (-dt * 5.0).exp();
         let exposure = self.frames.interval(frame, shutter);
@@ -1589,6 +1710,7 @@ impl Visualizer {
             &self.gains,
             &self.routing,
             &self.mixer,
+            &self.property_gates,
             exposure.start(),
             frame.end(),
             camera,
@@ -1983,6 +2105,7 @@ struct Onset {
     cooldown: f32,
     threshold: f32,
     min_flux: f32,
+    flux_gain: f32,
     baseline_ratio: f32,
     cooldown_time: f32,
 }
@@ -1995,6 +2118,7 @@ impl Onset {
             cooldown: 0.0,
             threshold: threshold.value(),
             min_flux: 0.035,
+            flux_gain: 1.0,
             baseline_ratio: 1.08,
             cooldown_time: 0.11,
         }
@@ -2007,6 +2131,7 @@ impl Onset {
             cooldown: 0.0,
             threshold: threshold.value(),
             min_flux: 0.03,
+            flux_gain: 1.0,
             baseline_ratio: 1.1,
             cooldown_time: 0.15,
         }
@@ -2020,7 +2145,7 @@ impl Onset {
         self.previous = value;
         if self.cooldown == 0.0
             && value >= self.threshold
-            && flux >= self.min_flux
+            && flux * self.flux_gain >= self.min_flux
             && value >= baseline * self.baseline_ratio + 0.015
         {
             self.cooldown = self.cooldown_time;
@@ -2033,7 +2158,7 @@ impl Onset {
     fn ready(&self, value: f32, flux: f32) -> bool {
         self.cooldown == 0.0
             && value >= self.threshold
-            && flux >= self.min_flux
+            && flux * self.flux_gain >= self.min_flux
             && value >= self.baseline * self.baseline_ratio + 0.015
     }
 
@@ -2095,6 +2220,7 @@ impl Scene {
         gains: &Gains,
         routing: &BandRouting,
         mixer: &Mixer,
+        gates: &PropertyGates,
         exposure_start: AudioTime,
         frame_end: AudioTime,
         camera: Camera,
@@ -2106,7 +2232,7 @@ impl Scene {
         out: &mut Vec<LineInstance>,
         out_ribbons: &mut Vec<RibbonInstance>,
     ) {
-        if self.outgoing.is_some() {
+        if self.outgoing.is_some() && gates.plays(Property::Crossfade) {
             let context = music.context(
                 self.current.style,
                 *gains,
@@ -2124,6 +2250,11 @@ impl Scene {
             self.current.opacity = progress;
         } else {
             self.current.opacity = 1.0;
+            if self.outgoing.is_some() {
+                // A muted crossfade swaps scenes without a fade.
+                self.transition = Property::Crossfade.neutral();
+                self.outgoing = None;
+            }
         }
         self.current.update(
             dt,
@@ -2131,6 +2262,7 @@ impl Scene {
             gains,
             routing,
             mixer,
+            gates,
             exposure_start,
             frame_end,
             camera,
@@ -2149,6 +2281,7 @@ impl Scene {
                 gains,
                 routing,
                 mixer,
+                gates,
                 exposure_start,
                 frame_end,
                 camera,
@@ -2264,6 +2397,7 @@ impl FigureRuntime {
         gains: &Gains,
         routing: &BandRouting,
         mixer: &Mixer,
+        gates: &PropertyGates,
         exposure_start: AudioTime,
         frame_end: AudioTime,
         camera: Camera,
@@ -2284,8 +2418,12 @@ impl FigureRuntime {
             time,
         );
         let entrance_rate = mixer.value(MixPoint::EntranceRate, &context);
-        self.entrance = (self.entrance + dt * entrance_rate).min(1.0);
-        self.morph_rate = mixer.value(MixPoint::MorphRate, &context);
+        self.entrance = if gates.plays(Property::Entrance) {
+            (self.entrance + dt * entrance_rate).min(1.0)
+        } else {
+            Property::Entrance.neutral()
+        };
+        self.morph_rate = gates.drive(Property::Morph, mixer.value(MixPoint::MorphRate, &context));
         self.style.approach(self.target_style, dt, self.morph_rate);
         let context = music.context(
             self.style,
@@ -2295,34 +2433,46 @@ impl FigureRuntime {
             self.phase,
             time,
         );
-        let spin = mixer.value(MixPoint::SpinSpeed, &context);
+        let spin = gates.drive(Property::Spin, mixer.value(MixPoint::SpinSpeed, &context));
         self.spin_speed = spin;
         self.pose.yaw =
             (self.pose.yaw + dt * spin * (0.3 + self.style.axis.x.abs())).rem_euclid(TAU);
-        let pitch_target = mixer.value(MixPoint::PitchTarget, &context);
+        let pitch_target = gates.drive(
+            Property::Pitch,
+            mixer.value(MixPoint::PitchTarget, &context),
+        );
         let pitch_rate = mixer.value(MixPoint::PitchRate, &context);
         self.pose.pitch = self.pitch.approach(pitch_target, dt, pitch_rate);
-        let roll_target = mixer.value(MixPoint::RollTarget, &context);
+        let roll_target = gates.drive(Property::Roll, mixer.value(MixPoint::RollTarget, &context));
         let roll_rate = mixer.value(MixPoint::RollRate, &context);
         self.pose.roll = self.roll.approach(roll_target, dt, roll_rate);
-        self.phase_speed = mixer.value(MixPoint::PhaseSpeed, &context);
+        self.phase_speed =
+            gates.drive(Property::Phase, mixer.value(MixPoint::PhaseSpeed, &context));
         self.phase = (self.phase + dt * self.phase_speed).rem_euclid(PHASE_PERIOD);
-        let entrance_scale = mixer.value(MixPoint::PulseEntrance, &context);
-        let camera_zoom = mixer.value(MixPoint::PulseCamera, &context);
+        // The figure scale combines the pulse channel with the separate camera
+        // zoom property, so either can be muted on its own.
+        let entrance_scale = gates.drive(
+            Property::Pulse,
+            mixer.value(MixPoint::PulseEntrance, &context),
+        );
+        let camera_zoom = gates.drive(Property::Zoom, mixer.value(MixPoint::PulseCamera, &context));
         self.camera_zoom = camera_zoom;
-        let energy = mixer.value(MixPoint::PulseEnergy, &context);
+        let energy = gates.drive(
+            Property::Pulse,
+            mixer.value(MixPoint::PulseEnergy, &context),
+        );
         let scale = entrance_scale * energy * self.style.zoom_bias * camera_zoom;
         self.pose.scale = soft_saturate(scale, 1.45).max(0.35);
         let deformation = Deformation {
-            twist: mixer.value(MixPoint::Twist, &context),
-            bulge: mixer.value(MixPoint::Bulge, &context),
-            ripple: mixer.value(MixPoint::Ripple, &context),
-            shear: mixer.value(MixPoint::Shear, &context),
-            jitter: mixer.value(MixPoint::Jitter, &context),
+            twist: gates.drive(Property::Twist, mixer.value(MixPoint::Twist, &context)),
+            bulge: gates.drive(Property::Bulge, mixer.value(MixPoint::Bulge, &context)),
+            ripple: gates.drive(Property::Ripple, mixer.value(MixPoint::Ripple, &context)),
+            shear: gates.drive(Property::Shear, mixer.value(MixPoint::Shear, &context)),
+            jitter: gates.drive(Property::Jitter, mixer.value(MixPoint::Jitter, &context)),
             phase: self.phase,
         };
         self.deformation = deformation;
-        self.line_energy = mixer.value(MixPoint::Line, &context);
+        self.line_energy = gates.drive(Property::Line, mixer.value(MixPoint::Line, &context));
         self.world_vertices.clear();
         self.vertices.clear();
         for index in 0..self.wireframe.vertex_count() {
@@ -2981,6 +3131,25 @@ mod tests {
     }
 
     #[test]
+    fn onset_flux_gain_scales_the_minimum_flux_gate() {
+        let mut onset = Onset::bass(OnsetThresholds::default().bass);
+        let level = 1.0;
+        let flux = 0.01;
+        assert!(!onset.ready(level, flux), "flux is below the default gate");
+        assert!(!onset.observe(level, flux, 1.0 / 94.0));
+
+        onset.flux_gain = 4.0;
+        assert!(onset.ready(level, flux));
+        assert!(onset.observe(level, flux, 1.0 / 94.0));
+        assert!(!onset.ready(level, flux), "the hit starts the cooldown");
+
+        let mut onset = Onset::broadband(OnsetThresholds::default().broadband);
+        assert!(onset.ready(level, 0.04));
+        onset.flux_gain = 0.5;
+        assert!(!onset.ready(level, 0.04));
+    }
+
+    #[test]
     fn a_step_in_spectrum_energy_moves_lines_without_jumping_out_of_view() {
         let mut visualizer = Visualizer::new();
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
@@ -3420,6 +3589,53 @@ mod tests {
     }
 
     #[test]
+    fn property_mute_and_solo_gate_scene_effects() {
+        let mut visualizer = Visualizer::new();
+        let palette = Palette::from_theme(crate::theme::ThemeId::default());
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        let mut step = |visualizer: &mut Visualizer| {
+            visualizer.debug_music([0.6; BAND_COUNT], 0.6);
+            visualizer.update(
+                frame,
+                ShutterFrames::try_from(2.0).unwrap(),
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        };
+        step(&mut visualizer);
+        let live = visualizer.debug_snapshot();
+        assert!(live.properties[Property::Spin.index()] > 0.0);
+        assert!(live.properties[Property::Twist.index()].abs() > 0.0);
+
+        visualizer.toggle_property_mute(Property::Spin);
+        step(&mut visualizer);
+        assert_eq!(
+            visualizer.debug_snapshot().properties[Property::Spin.index()],
+            0.0
+        );
+        visualizer.toggle_property_mute(Property::Spin);
+
+        visualizer.toggle_property_solo(Property::Spin);
+        step(&mut visualizer);
+        let solo = visualizer.debug_snapshot();
+        assert!(solo.properties[Property::Spin.index()] > 0.0);
+        assert_eq!(solo.properties[Property::Twist.index()], 0.0);
+        assert_eq!(solo.properties[Property::Line.index()], 1.0);
+        assert_eq!(solo.properties[Property::Entrance.index()], 1.0);
+        assert_eq!(solo.properties[Property::Morph.index()], 0.0);
+        assert!(visualizer.property_soloed(Property::Spin));
+        assert!(!visualizer.property_active(Property::Twist));
+
+        visualizer.toggle_property_solo(Property::Spin);
+        step(&mut visualizer);
+        assert!(visualizer.debug_snapshot().properties[Property::Twist.index()].abs() > 0.0);
+    }
+
+    #[test]
     fn adjustable_parameters_round_trip_and_clamp() {
         let mut visualizer = Visualizer::new();
         let attack = Parameter::Attack(EnvelopeTarget::Power);
@@ -3438,6 +3654,10 @@ mod tests {
         let ratio = Parameter::OnsetBaselineRatio(Detector::Bass);
         visualizer.set_parameter(ratio, 100.0);
         assert_eq!(visualizer.parameter_value(ratio), 2.0);
+        let flux_gain = Parameter::OnsetFluxGain(Detector::Bass);
+        assert_eq!(visualizer.parameter_value(flux_gain), 1.0);
+        visualizer.set_parameter(flux_gain, 3.5);
+        assert_eq!(visualizer.parameter_value(flux_gain), 3.5);
 
         let style = Parameter::Style(StyleInput::PhaseRate);
         visualizer.set_parameter(style, 2.25);

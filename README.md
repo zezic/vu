@@ -173,6 +173,10 @@ The inspector follows the selection:
   feeds, and every animation property whose state depends on that band
 - selecting a property draws its own history plus a graph for every band and
   envelope that feeds its computation
+- every property row carries small `M` and `S` buttons. `M` mutes that property
+  so it contributes its neutral value, and `S` solos it so every property that
+  is not soloed is muted. Rows that are currently silenced dim, and mute and
+  solo are temporary tuning that resets on restart.
 - every dependency graph carries a short caption naming how its result reaches
   the selected property, for example `×0.18 add to energy`, `rate ×1.8 add`, or
   `switch: level & flux, gates KICK`
@@ -199,7 +203,8 @@ The inspector follows the selection:
   operation keeps its familiar shape: toggling a term in a sum point turns it
   into a factor of the sum, and toggling a term in a product point turns it
   into an additive offset. The tree's value and the live scene respond
-  immediately.
+  immediately. Constant `BASE` rows are selectable as well: their `VALUE`
+  slider replaces the built-in constant for that mix point.
 - selecting a mix point branch instead of a component exposes
   `+ ADD INPUT TO <POINT>`. The new row starts as a `PWR ENVELOPE` term with a
   small gain and additive mixing; selecting it exposes an `INPUT` selector for
@@ -215,29 +220,38 @@ The inspector follows the selection:
   inspector graphs follow the new route. Drag a slider to change the live value.
 - each enveloped component also exposes its pre-envelope input shaping:
   `LOW REF` / `HIGH REF` rescale the raw value into 0..1, `CURVE` selects
-  linear, inflated, deflated, or S-curve response, and `CURVE AMT` blends the
-  selected bend. The curves use cheap arithmetic (`sqrt`, square, and a cubic
-  smoothstep) before envelope smoothing. A small `INPUT SHAPE` plot previews the
-  selected curve across the low/high reference span, with a linear reference
-  diagonal.
+  linear, inflated, deflated, or S-curve response, and `CURVE AMT` sets how far
+  the response departs from linear. Zero is linear, one is the named bend, and
+  higher amounts keep bending: inflated and deflated raise the value to
+  stronger powers, while the S-curve applies the smoothstep again once per
+  unit. A small `INPUT SHAPE` plot previews the selected curve across the
+  low/high reference span, with a linear reference diagonal.
 - `AUTO REFS` turns on adaptive reference tuning for one shaped input. The high
   reference falls slowly toward quiet material and is bumped up quickly by
   peaks; the low reference lifts slowly and is pushed down quickly by low
-  values. Both references stay ordered and inside 0..1, and the `INPUT SHAPE`
-  preview follows them.
+  values. Both references stay ordered and inside 0..1, the `INPUT SHAPE`
+  preview follows them, and their live positions are marked with small
+  triangles on the corresponding inspector graph.
 - attack uses a logarithmic slider over 0.1 to 50.0; release uses 0.1 to 20.0 so the short
   envelope times get most of the slider travel. Slider tracks and line-shaped
   thumbs are tall enough for comfortable dragging.
 - clicking a detector row or its `DETECTOR` leaf shows threshold, minimum flux,
-  baseline ratio, and cooldown in the same bottom parameter section of the tree
-  pane used by ordinary components. No separate pane is created.
+  flux gain, baseline ratio, and cooldown in the same bottom parameter section
+  of the tree pane used by ordinary components. No separate pane is created.
+  The flux gain scales the spectral flux before the minimum-flux gate, so it
+  changes how readily the switch fires without moving the threshold.
 - threshold changes made with sliders update the HUD readouts and persist through
   the same config field as the `G` / `H` and `J` / `K` hotkeys. Envelope rates,
   kick decay, style values, component gains, band routing, input shaping, mix
-  modes, extra inputs, and adaptive reference state are runtime tuning and reset
-  on restart.
+  modes, extra inputs, base values, property mutes, onset flux gain, and adaptive
+  reference state are runtime tuning and reset on restart.
 - onset graphs carry the detector baseline and threshold, and every graph uses
-  the same four-second display-rate history
+  the same four-second display-rate history. A dedicated `BASS ONSET` or
+  `WIDE ONSET` graph plots the three switch gates as ratios against one: the
+  main trace is raw level over threshold, the pale trace is level over the
+  baseline-ratio trigger, and the yellow trace is flux times gain over minimum
+  flux. A red strip along the top marks cooldown, so a blocked switch is visible
+  even when all gates are open.
 
 ![Wireframe visualizer with analysis debug panel](./assets/visualizer-debug.png)
 
