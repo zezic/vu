@@ -87,24 +87,26 @@ middle-to-end span fades `P -> 0`. `P` falls as the frame-one to frame-three
 vertex displacement grows, so a fast edge spreads into a fainter blur while a
 slow edge stays crisp.
 
-When the first and last edge lines intersect at `X`, the sweep becomes four
-filled triangles: `X-A1-AM`, `X-AM-A2`, `X-B1-BM`, and `X-BM-B2`, where `AM` and
-`BM` are the median points of the two vertex trajectories.
+When the first and last edge lines intersect, the crossing is rendered as a
+flat-capped thick body plus four wings. The body spans the median line `AM-BM`
+with normal line thickness (half-thickness `max(0.5 * edge_width, 0.5 px)`). Its
+two long edges have their midpoints at `X1` (top) and `X2` (bottom).
 
-The fan shader uses the barycentric weights around `X` to build the exact edge
-field:
+The wings are:
 
-- `A1-X`, `A2-X`, `B1-X`, and `B2-X` are fully transparent.
-- `AM-X` and `BM-X` ramp from `U` / `V` at the medians to 100% at the `X` limit.
-- `A1-AM-A2` and `B1-BM-B2` fade from 0% at the endpoints through `U` / `V` at
-  the medians.
-- `AM-X` and `BM-X` also carry constant-width gradient strokes that meet at `X`.
-  These strokes provide the minimum intersection thickness; there is no separate
-  square or round marker at the crossing.
+- top-left: `A1 - L_top - X1`
+- top-right: `B2 - R_top - X1`
+- bottom-left: `A2 - L_bottom - X2`
+- bottom-right: `B1 - R_bottom - X2`
 
-`U` falls with the `A1-A2` travel and `V` falls with the `B1-B2` travel.
-Non-convex fallback triangles use per-vertex interpolation.
+The body long edges carry the same `U -> 100 -> V` gradients as the wing bases,
+so the colors match exactly where they meet. The body's flat caps carry `U` at
+`AM` and `V` at `BM`. Both `X1` and `X2` sit on the body edges, never on the
+inner center line, so the crossing keeps the full body thickness.
 
+The outer wing edges `A1-X1`, `B2-X1`, `A2-X2`, and `B1-X2` stay fully
+transparent. The wing shader masks the outer-to-X edge to zero while preserving
+the body-edge `U/V -> 100` ramp on the attached base.
 There is no convexity or small-displacement gate on the two ramps: any edge with
 nonzero screen displacement emits both. An edge with zero screen displacement
 keeps only its central line, because there is no spread to draw.

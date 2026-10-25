@@ -109,6 +109,8 @@ fn segment_distance(point: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
 fn ribbon_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
     if vertex.style.y > 0.5 {
         if vertex.style.z > 0.5 {
+            // Outer A/B -> X edge stays at zero; the base-to-X edge keeps the
+            // body-edge U/V -> 100 ramp.
             let edge_a = vertex.tri_b - vertex.tri_a;
             let edge_b = vertex.tri_c - vertex.tri_a;
             let area = cross2(edge_a, edge_b);
@@ -116,15 +118,15 @@ fn ribbon_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
                 return vec4(0.0);
             }
             let offset = vertex.position.xy - vertex.tri_a;
-            let am_weight = cross2(offset, edge_b) / area;
-            let end_weight = cross2(edge_a, offset) / area;
-            let x_weight = 1.0 - am_weight - end_weight;
-            let peak = x_weight * vertex.start_color.a
-                + am_weight * vertex.end_color.a
-                + end_weight * vertex.third_color.a;
-            let median_weight = am_weight + end_weight;
-            let mask = select(0.0, am_weight / max(median_weight, 1e-6), median_weight > 1e-6);
-            let alpha = peak * mask;
+            let base_weight = cross2(offset, edge_b) / area;
+            let peak_weight = cross2(edge_a, offset) / area;
+            let outer_weight = 1.0 - base_weight - peak_weight;
+            let base_alpha = outer_weight * vertex.start_color.a
+                + base_weight * vertex.end_color.a
+                + peak_weight * vertex.third_color.a;
+            let edge_weight = base_weight + outer_weight;
+            let mask = select(0.0, base_weight / max(edge_weight, 1e-6), edge_weight > 1e-6);
+            let alpha = base_alpha * mask;
             return vec4(vertex.start_color.rgb * alpha, alpha);
         }
         let alpha = vertex.blend_color.a;

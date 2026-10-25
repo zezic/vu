@@ -1,3 +1,5 @@
 /target
 .DS_Store
 assets/visualizer*.png
+assets/blur*.png
+assets/blur*.svg

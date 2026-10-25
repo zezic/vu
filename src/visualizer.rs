@@ -312,9 +312,10 @@ impl RibbonInstance {
         }
     }
 
-    /// A crossing-fan fill triangle. The first vertex is the static X, the
-    /// second is AM/BM, and the third is the transparent endpoint.
-    fn fan_triangle(points: [Vec2; 3], colors: [[f32; 4]; 3], width: f32) -> Self {
+    /// A crossing wing triangle. The first vertex is the outer A/B endpoint,
+    /// the second is the body-edge endpoint, and the third is the dual X point.
+    /// The shader masks the outer-to-X edge to zero.
+    fn wing_triangle(points: [Vec2; 3], colors: [[f32; 4]; 3], width: f32) -> Self {
         let mut ribbon = Self::triangle(points, colors, width);
         ribbon.style[2] = 1.0;
         ribbon
@@ -1487,45 +1488,70 @@ impl FigureRuntime {
             let movement = distance_a.max(distance_b);
             let fade = |distance: f32| alpha * (0.35 + 0.65 * width / (width + distance));
 
-            if let Some(crossing) =
-                segment_intersection(first.start, first.end, last.start, last.end)
-            {
-                let end_color = [rgb[0], rgb[1], rgb[2], 0.0];
-                let x_color = [rgb[0], rgb[1], rgb[2], alpha];
-                let am_color = [rgb[0], rgb[1], rgb[2], fade(distance_a)];
-                let bm_color = [rgb[0], rgb[1], rgb[2], fade(distance_b)];
-                // The fan shader zeros the endpoint-to-X edges. Constant-width
-                // AM-X and BM-X strokes meet at X so the crossing cannot collapse
-                // to zero thickness.
-                out_ribbons.push(RibbonInstance::fan_triangle(
-                    [crossing, middle.start, first.start],
-                    [x_color, am_color, end_color],
+            if segment_intersection(first.start, first.end, last.start, last.end).is_some() {
+                let direction = (middle.end - middle.start).normalized();
+                let normal = if direction.length() > 0.0 {
+                    direction.perpendicular()
+                } else {
+                    Vec2::new(0.0, 1.0)
+                };
+                let body_half = (width * 0.5).max(0.5);
+                let l_top = middle.start + normal * body_half;
+                let l_bottom = middle.start - normal * body_half;
+                let r_top = middle.end + normal * body_half;
+                let r_bottom = middle.end - normal * body_half;
+                let x1 = (l_top + r_top) * 0.5;
+                let x2 = (l_bottom + r_bottom) * 0.5;
+                let clear = [rgb[0], rgb[1], rgb[2], 0.0];
+                let am = [rgb[0], rgb[1], rgb[2], fade(distance_a)];
+                let bm = [rgb[0], rgb[1], rgb[2], fade(distance_b)];
+                let peak = [rgb[0], rgb[1], rgb[2], alpha];
+
+                // Top wings attach to the top long edge and meet at X1. Their
+                // outer-to-X edges are masked to zero by the wing shader.
+                out_ribbons.push(RibbonInstance::wing_triangle(
+                    [first.start, l_top, x1],
+                    [clear, am, peak],
                     width,
                 ));
-                out_ribbons.push(RibbonInstance::fan_triangle(
-                    [crossing, middle.start, last.start],
-                    [x_color, am_color, end_color],
+                out_ribbons.push(RibbonInstance::wing_triangle(
+                    [last.end, r_top, x1],
+                    [clear, bm, peak],
                     width,
                 ));
-                out_ribbons.push(RibbonInstance::fan_triangle(
-                    [crossing, middle.end, first.end],
-                    [x_color, bm_color, end_color],
+                // Bottom wings attach to the bottom long edge and meet at X2.
+                out_ribbons.push(RibbonInstance::wing_triangle(
+                    [last.start, l_bottom, x2],
+                    [clear, am, peak],
                     width,
                 ));
-                out_ribbons.push(RibbonInstance::fan_triangle(
-                    [crossing, middle.end, last.end],
-                    [x_color, bm_color, end_color],
+                out_ribbons.push(RibbonInstance::wing_triangle(
+                    [first.end, r_bottom, x2],
+                    [clear, bm, peak],
                     width,
                 ));
-                push_gradient_stroke(
-                    out_ribbons,
-                    middle.start,
-                    crossing,
-                    am_color,
-                    x_color,
+                // The body is two flat-capped quads; the shared long-edge
+                // gradients are the same U -> X -> V ramps as the wings.
+                out_ribbons.push(RibbonInstance::triangle(
+                    [l_top, l_bottom, x2],
+                    [am, am, peak],
                     width,
-                );
-                push_gradient_stroke(out_ribbons, middle.end, crossing, bm_color, x_color, width);
+                ));
+                out_ribbons.push(RibbonInstance::triangle(
+                    [l_top, x2, x1],
+                    [am, peak, peak],
+                    width,
+                ));
+                out_ribbons.push(RibbonInstance::triangle(
+                    [x1, x2, r_bottom],
+                    [peak, peak, bm],
+                    width,
+                ));
+                out_ribbons.push(RibbonInstance::triangle(
+                    [x1, r_bottom, r_top],
+                    [peak, bm, bm],
+                    width,
+                ));
                 continue;
             }
 
@@ -1701,36 +1727,10 @@ struct ExposurePoses {
     last: Vec<LineGeometry>,
 }
 
-/// A constant-width quad stroke with independent opacity at each end.
-fn push_gradient_stroke(
-    out: &mut Vec<RibbonInstance>,
-    start: Vec2,
-    end: Vec2,
-    start_color: [f32; 4],
-    end_color: [f32; 4],
-    width: f32,
-) {
-    let direction = (end - start).normalized();
-    if direction.length() <= 0.0 {
-        return;
-    }
-    let normal = direction.perpendicular() * (width * 0.5);
-    let a = start + normal;
-    let b = start - normal;
-    let c = end + normal;
-    let d = end - normal;
-    out.push(RibbonInstance::triangle(
-        [a, b, c],
-        [start_color, start_color, end_color],
-        width,
-    ));
-    out.push(RibbonInstance::triangle(
-        [b, d, c],
-        [start_color, end_color, end_color],
-        width,
-    ));
-}
-
+/// A constant-width quad stroke with independent opacity at each end. Used for
+/// the short, faded-in intersection cores rather than the full median edges.
+/// A single beveled V stroke through X. The two arms share one join edge, so the
+/// intersection opacity is composited once instead of twice.
 fn segment_intersection(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> Option<Vec2> {
     let r = a1 - a0;
     let s = b1 - b0;
