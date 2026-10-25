@@ -1116,6 +1116,16 @@ impl Visualizer {
         self.routing[component]
     }
 
+    /// Current pre-envelope shaping for one input component.
+    pub fn input_shape(&self, input: Input) -> Option<InputShape> {
+        match input {
+            Input::Band(component) => Some(self.band_shapes[self.routing[component]]),
+            Input::Power => Some(self.power_shape),
+            Input::Bass => Some(self.bass_shape),
+            _ => None,
+        }
+    }
+
     /// Current value of one adjustable computation parameter.
     pub fn parameter_value(&self, parameter: Parameter) -> f32 {
         match parameter {
@@ -3288,6 +3298,9 @@ mod tests {
         visualizer.set_parameter(low, 0.8);
         visualizer.set_parameter(high, 0.2);
         assert!(visualizer.parameter_value(low) < visualizer.parameter_value(high));
+        let amount = Parameter::InputAmount(EnvelopeTarget::Power);
+        visualizer.set_parameter(amount, 100.0);
+        assert_eq!(visualizer.parameter_value(amount), 8.0);
     }
 
     #[test]
@@ -3322,7 +3335,11 @@ mod tests {
         assert!(after < before);
         let jitter = Parameter::Gain(Gain::JitterBand);
         visualizer.set_parameter(jitter, 100.0);
-        assert_eq!(visualizer.parameter_value(jitter), 0.5);
+        assert_eq!(visualizer.parameter_value(jitter), 10.0);
+        let spin_gain = Parameter::Gain(Gain::SpinBand);
+        assert_eq!(spin_gain.range().1, 10.0);
+        visualizer.set_parameter(spin_gain, 100.0);
+        assert_eq!(visualizer.parameter_value(spin_gain), 10.0);
     }
 
     #[test]
@@ -3336,6 +3353,22 @@ mod tests {
         assert_eq!(
             Property::Spin.component_gains(Input::Band(BandComponent::Spin)),
             vec![Gain::SpinBand]
+        );
+        let shape = visualizer
+            .input_shape(Input::Band(BandComponent::Spin))
+            .expect("band input has a shape");
+        assert_eq!(shape.low, 0.0);
+        assert_eq!(shape.high, 1.0);
+        visualizer.set_parameter(
+            Parameter::InputLow(EnvelopeTarget::Band(BandComponent::Spin)),
+            0.4,
+        );
+        assert_eq!(
+            visualizer
+                .input_shape(Input::Band(BandComponent::Spin))
+                .expect("band input has a shape")
+                .low,
+            0.4
         );
     }
 

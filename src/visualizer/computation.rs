@@ -202,27 +202,46 @@ impl Gain {
             Self::PulseBass => "BASS GAIN",
             Self::PulseKick | Self::XfadeKick => "KICK GAIN",
             Self::PulseEntrance => "ENTRANCE GAIN",
-            Self::ZoomBand => "ZOOM GAIN",
-            Self::SpinBand => "BAND 04 GAIN",
-            Self::PitchBand | Self::RollBand => "BAND/AXIS GAIN",
+            Self::ZoomBand => "ZOOM BAND GAIN",
+            Self::SpinBand => "SPIN BAND GAIN",
+            Self::PitchBand => "PITCH BAND GAIN",
+            Self::RollBand => "ROLL BAND GAIN",
             Self::PitchOscillator => "OSC GAIN",
             Self::PitchPowerRate | Self::RollPowerRate => "PWR RATE GAIN",
-            Self::TwistBand => "BAND 07 GAIN",
-            Self::BulgeBand => "BAND 08 GAIN",
-            Self::RippleBand => "BAND 09 GAIN",
-            Self::ShearBand => "BAND 10 GAIN",
-            Self::LineEnergy => "LINE GAIN",
-            Self::JitterBand => "BAND 14 GAIN",
-            Self::PhaseBand => "BAND 15 GAIN",
+            Self::TwistBand => "TWIST BAND GAIN",
+            Self::BulgeBand => "BULGE BAND GAIN",
+            Self::RippleBand => "RIPPLE BAND GAIN",
+            Self::ShearBand => "SHEAR BAND GAIN",
+            Self::LineEnergy => "LINE BAND GAIN",
+            Self::JitterBand => "JITTER BAND GAIN",
+            Self::PhaseBand => "PHASE BAND GAIN",
             Self::KickFlux => "FLUX GAIN",
             Self::MorphPower | Self::EntrancePower => "PWR GAIN",
         }
     }
 
-    pub fn range(self) -> (f32, f32) {
+    pub fn band_component(self) -> Option<BandComponent> {
         match self {
-            Self::JitterBand => (0.0, 0.5),
-            _ => (0.0, 5.0),
+            Self::ZoomBand => Some(BandComponent::Zoom),
+            Self::SpinBand => Some(BandComponent::Spin),
+            Self::PitchBand => Some(BandComponent::Pitch),
+            Self::RollBand => Some(BandComponent::Roll),
+            Self::TwistBand => Some(BandComponent::Twist),
+            Self::BulgeBand => Some(BandComponent::Bulge),
+            Self::RippleBand => Some(BandComponent::Ripple),
+            Self::ShearBand => Some(BandComponent::Shear),
+            Self::LineEnergy => Some(BandComponent::Line),
+            Self::JitterBand => Some(BandComponent::Jitter),
+            Self::PhaseBand => Some(BandComponent::Phase),
+            _ => None,
+        }
+    }
+
+    pub fn range(self) -> (f32, f32) {
+        if self.band_component().is_some() {
+            (0.0, 10.0)
+        } else {
+            (0.0, 5.0)
         }
     }
 
@@ -305,7 +324,7 @@ impl Curve {
     }
 
     fn apply(self, value: f32, amount: f32) -> f32 {
-        let amount = amount.clamp(0.0, 1.0);
+        let amount = amount.clamp(0.0, 8.0);
         let shaped = match self {
             Self::Linear => value,
             Self::Inflated => value.sqrt(),
@@ -414,7 +433,7 @@ impl Parameter {
             Self::InputLow(_) => (0.0, 0.99),
             Self::InputHigh(_) => (0.01, 1.0),
             Self::InputCurve(_) => (0.0, 3.0),
-            Self::InputAmount(_) => (0.0, 1.0),
+            Self::InputAmount(_) => (0.0, 8.0),
         }
     }
 
@@ -511,24 +530,18 @@ impl Input {
                 Parameter::BandSource(component),
                 Parameter::InputLow(EnvelopeTarget::Band(component)),
                 Parameter::InputHigh(EnvelopeTarget::Band(component)),
-                Parameter::InputCurve(EnvelopeTarget::Band(component)),
-                Parameter::InputAmount(EnvelopeTarget::Band(component)),
                 Parameter::Attack(EnvelopeTarget::Band(component)),
                 Parameter::Release(EnvelopeTarget::Band(component)),
             ],
             Self::Power => vec![
                 Parameter::InputLow(EnvelopeTarget::Power),
                 Parameter::InputHigh(EnvelopeTarget::Power),
-                Parameter::InputCurve(EnvelopeTarget::Power),
-                Parameter::InputAmount(EnvelopeTarget::Power),
                 Parameter::Attack(EnvelopeTarget::Power),
                 Parameter::Release(EnvelopeTarget::Power),
             ],
             Self::Bass => vec![
                 Parameter::InputLow(EnvelopeTarget::Bass),
                 Parameter::InputHigh(EnvelopeTarget::Bass),
-                Parameter::InputCurve(EnvelopeTarget::Bass),
-                Parameter::InputAmount(EnvelopeTarget::Bass),
                 Parameter::Attack(EnvelopeTarget::Bass),
                 Parameter::Release(EnvelopeTarget::Bass),
             ],
@@ -544,6 +557,15 @@ impl Input {
             | Self::Flux
             | Self::Property(_)
             | Self::Constant(_) => Vec::new(),
+        }
+    }
+
+    pub fn shape_target(self) -> Option<EnvelopeTarget> {
+        match self {
+            Self::Band(component) => Some(EnvelopeTarget::Band(component)),
+            Self::Power => Some(EnvelopeTarget::Power),
+            Self::Bass => Some(EnvelopeTarget::Bass),
+            _ => None,
         }
     }
 

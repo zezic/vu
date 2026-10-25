@@ -12,8 +12,8 @@ use crate::{
     theme::MeterColors,
     visualizer::{
         BandComponent, BandRouting, ComputeNode, DebugHistory, DebugSample, DebugSelection,
-        DebugSnapshot, Dependency, Detector, Input, OnsetDebug, Palette, Parameter, Property,
-        StyleInput, TreeTarget, Visualizer, BAND_COUNT,
+        DebugSnapshot, Dependency, Detector, Input, InputShape, OnsetDebug, Palette, Parameter,
+        Property, StyleInput, TreeTarget, Visualizer, BAND_COUNT,
     },
 };
 
@@ -35,8 +35,8 @@ const PROPERTY_ROWS: usize = Property::COUNT.div_ceil(PROPERTY_COLUMNS);
 
 const TREE_INDENT: f64 = 13.0;
 const TREE_PARAM_ROW: f64 = 16.0;
+const CURVE_PREVIEW_HEIGHT: f64 = 116.0;
 const SLIDER_TRACK_HEIGHT: f64 = 7.0;
-const DETECTOR_PANE_HEIGHT: f64 = 96.0;
 /// Keep the bottom-left hotkey cheatsheet visible beside the tree.
 const TREE_LEFT_INSET: f64 = 136.0;
 /// Width the tree keeps before the inspector gives up space.
@@ -53,11 +53,10 @@ pub(super) struct Layout {
     property_cells: [Rect; Property::COUNT],
     footer_top: f64,
     scale: f64,
-    compact: bool,
 }
 
 impl Layout {
-    pub fn new(view: &View, text_scale: VisualizerTextScale, compact: bool) -> Self {
+    pub fn new(view: &View, text_scale: VisualizerTextScale) -> Self {
         let scale = view.ui_scale() * f64::from(text_scale.factor());
         let margin = PANEL_MARGIN * scale;
         let panel_width = (PANEL_WIDTH * scale)
@@ -70,19 +69,12 @@ impl Layout {
         let divider_gap = DIVIDER_GAP * scale;
         let property_row_height = PROPERTY_ROW_HEIGHT * scale;
         let footer_height = FOOTER_HEIGHT * scale;
-        let body_height = if compact {
-            header_height
-                + BAND_COUNT as f64 * band_row_height
-                + divider_gap
-                + PANEL_BOTTOM_PAD * scale
-        } else {
-            header_height
-                + BAND_COUNT as f64 * band_row_height
-                + divider_gap
-                + PROPERTY_ROWS as f64 * property_row_height
-                + PANEL_BOTTOM_PAD * scale
-                + footer_height
-        };
+        let body_height = header_height
+            + BAND_COUNT as f64 * band_row_height
+            + divider_gap
+            + PROPERTY_ROWS as f64 * property_row_height
+            + PANEL_BOTTOM_PAD * scale
+            + footer_height;
         let panel_height = body_height
             .min(view.viewport.height - margin * 2.0)
             .max(1.0);
@@ -115,11 +107,8 @@ impl Layout {
             .min(view.viewport.width - margin * 2.0)
             .max(1.0);
         let extension_top = panel.y1 + EXTENSION_GAP * scale;
-        let extension_height = if compact {
-            (view.viewport.height - margin - extension_top).max(0.0)
-        } else {
-            (view.viewport.height - margin - extension_top).clamp(0.0, EXTENSION_MAX_HEIGHT * scale)
-        };
+        let extension_height = (view.viewport.height - margin - extension_top)
+            .clamp(0.0, EXTENSION_MAX_HEIGHT * scale);
         let extension = Rect::from_origin_size(
             Point::new(panel.x1 - extension_width, extension_top),
             Size::new(extension_width, extension_height),
@@ -132,7 +121,6 @@ impl Layout {
             property_cells,
             footer_top,
             scale,
-            compact,
         }
     }
 
@@ -142,9 +130,6 @@ impl Layout {
         }
         if let Some(band) = self.band_rows.iter().position(|row| row.contains(point)) {
             return Some(DebugSelection::Band(band));
-        }
-        if self.compact {
-            return None;
         }
         self.property_cells
             .iter()
@@ -183,12 +168,7 @@ pub(super) fn draw(
         Some(DebugSelection::Property(property)) => Some(property),
         _ => None,
     };
-    let detector = match (property, tree_target) {
-        (Some(_), Some(TreeTarget::Detector(detector))) => Some(detector),
-        _ => None,
-    };
-    let compact = detector.is_some();
-    let layout = Layout::new(view, text_scale, compact);
+    let layout = Layout::new(view, text_scale);
     let hovered = pointer.and_then(|point| layout.item_at(point));
     draw_panel(
         fonts,
@@ -204,7 +184,7 @@ pub(super) fn draw(
     );
 
     let extension = if let Some(property) = property {
-        let (_, extension) = property_panes(view, text_scale, compact);
+        let (_, extension) = property_panes(view, text_scale);
         draw_computation_tree(
             fonts,
             scene,
@@ -221,30 +201,6 @@ pub(super) fn draw(
         extension
     } else {
         layout.extension
-    };
-
-    let extension = if let Some(detector) = detector {
-        let detector_pane = detector_layout(view, text_scale, detector);
-        let extension = Rect::new(
-            extension.x0,
-            extension.y0,
-            extension.x1,
-            detector_pane.pane.y0 - EXTENSION_GAP * layout.scale,
-        );
-        draw_detector_pane(
-            fonts,
-            scene,
-            detector,
-            &detector_pane,
-            visualizer,
-            palette,
-            colors,
-            layout.scale,
-            pointer,
-        );
-        extension
-    } else {
-        extension
     };
 
     if let Some(selection) = selection {
@@ -409,10 +365,6 @@ fn draw_panel(
             ),
         );
     }
-    if layout.compact {
-        return;
-    }
-
     let property_top = layout
         .band_rows
         .last()
@@ -726,77 +678,16 @@ fn draw_extension(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_detector_pane(
-    fonts: &mut Fonts,
-    scene: &mut Scene,
-    detector: Detector,
-    layout: &DetectorLayout,
-    visualizer: &Visualizer,
-    palette: Palette,
-    colors: MeterColors,
-    scale: f64,
-    pointer: Option<Point>,
-) {
-    let pane = layout.pane;
-    let color = match detector {
-        Detector::Bass => palette.vivid(6),
-        Detector::Wide => palette.vivid(8),
-    };
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        colors.background.with_alpha(0.95),
-        None,
-        &pane,
-    );
-    scene.stroke(
-        &Stroke::new(1.0),
-        Affine::IDENTITY,
-        color.with_alpha(0.55),
-        None,
-        &pane,
-    );
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        color.with_alpha(0.85),
-        None,
-        &Rect::from_origin_size(
-            Point::new(pane.x0, pane.y0),
-            Size::new(2.0 * scale, pane.height()),
-        ),
-    );
-    let inner = Rect::new(
-        pane.x0 + 8.0 * scale,
-        pane.y0 + 6.0 * scale,
-        pane.x1 - 8.0 * scale,
-        pane.y1 - 4.0 * scale,
-    );
-    draw_slider_content(
-        fonts,
-        scene,
-        inner,
-        detector.name(),
-        &layout.sliders,
-        visualizer,
-        palette,
-        colors,
-        scale,
-        pointer,
-    );
-}
-
-pub(super) fn tree_rect(view: &View, text_scale: VisualizerTextScale, compact: bool) -> Rect {
-    property_panes(view, text_scale, compact).0
+pub(super) fn tree_rect(view: &View, text_scale: VisualizerTextScale) -> Rect {
+    property_panes(view, text_scale).0
 }
 
 /// Geometry for a selected property. The tree keeps its minimum width and the
 /// inspector gives up width when the two cannot both fit.
-fn property_panes(view: &View, text_scale: VisualizerTextScale, compact: bool) -> (Rect, Rect) {
+fn property_panes(view: &View, text_scale: VisualizerTextScale) -> (Rect, Rect) {
     let scale = view.ui_scale() * f64::from(text_scale.factor());
     let margin = PANEL_MARGIN * scale;
-    let layout = Layout::new(view, text_scale, compact);
+    let layout = Layout::new(view, text_scale);
     let preferred_left = margin + TREE_LEFT_INSET * scale;
     let left = if layout.panel.x0 - preferred_left >= TREE_MIN_VISIBLE_WIDTH * scale {
         preferred_left
@@ -814,32 +705,6 @@ fn property_panes(view: &View, text_scale: VisualizerTextScale, compact: bool) -
     let tree = Rect::new(left, margin, right, base.y1);
     let extension = Rect::new(right + gap, base.y0, base.x1, base.y1);
     (tree, extension)
-}
-
-pub(super) fn detector_layout(
-    view: &View,
-    text_scale: VisualizerTextScale,
-    detector: Detector,
-) -> DetectorLayout {
-    let scale = view.ui_scale() * f64::from(text_scale.factor());
-    let base = Layout::new(view, text_scale, true).extension;
-    let height = (DETECTOR_PANE_HEIGHT * scale).min(base.height());
-    let pane = Rect::new(base.x0, base.y1 - height, base.x1, base.y1);
-    let inner = Rect::new(
-        pane.x0 + 8.0 * scale,
-        pane.y0 + 6.0 * scale,
-        pane.x1 - 8.0 * scale,
-        pane.y1 - 4.0 * scale,
-    );
-    DetectorLayout {
-        pane,
-        sliders: slider_rows(inner, &detector.parameters(), scale),
-    }
-}
-
-pub(super) struct DetectorLayout {
-    pub pane: Rect,
-    pub sliders: Vec<SliderRow>,
 }
 
 #[derive(Clone, Copy)]
@@ -883,15 +748,6 @@ impl TreeLayout {
     }
 }
 
-impl DetectorLayout {
-    pub fn slider_at(&self, point: Point) -> Option<SliderRow> {
-        self.sliders
-            .iter()
-            .find(|slider| slider.hit.contains(point))
-            .copied()
-    }
-}
-
 pub(super) struct TreeRow {
     pub node: &'static ComputeNode,
     pub rect: Rect,
@@ -904,10 +760,9 @@ pub(super) fn tree_layout(
     text_scale: VisualizerTextScale,
     property: Property,
     target: Option<TreeTarget>,
-    compact: bool,
 ) -> TreeLayout {
     let scale = view.ui_scale() * f64::from(text_scale.factor());
-    let rect = tree_rect(view, text_scale, compact);
+    let rect = tree_rect(view, text_scale);
     let mut rows = Vec::new();
     flatten_tree(property.computation(), 0, None, &mut rows);
     let rows_top = rect.y0 + 25.0 * scale;
@@ -936,12 +791,15 @@ pub(super) fn tree_layout(
                     .into_iter()
                     .map(Parameter::Gain),
             );
+            if let Some(target) = input.shape_target() {
+                parameters.push(Parameter::InputAmount(target));
+                parameters.push(Parameter::InputCurve(target));
+            }
             (input_title(input), parameters)
         }
-        Some(TreeTarget::Detector(detector)) => (
-            format!("{} CONTROLS ARE BELOW", detector.name()),
-            Vec::new(),
-        ),
+        Some(TreeTarget::Detector(detector)) => {
+            (detector.name().to_owned(), detector.parameters().to_vec())
+        }
         None => ("SELECT A COMPONENT ROW".to_owned(), Vec::new()),
     };
     let sliders = slider_rows(parameter_panel, &parameters, scale);
@@ -1004,8 +862,7 @@ fn draw_computation_tree(
     pointer: Option<Point>,
 ) {
     let scale = view.ui_scale() * f64::from(text_scale.factor());
-    let compact = matches!(target, Some(TreeTarget::Detector(_)));
-    let layout = tree_layout(view, text_scale, property, target, compact);
+    let layout = tree_layout(view, text_scale, property, target);
     let rect = layout.rect;
     if rect.width() < TREE_MIN_VISIBLE_WIDTH * scale || rect.height() < 200.0 * scale {
         return;
@@ -1181,12 +1038,17 @@ fn draw_computation_tree(
 
     let panel = layout.parameter_panel;
     if panel.height() > 0.0 {
+        let shape = target.and_then(|target| match target {
+            TreeTarget::Component(input) => visualizer.input_shape(input),
+            TreeTarget::Detector(_) => None,
+        });
         draw_slider_content(
             fonts,
             scene,
             panel,
             &layout.parameter_title,
             &layout.sliders,
+            shape,
             visualizer,
             palette,
             colors,
@@ -1266,6 +1128,15 @@ fn flatten_tree(
     }
 }
 
+fn parameter_label(parameter: Parameter, routing: &BandRouting) -> String {
+    if let Parameter::Gain(gain) = parameter {
+        if let Some(component) = gain.band_component() {
+            return format!("B{:02} {} GAIN", routing[component], component.label());
+        }
+    }
+    parameter.label().to_owned()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_slider_content(
     fonts: &mut Fonts,
@@ -1273,6 +1144,7 @@ fn draw_slider_content(
     panel: Rect,
     title: &str,
     sliders: &[SliderRow],
+    shape: Option<InputShape>,
     visualizer: &Visualizer,
     palette: Palette,
     colors: MeterColors,
@@ -1333,7 +1205,7 @@ fn draw_slider_content(
         let hovered = pointer.is_some_and(|point| slider.hit.contains(point));
         let label = fit(
             fonts,
-            slider.parameter.label(),
+            &parameter_label(slider.parameter, visualizer.routing()),
             (7.0 * scale) as f32,
             UiFace::Light,
             (slider.track.x0 - panel.x0 - 4.0 * scale).max(1.0),
@@ -1347,14 +1219,15 @@ fn draw_slider_content(
             &slider.track,
         );
         let knob_x = slider.track.x0 + slider.track.width() * fraction;
+        let fill_color = if hovered {
+            colors.readout
+        } else {
+            palette.vivid(9)
+        };
         scene.fill(
             Fill::NonZero,
             Affine::IDENTITY,
-            if hovered {
-                colors.readout
-            } else {
-                palette.vivid(9)
-            },
+            fill_color.with_alpha(0.33),
             None,
             &Rect::new(slider.track.x0, slider.track.y0, knob_x, slider.track.y1),
         );
@@ -1387,6 +1260,118 @@ fn draw_slider_content(
             palette.neutral[0],
         );
     }
+    if let Some(shape) = shape {
+        if let Some(last) = sliders.last() {
+            let top = last.track.y1 + 6.0 * scale;
+            let height = (CURVE_PREVIEW_HEIGHT * scale).min(panel.y1 - top);
+            if height >= 24.0 * scale {
+                let preview = Rect::new(last.track.x0, top, last.track.x1, top + height);
+                draw_shape_preview(fonts, scene, preview, shape, palette, scale);
+            }
+        }
+    }
+}
+
+fn draw_shape_preview(
+    fonts: &mut Fonts,
+    scene: &mut Scene,
+    rect: Rect,
+    shape: InputShape,
+    palette: Palette,
+    scale: f64,
+) {
+    let title = fit(
+        fonts,
+        "INPUT SHAPE",
+        (7.0 * scale) as f32,
+        UiFace::SemiBold,
+        rect.width() * 0.55,
+    );
+    draw_left_center(
+        scene,
+        &title,
+        rect.x0,
+        rect.y0 + 5.0 * scale,
+        palette.neutral[1],
+    );
+    let curve = fit(
+        fonts,
+        shape.curve.name(),
+        (7.0 * scale) as f32,
+        UiFace::LightItalic,
+        rect.width() * 0.4,
+    );
+    draw_right_center(
+        scene,
+        &curve,
+        rect.x1,
+        rect.y0 + 5.0 * scale,
+        palette.neutral[0],
+    );
+    let plot = Rect::new(
+        rect.x0,
+        rect.y0 + 10.0 * scale,
+        rect.x1,
+        rect.y1 - 1.0 * scale,
+    );
+    if plot.height() < 8.0 * scale {
+        return;
+    }
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        palette.neutral[0].with_alpha(0.1),
+        None,
+        &plot,
+    );
+    scene.stroke(
+        &Stroke::new(0.7 * scale),
+        Affine::IDENTITY,
+        palette.neutral[0].with_alpha(0.08),
+        None,
+        &Line::new(
+            Point::new(plot.x0, plot.center().y),
+            Point::new(plot.x1, plot.center().y),
+        ),
+    );
+    scene.stroke(
+        &Stroke::new(0.7 * scale),
+        Affine::IDENTITY,
+        palette.neutral[0].with_alpha(0.08),
+        None,
+        &Line::new(
+            Point::new(plot.center().x, plot.y0),
+            Point::new(plot.center().x, plot.y1),
+        ),
+    );
+    scene.stroke(
+        &Stroke::new(0.8 * scale),
+        Affine::IDENTITY,
+        palette.neutral[1].with_alpha(0.45),
+        None,
+        &Line::new(Point::new(plot.x0, plot.y1), Point::new(plot.x1, plot.y0)),
+    );
+    let mut path = BezPath::new();
+    let samples = 48;
+    let span = shape.high - shape.low;
+    for index in 0..=samples {
+        let fraction = index as f32 / samples as f32;
+        let output = shape.apply(shape.low + span * fraction);
+        let x = plot.x0 + plot.width() * f64::from(fraction);
+        let y = plot.y1 - plot.height() * f64::from(output);
+        if index == 0 {
+            path.move_to(Point::new(x, y));
+        } else {
+            path.line_to(Point::new(x, y));
+        }
+    }
+    scene.stroke(
+        &Stroke::new(1.4 * scale),
+        Affine::IDENTITY,
+        palette.vivid(9),
+        None,
+        &path,
+    );
 }
 
 fn input_value(input: Input, snapshot: &DebugSnapshot, routing: &BandRouting) -> Option<String> {
@@ -2092,7 +2077,7 @@ mod tests {
 
     fn layout() -> Layout {
         let view = View::fit(Size::new(1280.0, 440.0));
-        Layout::new(&view, VisualizerTextScale::default(), false)
+        Layout::new(&view, VisualizerTextScale::default())
     }
 
     #[test]
@@ -2125,9 +2110,9 @@ mod tests {
     #[test]
     fn computation_tree_sits_left_of_the_analysis_panel() {
         let view = View::fit(Size::new(1280.0, 440.0));
-        let tree = tree_rect(&view, VisualizerTextScale::default(), false);
-        let layout = Layout::new(&view, VisualizerTextScale::default(), false);
-        let (_, inspector) = property_panes(&view, VisualizerTextScale::default(), false);
+        let tree = tree_rect(&view, VisualizerTextScale::default());
+        let layout = Layout::new(&view, VisualizerTextScale::default());
+        let (_, inspector) = property_panes(&view, VisualizerTextScale::default());
         assert!(tree.x1 <= layout.panel.x0);
         assert_eq!(inspector.x0 - tree.x1, EXTENSION_GAP);
         assert_eq!(tree.y1, layout.extension.y1);
@@ -2137,21 +2122,32 @@ mod tests {
     }
 
     #[test]
-    fn detector_mode_compacts_the_list_and_stacks_the_controls() {
+    fn band_gain_labels_follow_the_selected_source_band() {
+        use crate::visualizer::Gain;
+        let mut routing = BandRouting::default();
+        let gain = Parameter::Gain(Gain::SpinBand);
+        assert_eq!(parameter_label(gain, &routing), "B04 SPIN GAIN");
+        routing[BandComponent::Spin] = 7;
+        assert_eq!(parameter_label(gain, &routing), "B07 SPIN GAIN");
+    }
+
+    #[test]
+    fn detector_controls_live_in_the_tree_parameter_panel() {
         let view = View::fit(Size::new(1280.0, 440.0));
         let text_scale = VisualizerTextScale::default();
-        let normal = Layout::new(&view, text_scale, false);
-        let compact = Layout::new(&view, text_scale, true);
-        assert!(compact.panel.height() < normal.panel.height());
-        let (_, extension) = property_panes(&view, text_scale, true);
-        let pane = detector_layout(&view, text_scale, Detector::Wide).pane;
-        assert_eq!(pane.y1, extension.y1);
-        assert!(pane.y0 > extension.y0 + 80.0);
+        let tree = tree_layout(
+            &view,
+            text_scale,
+            Property::Crossfade,
+            Some(TreeTarget::Detector(Detector::Wide)),
+        );
+        assert_eq!(tree.sliders.len(), 4);
         assert_eq!(
-            detector_layout(&view, text_scale, Detector::Wide)
-                .sliders
-                .len(),
-            4
+            tree.sliders
+                .iter()
+                .map(|slider| slider.parameter)
+                .collect::<Vec<_>>(),
+            Detector::Wide.parameters().to_vec()
         );
     }
 
@@ -2159,8 +2155,8 @@ mod tests {
     fn tight_windows_shrink_the_inspector_before_hiding_the_tree() {
         let view = View::fit(Size::new(900.0, 440.0));
         let text_scale = VisualizerTextScale::default();
-        let layout = Layout::new(&view, text_scale, false);
-        let (tree, inspector) = property_panes(&view, text_scale, false);
+        let layout = Layout::new(&view, text_scale);
+        let (tree, inspector) = property_panes(&view, text_scale);
         assert!(tree.width() > 250.0);
         assert!(inspector.width() < layout.extension.width());
         assert_eq!(inspector.x0 - tree.x1, EXTENSION_GAP);

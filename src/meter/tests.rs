@@ -744,7 +744,7 @@ fn debug_panel_selects_bands_and_properties_by_pointer() -> anyhow::Result<()> {
     meter.set_debug(true);
     meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
     let view = View::fit(Size::new(1280.0, 440.0));
-    let layout = super::debug::Layout::new(&view, VisualizerTextScale::default(), false);
+    let layout = super::debug::Layout::new(&view, VisualizerTextScale::default());
 
     assert!(meter.click_debug(&view, layout.band_center(2)));
     assert_eq!(meter.debug_selection, Some(DebugSelection::Band(2)));
@@ -756,7 +756,7 @@ fn debug_panel_selects_bands_and_properties_by_pointer() -> anyhow::Result<()> {
         meter.debug_selection,
         Some(DebugSelection::Property(Property::Crossfade))
     );
-    let tree = super::debug::tree_rect(&view, VisualizerTextScale::default(), false);
+    let tree = super::debug::tree_rect(&view, VisualizerTextScale::default());
     assert!(meter.click_debug(&view, tree.center()));
     assert_eq!(
         meter.debug_selection,
@@ -790,11 +790,10 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
     let text_scale = VisualizerTextScale::default();
     meter.debug_selection = Some(DebugSelection::Property(Property::Pulse));
 
-    let tree = super::debug::tree_layout(&view, text_scale, Property::Pulse, None, false);
+    let tree = super::debug::tree_layout(&view, text_scale, Property::Pulse, None);
     assert!(meter.click_debug(&view, tree.row_center(6)));
     assert_eq!(meter.tree_target, Some(TreeTarget::Component(Input::Power)));
-    let tree =
-        super::debug::tree_layout(&view, text_scale, Property::Pulse, meter.tree_target, false);
+    let tree = super::debug::tree_layout(&view, text_scale, Property::Pulse, meter.tree_target);
     assert_eq!(tree.sliders.len(), 7);
     let attack = tree
         .sliders
@@ -830,14 +829,13 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
 
     meter.debug_selection = Some(DebugSelection::Property(Property::Spin));
     meter.tree_target = None;
-    let tree = super::debug::tree_layout(&view, text_scale, Property::Spin, None, false);
+    let tree = super::debug::tree_layout(&view, text_scale, Property::Spin, None);
     assert!(meter.click_debug(&view, tree.row_center(4)));
     assert_eq!(
         meter.tree_target,
         Some(TreeTarget::Component(Input::Band(BandComponent::Spin)))
     );
-    let tree =
-        super::debug::tree_layout(&view, text_scale, Property::Spin, meter.tree_target, false);
+    let tree = super::debug::tree_layout(&view, text_scale, Property::Spin, meter.tree_target);
     assert_eq!(tree.sliders.len(), 8);
     let source = tree
         .sliders
@@ -851,7 +849,7 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
     meter.end_slider_drag();
 
     meter.debug_selection = Some(DebugSelection::Property(Property::Crossfade));
-    let tree = super::debug::tree_layout(&view, text_scale, Property::Crossfade, None, false);
+    let tree = super::debug::tree_layout(&view, text_scale, Property::Crossfade, None);
     let detector = tree
         .detector_center(Detector::Wide)
         .expect("the crossfade tree exposes the wide detector");
@@ -860,10 +858,10 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
         meter.tree_target,
         Some(TreeTarget::Detector(Detector::Wide))
     );
-    let pane = super::debug::detector_layout(&view, text_scale, Detector::Wide);
-    assert_eq!(pane.sliders.len(), 4);
+    let tree = super::debug::tree_layout(&view, text_scale, Property::Crossfade, meter.tree_target);
+    assert_eq!(tree.sliders.len(), 4);
     let before = meter.onset_thresholds().broadband;
-    assert!(meter.click_debug(&view, pane.sliders[0].track.center()));
+    assert!(meter.click_debug(&view, tree.sliders[0].track.center()));
     assert_ne!(meter.onset_thresholds().broadband, before);
     meter.end_slider_drag();
     Ok(())
@@ -969,8 +967,7 @@ fn renders_visualizer_face_and_wireframe_with_hud() -> anyhow::Result<()> {
             clock.frame(1.0 / 60.0),
         );
     }
-    let layout =
-        super::debug::Layout::new(&view, crate::config::VisualizerTextScale::default(), false);
+    let layout = super::debug::Layout::new(&view, crate::config::VisualizerTextScale::default());
     assert!(meter.click_debug(
         &view,
         layout.property_center(crate::visualizer::Property::Spin)
@@ -980,9 +977,24 @@ fn renders_visualizer_face_and_wireframe_with_hud() -> anyhow::Result<()> {
         crate::config::VisualizerTextScale::default(),
         crate::visualizer::Property::Spin,
         None,
-        false,
     );
     assert!(meter.click_debug(&view, tree.row_center(4)));
+    meter.set_parameter(
+        crate::visualizer::Parameter::BandSource(crate::visualizer::BandComponent::Spin),
+        7.0,
+    );
+    meter.set_parameter(
+        crate::visualizer::Parameter::InputCurve(crate::visualizer::EnvelopeTarget::Band(
+            crate::visualizer::BandComponent::Spin,
+        )),
+        1.0,
+    );
+    meter.set_parameter(
+        crate::visualizer::Parameter::InputAmount(crate::visualizer::EnvelopeTarget::Band(
+            crate::visualizer::BandComponent::Spin,
+        )),
+        0.8,
+    );
     let (lines, ribbons): (Vec<_>, Vec<_>) = {
         scene.reset();
         let frame = meter.draw(

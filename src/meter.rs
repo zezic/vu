@@ -1020,12 +1020,9 @@ impl Meter {
             Some(visualizer::DebugSelection::Property(property)) => Some(property),
             _ => None,
         };
-        let detector = self.detector_selected();
-        let compact = detector.is_some();
         let scale = view.ui_scale() * f64::from(self.text_scale.factor());
         if let Some(property) = property {
-            let tree =
-                debug::tree_layout(view, self.text_scale, property, self.tree_target, compact);
+            let tree = debug::tree_layout(view, self.text_scale, property, self.tree_target);
             if tree.rect.width() >= debug::TREE_MIN_VISIBLE_WIDTH * scale
                 && tree.rect.height() >= 200.0 * scale
                 && tree.rect.contains(position)
@@ -1052,16 +1049,7 @@ impl Meter {
                 return true;
             }
         }
-        if let Some(detector) = detector {
-            let pane = debug::detector_layout(view, self.text_scale, detector);
-            if pane.pane.contains(position) {
-                if let Some(slider) = pane.slider_at(position) {
-                    self.begin_slider(slider.parameter, slider.track, position);
-                }
-                return true;
-            }
-        }
-        let layout = debug::Layout::new(view, self.text_scale, compact);
+        let layout = debug::Layout::new(view, self.text_scale);
         if !layout.panel.contains(position) {
             return false;
         }
@@ -1077,16 +1065,6 @@ impl Meter {
         self.debug_selection = selection;
         self.face_settings = None;
         true
-    }
-
-    fn detector_selected(&self) -> Option<visualizer::Detector> {
-        match (self.debug_selection, self.tree_target) {
-            (
-                Some(visualizer::DebugSelection::Property(_)),
-                Some(visualizer::TreeTarget::Detector(detector)),
-            ) => Some(detector),
-            _ => None,
-        }
     }
 
     fn begin_slider(&mut self, parameter: visualizer::Parameter, track: Rect, position: Point) {

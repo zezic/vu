@@ -197,14 +197,15 @@ The inspector follows the selection:
   `LOW REF` / `HIGH REF` rescale the raw value into 0..1, `CURVE` selects
   linear, inflated, deflated, or S-curve response, and `CURVE AMT` blends the
   selected bend. The curves use cheap arithmetic (`sqrt`, square, and a cubic
-  smoothstep) before envelope smoothing.
+  smoothstep) before envelope smoothing. A small `INPUT SHAPE` plot previews the
+  selected curve across the low/high reference span, with a linear reference
+  diagonal.
 - attack uses a logarithmic slider over 0.1 to 50.0; release uses 0.1 to 20.0 so the short
   envelope times get most of the slider travel. Slider tracks and line-shaped
   thumbs are tall enough for comfortable dragging.
-- clicking a detector row or its `DETECTOR` leaf opens a dedicated detector pane
-  below the existing debug panes. It exposes threshold, minimum flux, baseline
-  ratio, and cooldown. The main analyzer list compacts to its bands while this
-  pane is open so the graph inspector and detector controls both fit.
+- clicking a detector row or its `DETECTOR` leaf shows threshold, minimum flux,
+  baseline ratio, and cooldown in the same bottom parameter section of the tree
+  pane used by ordinary components. No separate pane is created.
 - threshold changes made with sliders update the HUD readouts and persist through
   the same config field as the `G` / `H` and `J` / `K` hotkeys. Envelope rates,
   kick decay, style values, component gains, band routing, and input shaping are
