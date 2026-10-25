@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use strum::VariantArray;
+use strum::{EnumCount, VariantArray};
 use vello::{
     kurbo::{Affine, Circle, Point, Rect, Size, Stroke},
     peniko::{Color, Fill},
@@ -717,6 +717,7 @@ pub struct Meter {
     debug_snapshot: Option<visualizer::DebugSnapshot>,
     debug_selection: Option<visualizer::DebugSelection>,
     tree_target: Option<visualizer::TreeTarget>,
+    graph_max: [Option<debug::GraphMax>; visualizer::Property::COUNT],
     debug_pointer: Option<Point>,
     slider_drag: Option<SliderDrag>,
     debug_clock: f32,
@@ -875,6 +876,7 @@ impl Meter {
             debug_snapshot: None,
             debug_selection: None,
             tree_target: None,
+            graph_max: [None; visualizer::Property::COUNT],
             debug_pointer: None,
             slider_drag: None,
             debug_clock: 0.0,
@@ -989,6 +991,7 @@ impl Meter {
         self.debug_snapshot = None;
         self.debug_selection = None;
         self.tree_target = None;
+        self.graph_max = [None; visualizer::Property::COUNT];
         self.slider_drag = None;
         self.debug_clock = 0.0;
         self.face_settings = None;
@@ -1022,30 +1025,59 @@ impl Meter {
         };
         let scale = view.ui_scale() * f64::from(self.text_scale.factor());
         if let Some(property) = property {
-            let tree = debug::tree_layout(view, self.text_scale, property, self.tree_target);
+            let tree = debug::tree_layout(
+                view,
+                self.text_scale,
+                property,
+                self.tree_target,
+                self.visualizer.mixer(),
+            );
             if tree.rect.width() >= debug::TREE_MIN_VISIBLE_WIDTH * scale
                 && tree.rect.height() >= 200.0 * scale
                 && tree.rect.contains(position)
             {
+                if let Some(action) = tree.action_at(position) {
+                    self.apply_tree_action(action);
+                    return true;
+                }
                 if let Some(slider) = tree.slider_at(position) {
                     self.begin_slider(slider.parameter, slider.track, position);
                     return true;
                 }
                 if let Some(row) = tree.row_at(position) {
-                    let target = if let Some(detector) = row.node.detector {
-                        Some(visualizer::TreeTarget::Detector(detector))
-                    } else {
-                        row.node.input.map(|input| {
-                            input.detector().map_or(
-                                visualizer::TreeTarget::Component(input),
-                                visualizer::TreeTarget::Detector,
-                            )
-                        })
-                    };
-                    self.tree_target = target;
+                    if let Some(contribution) = row.contribution() {
+                        let badge = Rect::new(
+                            row.rect.x1 - 18.0 * scale,
+                            row.rect.y0,
+                            row.rect.x1 - 8.0 * scale,
+                            row.rect.y1,
+                        );
+                        if badge.contains(position) {
+                            self.visualizer.toggle_contribution_mix(contribution);
+                            self.slider_drag = None;
+                            self.face_settings = None;
+                            return true;
+                        }
+                    }
+                    self.tree_target = row.target();
                     self.slider_drag = None;
                     self.face_settings = None;
                 }
+                return true;
+            }
+        }
+        if let Some(selection) = self.debug_selection {
+            if let Some((property, max)) = debug::graph_max_button_at(
+                view,
+                self.text_scale,
+                selection,
+                &self.visualizer,
+                position,
+            ) {
+                let slot = &mut self.graph_max[property.index()];
+                *slot = if *slot == Some(max) { None } else { Some(max) };
+                self.slider_drag = None;
+                self.face_settings = None;
                 return true;
             }
         }
@@ -1065,6 +1097,31 @@ impl Meter {
         self.debug_selection = selection;
         self.face_settings = None;
         true
+    }
+
+    fn apply_tree_action(&mut self, action: debug::TreeAction) {
+        match action {
+            debug::TreeAction::ToggleMix(contribution) => {
+                self.visualizer.toggle_contribution_mix(contribution);
+            }
+            debug::TreeAction::AddExtra(point) => {
+                let extra = self.visualizer.add_extra(point);
+                self.tree_target = Some(visualizer::TreeTarget::Contribution(
+                    visualizer::Contribution::Extra(extra),
+                ));
+            }
+            debug::TreeAction::RemoveExtra(extra) => {
+                self.visualizer.remove_extra(extra);
+                let removed =
+                    visualizer::TreeTarget::Contribution(visualizer::Contribution::Extra(extra));
+                if self.tree_target == Some(removed) {
+                    self.tree_target = Some(visualizer::TreeTarget::MixPoint(extra.point));
+                }
+            }
+            debug::TreeAction::ToggleAdaptive(target) => self.visualizer.toggle_adaptive(target),
+        }
+        self.slider_drag = None;
+        self.face_settings = None;
     }
 
     fn begin_slider(&mut self, parameter: visualizer::Parameter, track: Rect, position: Point) {
@@ -1500,6 +1557,7 @@ impl Meter {
                             self.debug_selection,
                             self.debug_pointer,
                             self.tree_target,
+                            &self.graph_max,
                         );
                     }
                 }

@@ -777,8 +777,8 @@ fn debug_panel_selects_bands_and_properties_by_pointer() -> anyhow::Result<()> {
 fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
     use crate::config::VisualizerTextScale;
     use crate::visualizer::{
-        BandComponent, DebugSelection, Detector, EnvelopeTarget, Gain, Input, Parameter,
-        Presentation, Property, TreeTarget,
+        BandComponent, Contribution, DebugSelection, Detector, EnvelopeTarget, Gain, Input,
+        MixPoint, Parameter, Presentation, Property, StyleInput, TreeTarget,
     };
     let mut meter = Meter::new(&crate::config::Config {
         presentation: Presentation::Visualizer,
@@ -790,10 +790,24 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
     let text_scale = VisualizerTextScale::default();
     meter.debug_selection = Some(DebugSelection::Property(Property::Pulse));
 
-    let tree = super::debug::tree_layout(&view, text_scale, Property::Pulse, None);
-    assert!(meter.click_debug(&view, tree.row_center(6)));
-    assert_eq!(meter.tree_target, Some(TreeTarget::Component(Input::Power)));
-    let tree = super::debug::tree_layout(&view, text_scale, Property::Pulse, meter.tree_target);
+    let power_contribution = Contribution::Fixed(MixPoint::PulseEnergy, 0);
+    let power_target = TreeTarget::Contribution(power_contribution);
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Pulse,
+        None,
+        meter.visualizer.mixer(),
+    );
+    assert!(meter.click_debug(&view, tree.row_center_for(power_target)));
+    assert_eq!(meter.tree_target, Some(power_target));
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Pulse,
+        meter.tree_target,
+        meter.visualizer.mixer(),
+    );
     assert_eq!(tree.sliders.len(), 7);
     let attack = tree
         .sliders
@@ -827,15 +841,36 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
     assert_ne!(before, after);
     meter.end_slider_drag();
 
+    let zoom_bias = TreeTarget::Input(Input::Style(StyleInput::ZoomBias));
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Pulse,
+        None,
+        meter.visualizer.mixer(),
+    );
+    assert!(meter.click_debug(&view, tree.row_center_for(zoom_bias)));
+    assert_eq!(meter.tree_target, Some(zoom_bias));
+
     meter.debug_selection = Some(DebugSelection::Property(Property::Spin));
     meter.tree_target = None;
-    let tree = super::debug::tree_layout(&view, text_scale, Property::Spin, None);
-    assert!(meter.click_debug(&view, tree.row_center(4)));
-    assert_eq!(
-        meter.tree_target,
-        Some(TreeTarget::Component(Input::Band(BandComponent::Spin)))
+    let spin_target = TreeTarget::Contribution(Contribution::Fixed(MixPoint::SpinSpeed, 1));
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Spin,
+        None,
+        meter.visualizer.mixer(),
     );
-    let tree = super::debug::tree_layout(&view, text_scale, Property::Spin, meter.tree_target);
+    assert!(meter.click_debug(&view, tree.row_center_for(spin_target)));
+    assert_eq!(meter.tree_target, Some(spin_target));
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Spin,
+        meter.tree_target,
+        meter.visualizer.mixer(),
+    );
     assert_eq!(tree.sliders.len(), 8);
     let source = tree
         .sliders
@@ -849,7 +884,13 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
     meter.end_slider_drag();
 
     meter.debug_selection = Some(DebugSelection::Property(Property::Crossfade));
-    let tree = super::debug::tree_layout(&view, text_scale, Property::Crossfade, None);
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Crossfade,
+        None,
+        meter.visualizer.mixer(),
+    );
     let detector = tree
         .detector_center(Detector::Wide)
         .expect("the crossfade tree exposes the wide detector");
@@ -858,12 +899,143 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
         meter.tree_target,
         Some(TreeTarget::Detector(Detector::Wide))
     );
-    let tree = super::debug::tree_layout(&view, text_scale, Property::Crossfade, meter.tree_target);
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Crossfade,
+        meter.tree_target,
+        meter.visualizer.mixer(),
+    );
     assert_eq!(tree.sliders.len(), 4);
     let before = meter.onset_thresholds().broadband;
     assert!(meter.click_debug(&view, tree.sliders[0].track.center()));
     assert_ne!(meter.onset_thresholds().broadband, before);
     meter.end_slider_drag();
+    Ok(())
+}
+
+#[test]
+fn tree_mix_actions_toggle_mixing_and_add_extra_inputs() -> anyhow::Result<()> {
+    use crate::config::VisualizerTextScale;
+    use crate::visualizer::{
+        Contribution, DebugSelection, EnvelopeTarget, Input, MixPoint, Presentation, Property,
+        TreeTarget,
+    };
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Visualizer,
+        ..Default::default()
+    })?;
+    meter.set_debug(true);
+    meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
+    let view = View::fit(Size::new(1280.0, 440.0));
+    let text_scale = VisualizerTextScale::default();
+    meter.debug_selection = Some(DebugSelection::Property(Property::Pulse));
+
+    let contribution = Contribution::Fixed(MixPoint::PulseEnergy, 0);
+    meter.tree_target = Some(TreeTarget::Contribution(contribution));
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Pulse,
+        meter.tree_target,
+        meter.visualizer.mixer(),
+    );
+    let toggle = tree
+        .action_center(super::debug::TreeAction::ToggleMix(contribution))
+        .expect("a contribution exposes a mix toggle");
+    let before = meter.visualizer.mixer().mode(contribution);
+    let row = tree
+        .rows
+        .iter()
+        .find(|row| row.target() == Some(TreeTarget::Contribution(contribution)))
+        .expect("the contribution has a tree row");
+    let scale = view.ui_scale() * f64::from(text_scale.factor());
+    let badge = Point::new(row.rect.x1 - 13.0 * scale, row.rect.center().y);
+    assert!(meter.click_debug(&view, badge));
+    assert_ne!(meter.visualizer.mixer().mode(contribution), before);
+    assert!(meter.click_debug(&view, toggle));
+    assert_eq!(meter.visualizer.mixer().mode(contribution), before);
+
+    let adaptive = tree
+        .action_center(super::debug::TreeAction::ToggleAdaptive(
+            EnvelopeTarget::Power,
+        ))
+        .expect("an enveloped contribution exposes an adaptive toggle");
+    assert!(meter.click_debug(&view, adaptive));
+    assert!(meter
+        .visualizer
+        .input_shape(Input::Power)
+        .expect("power has an input shape")
+        .is_adaptive());
+
+    let point = MixPoint::PulseEnergy;
+    meter.tree_target = Some(TreeTarget::MixPoint(point));
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Pulse,
+        meter.tree_target,
+        meter.visualizer.mixer(),
+    );
+    let add = tree
+        .action_center(super::debug::TreeAction::AddExtra(point))
+        .expect("a mix point exposes an add-input action");
+    assert!(meter.click_debug(&view, add));
+    let extras: Vec<_> = meter.visualizer.mixer().extras(point).collect();
+    assert_eq!(extras.len(), 1);
+    assert_eq!(
+        meter.tree_target,
+        Some(TreeTarget::Contribution(Contribution::Extra(extras[0].0)))
+    );
+
+    let extra = extras[0].0;
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Pulse,
+        meter.tree_target,
+        meter.visualizer.mixer(),
+    );
+    let remove = tree
+        .action_center(super::debug::TreeAction::RemoveExtra(extra))
+        .expect("an extra input exposes a remove action");
+    assert!(meter.click_debug(&view, remove));
+    assert_eq!(meter.visualizer.mixer().extras(point).count(), 0);
+    assert_eq!(meter.tree_target, Some(TreeTarget::MixPoint(point)));
+    Ok(())
+}
+
+#[test]
+fn property_output_graph_max_buttons_override_and_clear() -> anyhow::Result<()> {
+    use super::debug::GraphMax;
+    use crate::config::VisualizerTextScale;
+    use crate::visualizer::{DebugSelection, Presentation, Property};
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Visualizer,
+        ..Default::default()
+    })?;
+    meter.set_debug(true);
+    meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
+    meter.debug_selection = Some(DebugSelection::Property(Property::Spin));
+    let view = View::fit(Size::new(1280.0, 440.0));
+    let text_scale = VisualizerTextScale::default();
+    let selection = DebugSelection::Property(Property::Spin);
+    let button = super::debug::graph_max_button_center(
+        &view,
+        text_scale,
+        selection,
+        &meter.visualizer,
+        GraphMax::Eight,
+    )
+    .expect("the spin output graph has an 8.0 maximum button");
+    assert_eq!(meter.graph_max[Property::Spin.index()], None);
+    assert!(meter.click_debug(&view, button));
+    assert_eq!(
+        meter.graph_max[Property::Spin.index()],
+        Some(GraphMax::Eight)
+    );
+    assert!(meter.click_debug(&view, button));
+    assert_eq!(meter.graph_max[Property::Spin.index()], None);
     Ok(())
 }
 
@@ -977,8 +1149,14 @@ fn renders_visualizer_face_and_wireframe_with_hud() -> anyhow::Result<()> {
         crate::config::VisualizerTextScale::default(),
         crate::visualizer::Property::Spin,
         None,
+        meter.visualizer.mixer(),
     );
-    assert!(meter.click_debug(&view, tree.row_center(4)));
+    assert!(meter.click_debug(
+        &view,
+        tree.row_center_for(crate::visualizer::TreeTarget::Contribution(
+            crate::visualizer::Contribution::Fixed(crate::visualizer::MixPoint::SpinSpeed, 1)
+        ))
+    ));
     meter.set_parameter(
         crate::visualizer::Parameter::BandSource(crate::visualizer::BandComponent::Spin),
         7.0,
@@ -995,6 +1173,15 @@ fn renders_visualizer_face_and_wireframe_with_hud() -> anyhow::Result<()> {
         )),
         0.8,
     );
+    let graph_max = super::debug::graph_max_button_center(
+        &view,
+        crate::config::VisualizerTextScale::default(),
+        crate::visualizer::DebugSelection::Property(crate::visualizer::Property::Spin),
+        &meter.visualizer,
+        super::debug::GraphMax::Eight,
+    )
+    .expect("the spin output graph has an 8.0 maximum button");
+    assert!(meter.click_debug(&view, graph_max));
     let (lines, ribbons): (Vec<_>, Vec<_>) = {
         scene.reset();
         let frame = meter.draw(

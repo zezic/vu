@@ -5,9 +5,11 @@ mod geometry;
 mod renderer;
 mod spectrum;
 
+use computation::MixContext;
 pub use computation::{
-    BandComponent, BandRouting, ComputeNode, Curve, Detector, EnvelopeTarget, Gain, Gains, Input,
-    InputShape, Parameter, StyleInput, TreeTarget,
+    BandComponent, BandRouting, ComputeNode, Contribution, ContributionSpec, Curve, Detector,
+    EnvelopeTarget, Extra, ExtraRef, Gain, Gains, Input, InputShape, Mix, MixPoint, Mixer,
+    Parameter, ReferenceTracking, Source, StyleInput, TreeTarget, SELECTABLE_INPUTS,
 };
 
 use std::{collections::VecDeque, f32::consts::TAU};
@@ -499,7 +501,8 @@ impl Property {
             Self::Ripple => (0.0, 1.2),
             Self::Shear => (-0.8, 0.8),
             Self::Zoom => (1.0, 1.2),
-            Self::Accent | Self::Line | Self::Crossfade | Self::Entrance => (0.0, 1.0),
+            Self::Accent | Self::Crossfade | Self::Entrance => (0.0, 1.0),
+            Self::Line => (0.0, 2.0),
             Self::Jitter => (0.0, 0.08),
             Self::Phase => (0.0, 6.0),
             Self::Kick => (0.0, 1.5),
@@ -567,40 +570,46 @@ impl Property {
             || self.depends_on_wide_onset()
     }
 
-    /// Multipliers attached to one component in this property's tree.
+    /// Multipliers attached to one component in this property's tree. The mix
+    /// point definitions are the only source of these gains, so a tree term and
+    /// the inspector caption cannot disagree about which multiplier it uses.
     pub fn component_gains(self, input: Input) -> Vec<Gain> {
-        match (self, input) {
-            (Self::Pulse, Input::Power) => vec![Gain::PulsePower],
-            (Self::Pulse, Input::Bass) => vec![Gain::PulseBass],
-            (Self::Pulse, Input::Kick) => vec![Gain::PulseKick],
-            (Self::Pulse, Input::Property(Self::Entrance)) => vec![Gain::PulseEntrance],
-            (Self::Pulse | Self::Zoom, Input::Band(BandComponent::Zoom)) => vec![Gain::ZoomBand],
-            (Self::Spin, Input::Power) => vec![Gain::SpinPower],
-            (Self::Spin, Input::Band(BandComponent::Spin)) => vec![Gain::SpinBand],
-            (Self::Pitch, Input::Band(BandComponent::Pitch) | Input::Style(StyleInput::AxisY)) => {
-                vec![Gain::PitchBand]
+        let mut gains = Vec::new();
+        for point in self.mix_points() {
+            for spec in point.contributions() {
+                let matches = spec.input() == Some(input)
+                    || spec.style_scale.map(Input::Style) == Some(input);
+                if let (true, Some(gain)) = (matches, spec.gain) {
+                    if !gains.contains(&gain) {
+                        gains.push(gain);
+                    }
+                }
             }
-            (Self::Pitch, Input::Power) => vec![Gain::PitchPowerRate],
-            (Self::Pitch, Input::PhaseClock) => vec![Gain::PitchOscillator],
-            (Self::Roll, Input::Band(BandComponent::Roll) | Input::Style(StyleInput::AxisZ)) => {
-                vec![Gain::RollBand]
-            }
-            (Self::Roll, Input::Power) => vec![Gain::RollPowerRate],
-            (Self::Twist, Input::Band(BandComponent::Twist)) => vec![Gain::TwistBand],
-            (Self::Bulge, Input::Band(BandComponent::Bulge)) => vec![Gain::BulgeBand],
-            (Self::Ripple, Input::Band(BandComponent::Ripple)) => vec![Gain::RippleBand],
-            (Self::Shear, Input::Band(BandComponent::Shear)) => vec![Gain::ShearBand],
-            (Self::Line, Input::Band(BandComponent::Line)) => vec![Gain::LineEnergy],
-            (Self::Jitter, Input::Band(BandComponent::Jitter)) => vec![Gain::JitterBand],
-            (Self::Phase, Input::Power) => vec![Gain::PhasePower],
-            (Self::Phase, Input::Band(BandComponent::Phase)) => vec![Gain::PhaseBand],
-            (Self::Kick, Input::BassFlux) => vec![Gain::KickFlux],
-            (Self::Crossfade, Input::Power) => vec![Gain::XfadePower],
-            (Self::Crossfade, Input::Kick) => vec![Gain::XfadeKick],
-            (Self::Morph, Input::Power) => vec![Gain::MorphPower],
-            (Self::Entrance, Input::Power) => vec![Gain::EntrancePower],
-            _ => Vec::new(),
         }
+        gains
+    }
+}
+
+/// Analysis values that one input reads. Extra mix inputs reuse this mapping so
+/// the band dependency panel and the graph inspector follow them.
+fn input_dependencies(input: Input) -> Vec<Dependency> {
+    match input {
+        Input::Band(component) => vec![Dependency::Band(component)],
+        Input::BassBands => vec![Dependency::BassBands],
+        Input::Power => vec![Dependency::Power],
+        // The bass envelope is read from the low bands.
+        Input::Bass => vec![Dependency::Bass, Dependency::BassBands],
+        Input::Kick => vec![Dependency::Kick],
+        Input::BassOnset => vec![Dependency::BassOnset],
+        Input::WideOnset => vec![Dependency::WideOnset],
+        Input::PowerLevel
+        | Input::BassLevel
+        | Input::BassFlux
+        | Input::Flux
+        | Input::PhaseClock
+        | Input::Style(_)
+        | Input::Property(_)
+        | Input::Constant(_) => Vec::new(),
     }
 }
 
@@ -912,6 +921,7 @@ pub struct Visualizer {
     kick_decay: f32,
     gains: Gains,
     routing: BandRouting,
+    mixer: Mixer,
     band_shapes: [InputShape; BAND_COUNT],
     power_shape: InputShape,
     bass_shape: InputShape,
@@ -958,6 +968,7 @@ impl Visualizer {
             kick_decay: 3.2,
             gains: Gains::default(),
             routing: BandRouting::default(),
+            mixer: Mixer::default(),
             band_shapes: [InputShape::default(); BAND_COUNT],
             power_shape: InputShape::default(),
             bass_shape: InputShape::default(),
@@ -1035,23 +1046,25 @@ impl Visualizer {
         self.last_spectrum = spectrum;
         self.bass_hit_flash *= (-hop * 7.0).exp();
         self.broadband_hit_flash *= (-hop * 7.0).exp();
-        let band_shapes = self.band_shapes;
-        for (index, (band, target)) in self.bands.iter_mut().zip(spectrum.bands).enumerate() {
-            band.advance(band_shapes[index].apply(target), hop);
+        let band_shapes = &mut self.band_shapes;
+        for (index, band) in self.bands.iter_mut().enumerate() {
+            let target = band_shapes[index].observe(spectrum.bands[index], hop);
+            band.advance(target, hop);
         }
-        self.power
-            .advance(self.power_shape.apply(spectrum.power), hop);
-        self.bass.advance(self.bass_shape.apply(spectrum.bass), hop);
-        self.treble
-            .advance(self.treble_shape.apply(spectrum.treble), hop);
-        let flux_gain = self.gains[Gain::KickFlux];
+        let power = self.power_shape.observe(spectrum.power, hop);
+        self.power.advance(power, hop);
+        let bass = self.bass_shape.observe(spectrum.bass, hop);
+        self.bass.advance(bass, hop);
+        let treble = self.treble_shape.observe(spectrum.treble, hop);
+        self.treble.advance(treble, hop);
         let bass_hit = self
             .bass_onset
-            .observe(spectrum.bass, spectrum.bass_flux, hop, flux_gain);
-        let broadband_hit =
-            self.broadband_onset
-                .observe(spectrum.power, spectrum.flux, hop, flux_gain);
-        if let Some(strength) = bass_hit {
+            .observe(spectrum.bass, spectrum.bass_flux, hop);
+        let broadband_hit = self
+            .broadband_onset
+            .observe(spectrum.power, spectrum.flux, hop);
+        if bass_hit {
+            let strength = self.hit_strength(spectrum, spectrum.bass, spectrum.bass_flux);
             self.bass_hits = self.bass_hits.saturating_add(1);
             self.bass_hit_flash = 1.0;
             self.last_hit = Some(Hit {
@@ -1059,7 +1072,8 @@ impl Visualizer {
                 strength,
             });
             self.push_hit(HitKind::Bass, strength);
-        } else if let Some(strength) = broadband_hit {
+        } else if broadband_hit {
+            let strength = self.hit_strength(spectrum, spectrum.power, spectrum.flux);
             self.broadband_hits = self.broadband_hits.saturating_add(1);
             self.broadband_hit_flash = 1.0;
             self.last_hit = Some(Hit {
@@ -1068,6 +1082,43 @@ impl Visualizer {
             });
             self.push_hit(HitKind::Broadband, strength);
         }
+    }
+
+    fn hit_strength(&self, spectrum: Spectrum, level: f32, flux: f32) -> f32 {
+        let context = self.mix_context(spectrum, level, flux);
+        self.mixer
+            .value(MixPoint::KickStrength, &context)
+            .clamp(0.25, 1.5)
+    }
+
+    fn mix_context(&self, spectrum: Spectrum, level: f32, flux: f32) -> MixContext {
+        MixContext {
+            bands: self.bands.map(|band| band.value),
+            raw_bands: spectrum.bands,
+            power: self.power.value,
+            power_level: spectrum.power,
+            bass: self.bass.value.max(self.bass_onset.previous),
+            bass_level: level,
+            bass_flux: flux,
+            flux: spectrum.flux,
+            kick: self.kick,
+            gains: self.gains,
+            routing: self.routing,
+            style: self.scene.current.style,
+            entrance: self.scene.current.entrance,
+            phase: self.scene.current.phase,
+            time: self.time,
+            bass_onset_ready: self.bass_onset.ready(spectrum.bass, spectrum.bass_flux),
+            wide_onset_ready: self.broadband_onset.ready(spectrum.power, spectrum.flux),
+        }
+    }
+
+    fn current_mix_context(&self) -> MixContext {
+        self.mix_context(
+            self.last_spectrum,
+            self.last_spectrum.bass,
+            self.last_spectrum.bass_flux,
+        )
     }
 
     fn push_hit(&mut self, kind: HitKind, strength: f32) {
@@ -1126,6 +1177,42 @@ impl Visualizer {
         }
     }
 
+    pub fn mixer(&self) -> &Mixer {
+        &self.mixer
+    }
+
+    /// The static graph dependencies plus every analysis value an extra mix
+    /// input feeds into this property.
+    pub fn property_dependencies(&self, property: Property) -> Vec<Dependency> {
+        let mut dependencies = property.dependencies().to_vec();
+        for point in property.mix_points() {
+            for (_, extra) in self.mixer.extras(*point) {
+                for dependency in input_dependencies(extra.input) {
+                    if !dependencies.contains(&dependency) {
+                        dependencies.push(dependency);
+                    }
+                }
+            }
+        }
+        dependencies
+    }
+
+    pub fn toggle_contribution_mix(&mut self, contribution: Contribution) -> Mix {
+        self.mixer.toggle_mode(contribution)
+    }
+
+    pub fn add_extra(&mut self, point: MixPoint) -> ExtraRef {
+        self.mixer.add_extra(point)
+    }
+
+    pub fn remove_extra(&mut self, extra: ExtraRef) {
+        self.mixer.remove_extra(extra);
+    }
+
+    pub fn toggle_adaptive(&mut self, target: EnvelopeTarget) {
+        self.shape_mut(target).toggle_adaptive();
+    }
+
     /// Current value of one adjustable computation parameter.
     pub fn parameter_value(&self, parameter: Parameter) -> f32 {
         match parameter {
@@ -1143,6 +1230,14 @@ impl Visualizer {
             Parameter::InputHigh(target) => self.shape(target).high,
             Parameter::InputCurve(target) => self.shape(target).curve.index() as f32,
             Parameter::InputAmount(target) => self.shape(target).amount,
+            Parameter::ExtraSource(extra) => self
+                .mixer
+                .extra(extra)
+                .input
+                .selectable_index()
+                .expect("extra inputs are picked from the selectable list")
+                as f32,
+            Parameter::ExtraGain(extra) => self.mixer.extra(extra).gain,
         }
     }
 
@@ -1183,6 +1278,13 @@ impl Visualizer {
             }
             Parameter::InputAmount(target) => {
                 self.shape_mut(target).amount = value;
+            }
+            Parameter::ExtraSource(extra) => {
+                self.mixer
+                    .set_extra_input(extra, Input::from_selectable(value.round() as usize));
+            }
+            Parameter::ExtraGain(extra) => {
+                self.mixer.set_extra_gain(extra, value);
             }
         }
     }
@@ -1284,8 +1386,10 @@ impl Visualizer {
             Property::Ripple => current.deformation.ripple,
             Property::Shear => current.deformation.shear,
             Property::Zoom => current.camera_zoom,
-            Property::Accent => self.bands[self.routing[BandComponent::Accent]].value,
-            Property::Line => self.bands[self.routing[BandComponent::Line]].value,
+            Property::Accent => self
+                .mixer
+                .value(MixPoint::Accent, &self.current_mix_context()),
+            Property::Line => current.line_energy,
             Property::Jitter => current.deformation.jitter,
             Property::Phase => current.phase_speed,
             Property::Kick => self.kick,
@@ -1448,7 +1552,9 @@ impl Visualizer {
                 strongest = Some(hit);
             }
         }
-        let accent = self.bands[self.routing[BandComponent::Accent]].value;
+        let accent = self
+            .mixer
+            .value(MixPoint::Accent, &self.current_mix_context());
         if let Some(hit) = strongest {
             self.handle_hit(hit, accent);
         }
@@ -1459,9 +1565,20 @@ impl Visualizer {
         let camera = Camera::new(viewport.0, viewport.1, zoom);
         let music = Music {
             bands: self.bands.map(|band| band.value),
+            raw_bands: self.last_spectrum.bands,
             power: self.power.value,
+            power_level: self.last_spectrum.power,
             bass: self.bass.value.max(self.bass_onset.previous),
+            bass_level: self.last_spectrum.bass,
+            bass_flux: self.last_spectrum.bass_flux,
+            flux: self.last_spectrum.flux,
             kick: self.kick,
+            bass_onset_ready: self
+                .bass_onset
+                .ready(self.last_spectrum.bass, self.last_spectrum.bass_flux),
+            wide_onset_ready: self
+                .broadband_onset
+                .ready(self.last_spectrum.power, self.last_spectrum.flux),
         };
         let width = (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * 1.4;
         self.lines.clear();
@@ -1471,6 +1588,7 @@ impl Visualizer {
             &music,
             &self.gains,
             &self.routing,
+            &self.mixer,
             exposure.start(),
             frame.end(),
             camera,
@@ -1724,14 +1842,47 @@ impl Default for Visualizer {
 #[derive(Clone, Copy)]
 struct Music {
     bands: [f32; BAND_COUNT],
+    raw_bands: [f32; BAND_COUNT],
     power: f32,
+    power_level: f32,
     bass: f32,
+    bass_level: f32,
+    bass_flux: f32,
+    flux: f32,
     kick: f32,
+    bass_onset_ready: bool,
+    wide_onset_ready: bool,
 }
 
 impl Music {
-    fn band(self, index: usize) -> f32 {
-        self.bands[index.min(BAND_COUNT - 1)]
+    fn context(
+        self,
+        style: Style,
+        gains: Gains,
+        routing: BandRouting,
+        entrance: f32,
+        phase: f32,
+        time: f32,
+    ) -> MixContext {
+        MixContext {
+            bands: self.bands,
+            raw_bands: self.raw_bands,
+            power: self.power,
+            power_level: self.power_level,
+            bass: self.bass,
+            bass_level: self.bass_level,
+            bass_flux: self.bass_flux,
+            flux: self.flux,
+            kick: self.kick,
+            gains,
+            routing,
+            style,
+            entrance,
+            phase,
+            time,
+            bass_onset_ready: self.bass_onset_ready,
+            wide_onset_ready: self.wide_onset_ready,
+        }
     }
 }
 
@@ -1861,7 +2012,7 @@ impl Onset {
         }
     }
 
-    fn observe(&mut self, value: f32, flux: f32, dt: f32, flux_gain: f32) -> Option<f32> {
+    fn observe(&mut self, value: f32, flux: f32, dt: f32) -> bool {
         self.cooldown = (self.cooldown - dt).max(0.0);
         let baseline = self.baseline;
         let blend = 1.0 - (-dt / 0.7).exp();
@@ -1873,10 +2024,17 @@ impl Onset {
             && value >= baseline * self.baseline_ratio + 0.015
         {
             self.cooldown = self.cooldown_time;
-            Some((value + flux * flux_gain).clamp(0.25, 1.5))
+            true
         } else {
-            None
+            false
         }
+    }
+
+    fn ready(&self, value: f32, flux: f32) -> bool {
+        self.cooldown == 0.0
+            && value >= self.threshold
+            && flux >= self.min_flux
+            && value >= self.baseline * self.baseline_ratio + 0.015
     }
 
     fn reset(&mut self) {
@@ -1936,6 +2094,7 @@ impl Scene {
         music: &Music,
         gains: &Gains,
         routing: &BandRouting,
+        mixer: &Mixer,
         exposure_start: AudioTime,
         frame_end: AudioTime,
         camera: Camera,
@@ -1948,8 +2107,15 @@ impl Scene {
         out_ribbons: &mut Vec<RibbonInstance>,
     ) {
         if self.outgoing.is_some() {
-            let rate =
-                1.2 + gains[Gain::XfadePower] * music.power + gains[Gain::XfadeKick] * music.kick;
+            let context = music.context(
+                self.current.style,
+                *gains,
+                *routing,
+                self.current.entrance,
+                self.current.phase,
+                time,
+            );
+            let rate = mixer.value(MixPoint::CrossfadeRate, &context);
             self.transition = (self.transition + dt * rate).min(1.0);
             let progress = smoothstep(self.transition);
             if let Some(outgoing) = &mut self.outgoing {
@@ -1964,6 +2130,7 @@ impl Scene {
             music,
             gains,
             routing,
+            mixer,
             exposure_start,
             frame_end,
             camera,
@@ -1981,6 +2148,7 @@ impl Scene {
                 music,
                 gains,
                 routing,
+                mixer,
                 exposure_start,
                 frame_end,
                 camera,
@@ -2015,6 +2183,7 @@ struct FigureRuntime {
     phase_speed: f32,
     camera_zoom: f32,
     morph_rate: f32,
+    line_energy: f32,
     entrance: f32,
     opacity: f32,
     history: VecDeque<PoseSnapshot>,
@@ -2066,6 +2235,7 @@ impl FigureRuntime {
             phase_speed: 0.0,
             camera_zoom: 1.0,
             morph_rate: 1.1,
+            line_energy: 0.6,
             entrance: opacity,
             opacity,
             history: VecDeque::with_capacity(MAX_HISTORY),
@@ -2093,6 +2263,7 @@ impl FigureRuntime {
         music: &Music,
         gains: &Gains,
         routing: &BandRouting,
+        mixer: &Mixer,
         exposure_start: AudioTime,
         frame_end: AudioTime,
         camera: Camera,
@@ -2104,70 +2275,54 @@ impl FigureRuntime {
         out: &mut Vec<LineInstance>,
         out_ribbons: &mut Vec<RibbonInstance>,
     ) {
-        self.entrance =
-            (self.entrance + dt * (1.4 + gains[Gain::EntrancePower] * music.power)).min(1.0);
-        self.morph_rate = 1.1 + gains[Gain::MorphPower] * music.power;
+        let context = music.context(
+            self.style,
+            *gains,
+            *routing,
+            self.entrance,
+            self.phase,
+            time,
+        );
+        let entrance_rate = mixer.value(MixPoint::EntranceRate, &context);
+        self.entrance = (self.entrance + dt * entrance_rate).min(1.0);
+        self.morph_rate = mixer.value(MixPoint::MorphRate, &context);
         self.style.approach(self.target_style, dt, self.morph_rate);
-        let spin = (0.16
-            + gains[Gain::SpinPower] * music.power
-            + gains[Gain::SpinBand] * music.band(routing[BandComponent::Spin]))
-            * self.style.phase_rate;
+        let context = music.context(
+            self.style,
+            *gains,
+            *routing,
+            self.entrance,
+            self.phase,
+            time,
+        );
+        let spin = mixer.value(MixPoint::SpinSpeed, &context);
         self.spin_speed = spin;
         self.pose.yaw =
             (self.pose.yaw + dt * spin * (0.3 + self.style.axis.x.abs())).rem_euclid(TAU);
-        let pitch_target = -0.24
-            + music.band(routing[BandComponent::Pitch])
-                * gains[Gain::PitchBand]
-                * self.style.axis.y
-            + (time * 0.47 + self.phase).sin() * gains[Gain::PitchOscillator];
-        self.pose.pitch = self.pitch.approach(
-            pitch_target,
-            dt,
-            1.6 + gains[Gain::PitchPowerRate] * music.power,
-        );
-        let roll_target =
-            music.band(routing[BandComponent::Roll]) * gains[Gain::RollBand] * self.style.axis.z;
-        self.pose.roll = self.roll.approach(
-            roll_target,
-            dt,
-            1.3 + gains[Gain::RollPowerRate] * music.power,
-        );
-        self.phase_speed = (0.35
-            + gains[Gain::PhasePower] * music.power
-            + gains[Gain::PhaseBand] * music.band(routing[BandComponent::Phase]))
-            * self.style.phase_rate;
+        let pitch_target = mixer.value(MixPoint::PitchTarget, &context);
+        let pitch_rate = mixer.value(MixPoint::PitchRate, &context);
+        self.pose.pitch = self.pitch.approach(pitch_target, dt, pitch_rate);
+        let roll_target = mixer.value(MixPoint::RollTarget, &context);
+        let roll_rate = mixer.value(MixPoint::RollRate, &context);
+        self.pose.roll = self.roll.approach(roll_target, dt, roll_rate);
+        self.phase_speed = mixer.value(MixPoint::PhaseSpeed, &context);
         self.phase = (self.phase + dt * self.phase_speed).rem_euclid(PHASE_PERIOD);
-        let entrance_scale = 0.62 + gains[Gain::PulseEntrance] * smoothstep(self.entrance);
-        let camera_zoom = 1.0 + music.band(routing[BandComponent::Zoom]) * gains[Gain::ZoomBand];
+        let entrance_scale = mixer.value(MixPoint::PulseEntrance, &context);
+        let camera_zoom = mixer.value(MixPoint::PulseCamera, &context);
         self.camera_zoom = camera_zoom;
-        let scale = entrance_scale
-            * (0.9
-                + gains[Gain::PulsePower] * music.power
-                + gains[Gain::PulseBass] * music.bass
-                + gains[Gain::PulseKick] * music.kick)
-            * self.style.zoom_bias
-            * camera_zoom;
+        let energy = mixer.value(MixPoint::PulseEnergy, &context);
+        let scale = entrance_scale * energy * self.style.zoom_bias * camera_zoom;
         self.pose.scale = soft_saturate(scale, 1.45).max(0.35);
         let deformation = Deformation {
-            twist: music.band(routing[BandComponent::Twist])
-                * gains[Gain::TwistBand]
-                * self.style.deform_bias
-                * self.style.twist_sign,
-            bulge: music.band(routing[BandComponent::Bulge])
-                * gains[Gain::BulgeBand]
-                * self.style.deform_bias,
-            ripple: music.band(routing[BandComponent::Ripple])
-                * gains[Gain::RippleBand]
-                * self.style.deform_bias,
-            shear: music.band(routing[BandComponent::Shear])
-                * gains[Gain::ShearBand]
-                * self.style.shear_sign,
-            jitter: music.band(routing[BandComponent::Jitter])
-                * gains[Gain::JitterBand]
-                * self.style.jitter_bias,
+            twist: mixer.value(MixPoint::Twist, &context),
+            bulge: mixer.value(MixPoint::Bulge, &context),
+            ripple: mixer.value(MixPoint::Ripple, &context),
+            shear: mixer.value(MixPoint::Shear, &context),
+            jitter: mixer.value(MixPoint::Jitter, &context),
             phase: self.phase,
         };
         self.deformation = deformation;
+        self.line_energy = mixer.value(MixPoint::Line, &context);
         self.world_vertices.clear();
         self.vertices.clear();
         for index in 0..self.wireframe.vertex_count() {
@@ -2205,10 +2360,9 @@ impl FigureRuntime {
             self.history.pop_front();
         }
         let exposure = self.exposure_poses(exposure_start, frame_end);
-        let line_energy = music.band(routing[BandComponent::Line]);
         for (index, current) in self.current.iter().enumerate() {
             let rgb = self.tint.edge_rgb(index, palette);
-            let base_opacity = (0.6 + gains[Gain::LineEnergy] * line_energy).max(near_opacity);
+            let base_opacity = self.line_energy.max(near_opacity);
             let alpha = self.opacity * base_opacity;
             let width = base_width * (1.0 + music.kick * 0.25);
             let alpha = alpha.clamp(0.0, 1.0);
@@ -2482,8 +2636,8 @@ fn lerp_line(from: LineGeometry, to: LineGeometry, fraction: f32) -> LineGeometr
             + (to.end_depth_opacity - from.end_depth_opacity) * fraction,
     }
 }
-#[derive(Clone, Copy)]
-struct Style {
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Style {
     axis: Vec3,
     twist_sign: f32,
     shear_sign: f32,
@@ -3340,6 +3494,43 @@ mod tests {
         assert_eq!(spin_gain.range().1, 10.0);
         visualizer.set_parameter(spin_gain, 100.0);
         assert_eq!(visualizer.parameter_value(spin_gain), 10.0);
+    }
+
+    #[test]
+    fn mix_mode_and_extra_inputs_change_the_live_property() {
+        let mut visualizer = Visualizer::new();
+        let palette = Palette::from_theme(crate::theme::ThemeId::default());
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        visualizer.debug_music([0.6; BAND_COUNT], 0.6);
+        let update = |visualizer: &mut Visualizer, frame: AudioInterval| {
+            visualizer.update(
+                frame,
+                ShutterFrames::try_from(2.0).unwrap(),
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+        };
+        update(&mut visualizer, frame);
+        let plain = visualizer.debug_snapshot().properties[Property::Spin.index()];
+
+        let power = Contribution::Fixed(MixPoint::SpinSpeed, 0);
+        visualizer.toggle_contribution_mix(power);
+        frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        update(&mut visualizer, frame);
+        let mixed = visualizer.debug_snapshot().properties[Property::Spin.index()];
+        assert_ne!(plain, mixed);
+
+        let extra = visualizer.add_extra(MixPoint::SpinSpeed);
+        visualizer.set_parameter(Parameter::ExtraGain(extra), 2.0);
+        frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        update(&mut visualizer, frame);
+        let modulated = visualizer.debug_snapshot().properties[Property::Spin.index()];
+        assert_ne!(mixed, modulated);
+        visualizer.remove_extra(extra);
+        assert_eq!(visualizer.mixer().extras(MixPoint::SpinSpeed).count(), 0);
     }
 
     #[test]

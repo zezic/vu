@@ -178,6 +178,12 @@ The inspector follows the selection:
   `switch: level & flux, gates KICK`
 - four or more dependency graphs wrap into two rows so their traces and captions
   stay legible
+- the property output graph carries small maximum buttons along its bottom
+  edge: `1`, `2`, `4`, `8`, and `16`. Selecting one sets that graph's upper
+  bound while keeping the property's lower bound; clicking the active value
+  again restores the property's default range. Choices that would leave no
+  span above the lower bound are dimmed. The choice is remembered per
+  property while the debug panel is open and resets with the panel toggle.
 - selecting a property also opens its computation tree on the left side of the
   screen, clear of the hotkey cheatsheet. If the window is too narrow for both
   panes, the graph inspector gives up width first instead of hiding the tree.
@@ -186,6 +192,20 @@ The inspector follows the selection:
   switches with their thresholds, baselines, flux gates, and cooldown. Analysis
   leaves show their live values, and onset leaves report `IDLE`, `ARMED`, or
   `COOLDOWN`. Tree rows use the same line height as the analyzer band list.
+- every mix point is editable at runtime. Component rows carry a mix badge at
+  their right edge: `+` means the term is added to the mix point and `×` means
+  it multiplies the result. Clicking the badge switches the mode in place;
+  selecting the row also exposes a `MIX MODE` button. A point's primary
+  operation keeps its familiar shape: toggling a term in a sum point turns it
+  into a factor of the sum, and toggling a term in a product point turns it
+  into an additive offset. The tree's value and the live scene respond
+  immediately.
+- selecting a mix point branch instead of a component exposes
+  `+ ADD INPUT TO <POINT>`. The new row starts as a `PWR ENVELOPE` term with a
+  small gain and additive mixing; selecting it exposes an `INPUT` selector for
+  every band, envelope, flux, onset, kick, phase clock, and style value, plus
+  its own `EXTRA GAIN` slider, `MIX MODE` button, and `REMOVE EXTRA INPUT`
+  button. Any number of extra inputs can be added to a point.
 - clicking a component row opens its adjustable parameters at the bottom of the
   tree pane: band source, envelope attack/release, the component's multiplier
   gain in the selected property, the kick decay, or the corresponding style
@@ -200,6 +220,11 @@ The inspector follows the selection:
   smoothstep) before envelope smoothing. A small `INPUT SHAPE` plot previews the
   selected curve across the low/high reference span, with a linear reference
   diagonal.
+- `AUTO REFS` turns on adaptive reference tuning for one shaped input. The high
+  reference falls slowly toward quiet material and is bumped up quickly by
+  peaks; the low reference lifts slowly and is pushed down quickly by low
+  values. Both references stay ordered and inside 0..1, and the `INPUT SHAPE`
+  preview follows them.
 - attack uses a logarithmic slider over 0.1 to 50.0; release uses 0.1 to 20.0 so the short
   envelope times get most of the slider travel. Slider tracks and line-shaped
   thumbs are tall enough for comfortable dragging.
@@ -208,8 +233,9 @@ The inspector follows the selection:
   pane used by ordinary components. No separate pane is created.
 - threshold changes made with sliders update the HUD readouts and persist through
   the same config field as the `G` / `H` and `J` / `K` hotkeys. Envelope rates,
-  kick decay, style values, component gains, band routing, and input shaping are
-  runtime tuning and reset on restart.
+  kick decay, style values, component gains, band routing, input shaping, mix
+  modes, extra inputs, and adaptive reference state are runtime tuning and reset
+  on restart.
 - onset graphs carry the detector baseline and threshold, and every graph uses
   the same four-second display-rate history
 
