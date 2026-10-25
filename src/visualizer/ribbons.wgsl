@@ -21,6 +21,10 @@ struct VertexOutput {
     @location(3) @interpolate(flat) end_color: vec4<f32>,
     @location(4) @interpolate(flat) style: vec4<f32>,
     @location(5) blend_color: vec4<f32>,
+    @location(6) @interpolate(flat) tri_a: vec2<f32>,
+    @location(7) @interpolate(flat) tri_b: vec2<f32>,
+    @location(8) @interpolate(flat) tri_c: vec2<f32>,
+    @location(9) @interpolate(flat) third_color: vec4<f32>,
 }
 
 @vertex
@@ -51,6 +55,10 @@ fn ribbon_vertex(
             instance.end_color,
             instance.style,
             colors[vertex_index],
+            instance.start.xy,
+            instance.start.zw,
+            instance.end.xy,
+            instance.third_color,
         );
     }
     let corners = array<vec2<f32>, 6>(
@@ -79,6 +87,10 @@ fn ribbon_vertex(
         instance.end_color,
         instance.style,
         vec4(0.0),
+        vec2(0.0),
+        vec2(0.0),
+        vec2(0.0),
+        vec4(0.0),
     );
 }
 
@@ -96,6 +108,25 @@ fn segment_distance(point: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
 @fragment
 fn ribbon_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
     if vertex.style.y > 0.5 {
+        if vertex.style.z > 0.5 {
+            let edge_a = vertex.tri_b - vertex.tri_a;
+            let edge_b = vertex.tri_c - vertex.tri_a;
+            let area = cross2(edge_a, edge_b);
+            if abs(area) < 1e-6 {
+                return vec4(0.0);
+            }
+            let offset = vertex.position.xy - vertex.tri_a;
+            let am_weight = cross2(offset, edge_b) / area;
+            let end_weight = cross2(edge_a, offset) / area;
+            let x_weight = 1.0 - am_weight - end_weight;
+            let peak = x_weight * vertex.start_color.a
+                + am_weight * vertex.end_color.a
+                + end_weight * vertex.third_color.a;
+            let median_weight = am_weight + end_weight;
+            let mask = select(0.0, am_weight / max(median_weight, 1e-6), median_weight > 1e-6);
+            let alpha = peak * mask;
+            return vec4(vertex.start_color.rgb * alpha, alpha);
+        }
         let alpha = vertex.blend_color.a;
         return vec4(vertex.blend_color.rgb * alpha, alpha);
     }

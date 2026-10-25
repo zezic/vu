@@ -312,6 +312,14 @@ impl RibbonInstance {
         }
     }
 
+    /// A crossing-fan fill triangle. The first vertex is the static X, the
+    /// second is AM/BM, and the third is the transparent endpoint.
+    fn fan_triangle(points: [Vec2; 3], colors: [[f32; 4]; 3], width: f32) -> Self {
+        let mut ribbon = Self::triangle(points, colors, width);
+        ribbon.style[2] = 1.0;
+        ribbon
+    }
+
     /// A single alpha-interpolated triangle, used for non-convex sweeps and the
     /// four crossing-fan regions. The three vertices carry independent colors.
     fn triangle(points: [Vec2; 3], colors: [[f32; 4]; 3], width: f32) -> Self {
@@ -1482,30 +1490,42 @@ impl FigureRuntime {
             if let Some(crossing) =
                 segment_intersection(first.start, first.end, last.start, last.end)
             {
+                let end_color = [rgb[0], rgb[1], rgb[2], 0.0];
                 let x_color = [rgb[0], rgb[1], rgb[2], alpha];
                 let am_color = [rgb[0], rgb[1], rgb[2], fade(distance_a)];
                 let bm_color = [rgb[0], rgb[1], rgb[2], fade(distance_b)];
-                let end_color = [rgb[0], rgb[1], rgb[2], 0.0];
-                out_ribbons.push(RibbonInstance::triangle(
+                // The fan shader zeros the endpoint-to-X edges. Constant-width
+                // AM-X and BM-X strokes meet at X so the crossing cannot collapse
+                // to zero thickness.
+                out_ribbons.push(RibbonInstance::fan_triangle(
                     [crossing, middle.start, first.start],
                     [x_color, am_color, end_color],
                     width,
                 ));
-                out_ribbons.push(RibbonInstance::triangle(
+                out_ribbons.push(RibbonInstance::fan_triangle(
                     [crossing, middle.start, last.start],
                     [x_color, am_color, end_color],
                     width,
                 ));
-                out_ribbons.push(RibbonInstance::triangle(
+                out_ribbons.push(RibbonInstance::fan_triangle(
                     [crossing, middle.end, first.end],
                     [x_color, bm_color, end_color],
                     width,
                 ));
-                out_ribbons.push(RibbonInstance::triangle(
+                out_ribbons.push(RibbonInstance::fan_triangle(
                     [crossing, middle.end, last.end],
                     [x_color, bm_color, end_color],
                     width,
                 ));
+                push_gradient_stroke(
+                    out_ribbons,
+                    middle.start,
+                    crossing,
+                    am_color,
+                    x_color,
+                    width,
+                );
+                push_gradient_stroke(out_ribbons, middle.end, crossing, bm_color, x_color, width);
                 continue;
             }
 
@@ -1679,6 +1699,36 @@ impl FigureRuntime {
 struct ExposurePoses {
     first: Vec<LineGeometry>,
     last: Vec<LineGeometry>,
+}
+
+/// A constant-width quad stroke with independent opacity at each end.
+fn push_gradient_stroke(
+    out: &mut Vec<RibbonInstance>,
+    start: Vec2,
+    end: Vec2,
+    start_color: [f32; 4],
+    end_color: [f32; 4],
+    width: f32,
+) {
+    let direction = (end - start).normalized();
+    if direction.length() <= 0.0 {
+        return;
+    }
+    let normal = direction.perpendicular() * (width * 0.5);
+    let a = start + normal;
+    let b = start - normal;
+    let c = end + normal;
+    let d = end - normal;
+    out.push(RibbonInstance::triangle(
+        [a, b, c],
+        [start_color, start_color, end_color],
+        width,
+    ));
+    out.push(RibbonInstance::triangle(
+        [b, d, c],
+        [start_color, end_color, end_color],
+        width,
+    ));
 }
 
 fn segment_intersection(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> Option<Vec2> {
@@ -1917,18 +1967,17 @@ mod tests {
         let ramps = frame
             .ribbons
             .iter()
-            .filter(|ribbon| (ribbon.start_color[3] == 0.0) != (ribbon.end_color[3] == 0.0))
+            .filter(|ribbon| {
+                let alphas = [
+                    ribbon.start_color[3],
+                    ribbon.end_color[3],
+                    ribbon.third_color[3],
+                ];
+                alphas.iter().any(|alpha| *alpha > 0.0)
+                    && (alphas[0] != alphas[1] || alphas[1] != alphas[2])
+            })
             .count();
         assert!(ramps > 0);
-        assert!(frame.ribbons.iter().all(|ribbon| {
-            let alphas = [
-                ribbon.start_color[3],
-                ribbon.end_color[3],
-                ribbon.third_color[3],
-            ];
-            !alphas.iter().any(|alpha| *alpha > 0.0)
-                || (alphas.contains(&0.0) && alphas.iter().any(|alpha| *alpha > 0.0))
-        }));
         assert!(frame.lines.iter().all(|line| line.color[3] > 0.0));
         assert!(frame
             .lines

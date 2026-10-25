@@ -88,19 +88,22 @@ vertex displacement grows, so a fast edge spreads into a fainter blur while a
 slow edge stays crisp.
 
 When the first and last edge lines intersect at `X`, the sweep becomes four
-triangles: `X-A1-AM`, `X-AM-A2`, `X-B1-BM`, and `X-BM-B2`, where `AM` and `BM`
-are the median points of the two vertex trajectories. Their vertex opacities are:
+filled triangles: `X-A1-AM`, `X-AM-A2`, `X-B1-BM`, and `X-BM-B2`, where `AM` and
+`BM` are the median points of the two vertex trajectories.
 
-- `X`: 100%
-- `AM`: `U`, falling with the `A1-A2` travel
-- `BM`: `V`, falling with the `B1-B2` travel
-- `A1`, `A2`, `B1`, `B2`: 0%
+The fan shader uses the barycentric weights around `X` to build the exact edge
+field:
 
-Each triangle interpolates its three vertex opacities, so the edges read
-`0 -> U -> 0` along `A1-AM-A2` and `B1-BM-B2`, `U -> 100` along `AM-X`, and
-`0 -> 100` along each endpoint-to-`X` edge. The intersection stays fully opaque
-while the active extremes fade to zero; no median line body is drawn through the
-crossing. Non-convex fallback triangles use the same per-vertex interpolation.
+- `A1-X`, `A2-X`, `B1-X`, and `B2-X` are fully transparent.
+- `AM-X` and `BM-X` ramp from `U` / `V` at the medians to 100% at the `X` limit.
+- `A1-AM-A2` and `B1-BM-B2` fade from 0% at the endpoints through `U` / `V` at
+  the medians.
+- `AM-X` and `BM-X` also carry constant-width gradient strokes that meet at `X`.
+  These strokes provide the minimum intersection thickness; there is no separate
+  square or round marker at the crossing.
+
+`U` falls with the `A1-A2` travel and `V` falls with the `B1-B2` travel.
+Non-convex fallback triangles use per-vertex interpolation.
 
 There is no convexity or small-displacement gate on the two ramps: any edge with
 nonzero screen displacement emits both. An edge with zero screen displacement
