@@ -714,6 +714,11 @@ pub struct Meter {
     text_scale: VisualizerTextScale,
     text_scale_readout: Readout,
     text_scale_value: Text,
+    onset_thresholds: visualizer::OnsetThresholds,
+    bass_threshold_readout: Readout,
+    bass_threshold_value: Text,
+    broadband_threshold_readout: Readout,
+    broadband_threshold_value: Text,
     diagnosis_text: Option<Text>,
     diagnosis_anchor: Point,
     diagnosis_color: Color,
@@ -775,7 +780,17 @@ impl Meter {
         let text_scale_readout = Readout::inline(&mut fonts, ["[-]", "[+]"]);
         let text_scale_value =
             Readout::value(&mut fonts, &format!("Text {:>3}%", text_scale.percent()));
-        let visualizer = Visualizer::new();
+        let onset_thresholds = config.onset_thresholds;
+        let mut visualizer = Visualizer::new();
+        visualizer.set_onset_thresholds(onset_thresholds);
+        let bass_threshold_readout = Readout::new(&mut fonts, "Bass THR", ["[G]", "[H]"]);
+        let bass_threshold_value =
+            Readout::value(&mut fonts, &format!("{:.2}", onset_thresholds.bass.value()));
+        let broadband_threshold_readout = Readout::new(&mut fonts, "Wide THR", ["[J]", "[K]"]);
+        let broadband_threshold_value = Readout::value(
+            &mut fonts,
+            &format!("{:.2}", onset_thresholds.broadband.value()),
+        );
         let scene_name = visualizer.scene_name();
         let mode_readout = Readout::gauge_inline(&mut fonts, ["[M]"]);
         let mode_value = Readout::gauge_value(&mut fonts, config.mode.name());
@@ -838,6 +853,11 @@ impl Meter {
             text_scale,
             text_scale_readout,
             text_scale_value,
+            onset_thresholds,
+            bass_threshold_readout,
+            bass_threshold_value,
+            broadband_threshold_readout,
+            broadband_threshold_value,
             diagnosis_text: None,
             diagnosis_anchor: Point::ORIGIN,
             diagnosis_color: Color::new([1.0, 1.0, 1.0, 1.0]),
@@ -1032,6 +1052,21 @@ impl Meter {
         self.text_scale = scale;
         self.text_scale_value =
             Readout::value(&mut self.fonts, &format!("Text {:>3}%", scale.percent()));
+        self.face_settings = None;
+    }
+
+    pub fn set_onset_thresholds(&mut self, thresholds: visualizer::OnsetThresholds) {
+        if self.onset_thresholds == thresholds {
+            return;
+        }
+        self.onset_thresholds = thresholds;
+        self.visualizer.set_onset_thresholds(thresholds);
+        self.bass_threshold_value =
+            Readout::value(&mut self.fonts, &format!("{:.2}", thresholds.bass.value()));
+        self.broadband_threshold_value = Readout::value(
+            &mut self.fonts,
+            &format!("{:.2}", thresholds.broadband.value()),
+        );
         self.face_settings = None;
     }
 
@@ -1230,6 +1265,18 @@ impl Meter {
                     scene,
                     top_left * Affine::translate((0.0, 44.0)),
                     frame_value,
+                    &hud_colors,
+                );
+                self.bass_threshold_readout.draw_left_aligned(
+                    scene,
+                    top_left * Affine::translate((0.0, 88.0)),
+                    &self.bass_threshold_value,
+                    &hud_colors,
+                );
+                self.broadband_threshold_readout.draw_left_aligned(
+                    scene,
+                    top_left * Affine::translate((0.0, 132.0)),
+                    &self.broadband_threshold_value,
                     &hud_colors,
                 );
                 if self.debug {

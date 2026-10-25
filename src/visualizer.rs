@@ -12,12 +12,14 @@ use vello::peniko::Color;
 use crate::{
     audio::timeline::{AudioInterval, AudioTime},
     config::ShutterFrames,
+    frame_schedule::Adjustment,
     shutter::ShutterWindow,
     theme::{mix, Accent, MeterColors, ThemeId},
 };
 
 use geometry::{
-    soft_saturate, Camera, Deformation, FigureKind, Pose, Projected, Vec2, Vec3, Wireframe,
+    soft_saturate, Camera, Deformation, DepthOpacity, FigureKind, Pose, Projected, Vec2, Vec3,
+    Wireframe,
 };
 pub use spectrum::BAND_COUNT;
 use spectrum::{Spectrum, SpectrumAnalyzer};
@@ -59,23 +61,97 @@ impl Presentation {
     }
 }
 
+/// One onset detector threshold, normalized to 0..1.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct OnsetThreshold(f32);
+
+impl OnsetThreshold {
+    const STEP: f32 = 0.01;
+
+    pub fn value(self) -> f32 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        let delta = match adjustment {
+            Adjustment::Decrease => -Self::STEP,
+            Adjustment::Increase => Self::STEP,
+        };
+        Self((self.0 + delta).clamp(0.0, 1.0))
+    }
+}
+
+impl TryFrom<f32> for OnsetThreshold {
+    type Error = anyhow::Error;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        anyhow::ensure!(
+            value.is_finite() && (0.0..=1.0).contains(&value),
+            "onset thresholds must be finite and between 0 and 1"
+        );
+        Ok(Self(value))
+    }
+}
+
+impl From<OnsetThreshold> for f32 {
+    fn from(value: OnsetThreshold) -> Self {
+        value.0
+    }
+}
+
+const BASS_THRESHOLD_DEFAULT: f32 = 0.17;
+const BROADBAND_THRESHOLD_DEFAULT: f32 = 0.22;
+
+/// The bass and broadband onset thresholds used for visualizer hit detection.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OnsetThresholds {
+    pub bass: OnsetThreshold,
+    pub broadband: OnsetThreshold,
+}
+
+impl Default for OnsetThresholds {
+    fn default() -> Self {
+        Self {
+            bass: OnsetThreshold(BASS_THRESHOLD_DEFAULT),
+            broadband: OnsetThreshold(BROADBAND_THRESHOLD_DEFAULT),
+        }
+    }
+}
+
 /// One exposure-swept line, in physical pixels, uploaded as a vertex instance.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LineInstance {
     /// Start and end in physical pixels: a.xy, b.xy.
     pub endpoints: [f32; 4],
-    /// Tint and opacity; the shader premultiplies before blending.
-    pub color: [f32; 4],
+    /// Tint and opacity at the start endpoint; the shader premultiplies before
+    /// blending.
+    pub start_color: [f32; 4],
+    /// Tint and opacity at the end endpoint.
+    pub end_color: [f32; 4],
     /// Stroke width, triangle fallback flag, static-center flag, padding.
     pub style: [f32; 4],
 }
 
 impl LineInstance {
     fn new(start: Vec2, end: Vec2, color: [f32; 4], width: f32) -> Self {
+        Self::shaded(start, end, color, color, width)
+    }
+
+    fn shaded(
+        start: Vec2,
+        end: Vec2,
+        start_color: [f32; 4],
+        end_color: [f32; 4],
+        width: f32,
+    ) -> Self {
         Self {
             endpoints: [start.x, start.y, end.x, end.y],
-            color,
+            start_color,
+            end_color,
             style: [width, 0.0, 0.0, 0.0],
         }
     }
@@ -456,6 +532,7 @@ impl Visualizer {
     pub fn new() -> Self {
         let bands =
             std::array::from_fn(|index| Envelope::new(14.0, 5.0 + 5.0 * index as f32 / 15.0));
+        let thresholds = OnsetThresholds::default();
         let mut rng = Rng::new(0x005e_ed0f_7e5e_1e55u64);
         let scene = Scene::new(&mut rng);
         Self {
@@ -464,8 +541,8 @@ impl Visualizer {
             power: Envelope::new(18.0, 4.5),
             bass: Envelope::new(90.0, 7.0),
             treble: Envelope::new(16.0, 3.5),
-            bass_onset: Onset::bass(),
-            broadband_onset: Onset::broadband(),
+            bass_onset: Onset::bass(thresholds.bass),
+            broadband_onset: Onset::broadband(thresholds.broadband),
             pending_hits: VecDeque::with_capacity(MAX_PENDING_HITS),
             rng,
             scene,
@@ -595,6 +672,18 @@ impl Visualizer {
 
     pub fn palette(&self) -> Palette {
         self.palette
+    }
+
+    pub fn onset_thresholds(&self) -> OnsetThresholds {
+        OnsetThresholds {
+            bass: OnsetThreshold(self.bass_onset.threshold),
+            broadband: OnsetThreshold(self.broadband_onset.threshold),
+        }
+    }
+
+    pub fn set_onset_thresholds(&mut self, thresholds: OnsetThresholds) {
+        self.bass_onset.threshold = thresholds.bass.value();
+        self.broadband_onset.threshold = thresholds.broadband.value();
     }
 
     pub fn diagnosis(&self) -> Option<&DiagnosisReadout> {
@@ -1093,24 +1182,24 @@ struct Onset {
 }
 
 impl Onset {
-    fn bass() -> Self {
+    fn bass(threshold: OnsetThreshold) -> Self {
         Self {
             previous: 0.0,
             baseline: 0.0,
             cooldown: 0.0,
-            threshold: 0.17,
+            threshold: threshold.value(),
             min_flux: 0.035,
             baseline_ratio: 1.08,
             cooldown_time: 0.11,
         }
     }
 
-    fn broadband() -> Self {
+    fn broadband(threshold: OnsetThreshold) -> Self {
         Self {
             previous: 0.0,
             baseline: 0.0,
             cooldown: 0.0,
-            threshold: 0.22,
+            threshold: threshold.value(),
             min_flux: 0.03,
             baseline_ratio: 1.1,
             cooldown_time: 0.15,
@@ -1276,6 +1365,8 @@ struct PoseSnapshot {
 struct LineGeometry {
     start: Vec2,
     end: Vec2,
+    start_depth_opacity: f32,
+    end_depth_opacity: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -1374,6 +1465,7 @@ impl FigureRuntime {
             self.vertices.push(camera.project(world, self.pose));
         }
         self.update_kinematics(dt);
+        let depth_opacity = DepthOpacity::new(self.vertices.iter().map(|vertex| vertex.depth));
         self.current.clear();
         self.current
             .extend(self.wireframe.edges().iter().map(|edge| {
@@ -1382,6 +1474,8 @@ impl FigureRuntime {
                 LineGeometry {
                     start: a.screen,
                     end: b.screen,
+                    start_depth_opacity: depth_opacity.factor(a.depth),
+                    end_depth_opacity: depth_opacity.factor(b.depth),
                 }
             }));
         if self.history.len() == MAX_HISTORY {
@@ -1405,12 +1499,15 @@ impl FigureRuntime {
             let alpha = self.opacity * (0.6 + 0.4 * line_energy);
             let width = base_width * (1.0 + music.kick * 0.25);
             let alpha = alpha.clamp(0.0, 1.0);
+            let start_alpha = alpha * current.start_depth_opacity;
+            let end_alpha = alpha * current.end_depth_opacity;
 
             let Some(exposure) = &exposure else {
-                out.push(LineInstance::new(
+                out.push(LineInstance::shaded(
                     current.start,
                     current.end,
-                    [rgb[0], rgb[1], rgb[2], alpha],
+                    [rgb[0], rgb[1], rgb[2], start_alpha],
+                    [rgb[0], rgb[1], rgb[2], end_alpha],
                     width,
                 ));
                 continue;
@@ -1421,7 +1518,11 @@ impl FigureRuntime {
             let distance_a = (last.start - first.start).length();
             let distance_b = (last.end - first.end).length();
             let movement = distance_a.max(distance_b);
-            let fade = |distance: f32| alpha * (0.35 + 0.65 * width / (width + distance));
+            let fade = |distance: f32| 0.35 + 0.65 * width / (width + distance);
+            let start_alpha = alpha * fade(distance_a) * middle.start_depth_opacity;
+            let end_alpha = alpha * fade(distance_b) * middle.end_depth_opacity;
+            let peak_x_alpha =
+                alpha * (middle.start_depth_opacity + middle.end_depth_opacity) * 0.5;
 
             if segment_intersection(first.start, first.end, last.start, last.end).is_some() {
                 let direction = (middle.end - middle.start).normalized();
@@ -1445,43 +1546,46 @@ impl FigureRuntime {
                 let x1 = (l_top + r_top) * 0.5;
                 let x2 = (l_bottom + r_bottom) * 0.5;
                 let clear = [rgb[0], rgb[1], rgb[2], 0.0];
-                let am = [rgb[0], rgb[1], rgb[2], fade(distance_a)];
-                let bm = [rgb[0], rgb[1], rgb[2], fade(distance_b)];
-                let peak = [rgb[0], rgb[1], rgb[2], alpha];
+                let am = [rgb[0], rgb[1], rgb[2], start_alpha];
+                let bm = [rgb[0], rgb[1], rgb[2], end_alpha];
+                let peak_x = [rgb[0], rgb[1], rgb[2], peak_x_alpha];
 
                 // The body is two flat-capped quads; the shared long-edge
                 // gradients are the same U -> X -> V ramps as the wings.
                 out_ribbons.push(RibbonInstance::triangle(
                     [l_top, l_bottom, x2],
-                    [am, am, peak],
+                    [am, am, peak_x],
                 ));
-                out_ribbons.push(RibbonInstance::triangle([l_top, x2, x1], [am, peak, peak]));
+                out_ribbons.push(RibbonInstance::triangle(
+                    [l_top, x2, x1],
+                    [am, peak_x, peak_x],
+                ));
                 out_ribbons.push(RibbonInstance::triangle(
                     [x1, x2, r_bottom],
-                    [peak, peak, bm],
+                    [peak_x, peak_x, bm],
                 ));
                 out_ribbons.push(RibbonInstance::triangle(
                     [x1, r_bottom, r_top],
-                    [peak, bm, bm],
+                    [peak_x, bm, bm],
                 ));
                 // Top wings attach to the top long edge and meet at X1. Their
                 // outer-to-X edges are masked to zero by the wing shader.
                 out_ribbons.push(RibbonInstance::wing_triangle(
                     [first.start, l_top, x1],
-                    [clear, am, peak],
+                    [clear, am, peak_x],
                 ));
                 out_ribbons.push(RibbonInstance::wing_triangle(
                     [last.end, r_top, x1],
-                    [clear, bm, peak],
+                    [clear, bm, peak_x],
                 ));
                 // Bottom wings attach to the bottom long edge and meet at X2.
                 out_ribbons.push(RibbonInstance::wing_triangle(
                     [last.start, l_bottom, x2],
-                    [clear, am, peak],
+                    [clear, am, peak_x],
                 ));
                 out_ribbons.push(RibbonInstance::wing_triangle(
                     [first.end, r_bottom, x2],
-                    [clear, bm, peak],
+                    [clear, bm, peak_x],
                 ));
                 continue;
             }
@@ -1507,34 +1611,35 @@ impl FigureRuntime {
             let front_start = middle.start + normal * half;
             let front_end = middle.end + normal * half;
             let clear = [rgb[0], rgb[1], rgb[2], 0.0];
-            let opaque = [rgb[0], rgb[1], rgb[2], peak];
+            let opaque_start = [rgb[0], rgb[1], rgb[2], peak * middle.start_depth_opacity];
+            let opaque_end = [rgb[0], rgb[1], rgb[2], peak * middle.end_depth_opacity];
 
             // One continuous strip: incoming gradient, body, outgoing
             // gradient. The body is the middle band, so the boundary vertices
             // and colors are shared exactly with the gradient sections.
             out_ribbons.push(RibbonInstance::triangle(
                 [first.start, first.end, back_end],
-                [clear, clear, opaque],
+                [clear, clear, opaque_end],
             ));
             out_ribbons.push(RibbonInstance::triangle(
                 [first.start, back_end, back_start],
-                [clear, opaque, opaque],
+                [clear, opaque_end, opaque_start],
             ));
             out_ribbons.push(RibbonInstance::triangle(
                 [back_start, back_end, front_end],
-                [opaque, opaque, opaque],
+                [opaque_start, opaque_end, opaque_end],
             ));
             out_ribbons.push(RibbonInstance::triangle(
                 [back_start, front_end, front_start],
-                [opaque, opaque, opaque],
+                [opaque_start, opaque_end, opaque_start],
             ));
             out_ribbons.push(RibbonInstance::triangle(
                 [front_start, front_end, last.end],
-                [opaque, opaque, clear],
+                [opaque_start, opaque_end, clear],
             ));
             out_ribbons.push(RibbonInstance::triangle(
                 [front_start, last.end, last.start],
-                [opaque, clear, clear],
+                [opaque_start, clear, clear],
             ));
         }
     }
@@ -1658,6 +1763,10 @@ fn lerp_line(from: LineGeometry, to: LineGeometry, fraction: f32) -> LineGeometr
     LineGeometry {
         start: from.start.lerp(to.start, fraction),
         end: from.end.lerp(to.end, fraction),
+        start_depth_opacity: from.start_depth_opacity
+            + (to.start_depth_opacity - from.start_depth_opacity) * fraction,
+        end_depth_opacity: from.end_depth_opacity
+            + (to.end_depth_opacity - from.end_depth_opacity) * fraction,
     }
 }
 #[derive(Clone, Copy)]
@@ -1887,7 +1996,10 @@ mod tests {
             })
             .count();
         assert!(ramps > 0);
-        assert!(frame.lines.iter().all(|line| line.color[3] > 0.0));
+        assert!(frame
+            .lines
+            .iter()
+            .all(|line| line.start_color[3] > 0.0 && line.end_color[3] > 0.0));
         assert!(frame
             .lines
             .iter()
@@ -1897,6 +2009,45 @@ mod tests {
                 + (ribbon.start[2] - ribbon.end[2]).hypot(ribbon.start[3] - ribbon.end[3]);
             movement > 0.0
         }));
+    }
+
+    #[test]
+    fn onset_thresholds_adjust_in_hundredths_and_stay_normalized() {
+        let thresholds = OnsetThresholds::default();
+        assert_eq!(thresholds.bass.value(), 0.17);
+        assert_eq!(thresholds.broadband.value(), 0.22);
+
+        let higher = thresholds.bass.adjusted(Adjustment::Increase);
+        assert!((higher.value() - 0.18).abs() < 1e-6);
+
+        let mut lowest = thresholds.bass;
+        for _ in 0..200 {
+            lowest = lowest.adjusted(Adjustment::Decrease);
+        }
+        assert_eq!(lowest.value(), 0.0);
+
+        let mut highest = thresholds.broadband;
+        for _ in 0..200 {
+            highest = highest.adjusted(Adjustment::Increase);
+        }
+        assert_eq!(highest.value(), 1.0);
+
+        assert!(OnsetThreshold::try_from(-0.01).is_err());
+        assert!(OnsetThreshold::try_from(1.01).is_err());
+        assert!(OnsetThreshold::try_from(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn setting_onset_thresholds_reaches_the_debug_snapshot() {
+        let mut visualizer = Visualizer::new();
+        let thresholds = OnsetThresholds {
+            bass: OnsetThreshold::try_from(0.61).unwrap(),
+            broadband: OnsetThreshold::try_from(0.72).unwrap(),
+        };
+        visualizer.set_onset_thresholds(thresholds);
+        let snapshot = visualizer.debug_snapshot();
+        assert!((snapshot.bass_onset.threshold - 0.61).abs() < 1e-6);
+        assert!((snapshot.broadband_onset.threshold - 0.72).abs() < 1e-6);
     }
 
     #[test]
@@ -2048,6 +2199,45 @@ mod tests {
     }
 
     #[test]
+    fn edge_opacity_fades_with_projected_depth() {
+        let mut visualizer = Visualizer::new();
+        let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
+        let palette = Palette::from_theme(crate::theme::ThemeId::default());
+        visualizer.debug_music([0.0; BAND_COUNT], 0.0);
+        let frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        visualizer.update(
+            frame,
+            ShutterFrames::try_from(1.0).unwrap(),
+            1.0 / 60.0,
+            &colors,
+            &palette,
+            (1280.0, 440.0),
+            1.0,
+            1.0,
+        );
+        let frame = visualizer.frame();
+        assert_eq!(frame.lines.len(), 12, "the first frame is the cube edges");
+        let alphas: Vec<f32> = frame
+            .lines
+            .iter()
+            .flat_map(|line| [line.start_color[3], line.end_color[3]])
+            .collect();
+        let min = alphas.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = alphas.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (max / min - 2.0).abs() < 1e-4,
+            "the farthest endpoint must keep half the nearest opacity: {min}..{max}"
+        );
+        assert!(
+            frame
+                .lines
+                .iter()
+                .any(|line| (line.start_color[3] - line.end_color[3]).abs() > 0.01),
+            "an edge must interpolate between its endpoint depths"
+        );
+    }
+
+    #[test]
     fn the_tesseract_shares_one_edge_color_and_the_torus_alternates_two() {
         let colors = crate::theme::Theme::new(crate::theme::ThemeId::default()).colors;
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
@@ -2094,8 +2284,10 @@ mod tests {
             let frame = visualizer.frame();
             let mut rgbs: Vec<[f32; 3]> = Vec::new();
             for line in frame.lines {
-                if line.color[3] > 0.0 {
-                    rgbs.push([line.color[0], line.color[1], line.color[2]]);
+                for color in [line.start_color, line.end_color] {
+                    if color[3] > 0.0 {
+                        rgbs.push([color[0], color[1], color[2]]);
+                    }
                 }
             }
             for ribbon in frame.ribbons {

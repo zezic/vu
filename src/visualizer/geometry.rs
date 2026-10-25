@@ -471,19 +471,55 @@ impl Camera {
             .rotate_x(pose.pitch)
             .rotate_z(pose.roll)
             * pose.scale;
-        let z = (rotated.z + pose.distance).max(0.4);
-        let perspective = self.focal / z;
+        let depth = (rotated.z + pose.distance).max(0.4);
+        let perspective = self.focal / depth;
         let screen = Vec2::new(
             self.center.x + rotated.x * perspective,
             self.center.y + rotated.y * perspective,
         );
-        Projected { screen }
+        Projected { screen, depth }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Projected {
     pub screen: Vec2,
+    /// View-space distance from the camera before projection.
+    pub depth: f32,
+}
+
+/// Maps one figure's view depths onto the edge opacity ramp: the closest vertex
+/// keeps full opacity and the farthest keeps half of it.
+#[derive(Clone, Copy, Debug)]
+pub struct DepthOpacity {
+    closest: f32,
+    farthest: f32,
+}
+
+impl DepthOpacity {
+    pub fn new(depths: impl IntoIterator<Item = f32>) -> Self {
+        let mut closest = f32::INFINITY;
+        let mut farthest = f32::NEG_INFINITY;
+        for depth in depths {
+            closest = closest.min(depth);
+            farthest = farthest.max(depth);
+        }
+        assert!(
+            closest <= farthest,
+            "depth opacity needs at least one projected vertex"
+        );
+        Self { closest, farthest }
+    }
+
+    #[must_use]
+    pub fn factor(self, depth: f32) -> f32 {
+        let span = self.farthest - self.closest;
+        if span <= 1e-6 {
+            1.0
+        } else {
+            1.0 - 0.5 * ((depth - self.closest) / span).clamp(0.0, 1.0)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -566,6 +602,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn depth_opacity_spans_full_to_half_between_the_nearest_and_farthest_vertex() {
+        let ramp = DepthOpacity::new([3.0, 5.0]);
+        assert_eq!(ramp.factor(3.0), 1.0);
+        assert_eq!(ramp.factor(5.0), 0.5);
+        assert!((ramp.factor(4.0) - 0.75).abs() < 1e-6);
+        let flat = DepthOpacity::new([4.0, 4.0]);
+        assert_eq!(flat.factor(4.0), 1.0);
     }
 
     #[test]

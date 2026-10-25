@@ -117,6 +117,14 @@ mod tests {
         config.edit().visualizer_text_scale = config
             .visualizer_text_scale
             .adjusted(crate::frame_schedule::Adjustment::Increase);
+        config.edit().onset_thresholds.bass = config
+            .onset_thresholds
+            .bass
+            .adjusted(crate::frame_schedule::Adjustment::Increase);
+        config.edit().onset_thresholds.broadband = config
+            .onset_thresholds
+            .broadband
+            .adjusted(crate::frame_schedule::Adjustment::Decrease);
         config.flush_if_due(config.last_write + SAVE_INTERVAL - Duration::from_millis(1))?;
         assert!(!path.exists());
         config.flush_if_due(config.last_write + SAVE_INTERVAL)?;
@@ -145,6 +153,9 @@ mod tests {
             "(visualizer_text_scale: 0.5)",
             "(visualizer_text_scale: 2.5)",
             "(visualizer_text_scale: NaN)",
+            "(onset_thresholds: (bass: -0.1, broadband: 0.22))",
+            "(onset_thresholds: (bass: 0.17, broadband: 1.1))",
+            "(onset_thresholds: (bass: 0.17, broadband: NaN))",
             "(frame_rate_limit: Fps99)",
             "(mode: Unknown)",
             "(peak_movement: Unknown)",
@@ -169,6 +180,10 @@ mod tests {
         assert_eq!(
             missing.visualizer_text_scale,
             crate::config::VisualizerTextScale::default()
+        );
+        assert_eq!(
+            missing.onset_thresholds,
+            crate::visualizer::OnsetThresholds::default()
         );
         Ok(())
     }

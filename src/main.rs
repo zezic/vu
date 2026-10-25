@@ -91,6 +91,8 @@ enum Setting {
     Preamp,
     FrameRate,
     Shutter,
+    BassThreshold,
+    BroadbandThreshold,
 }
 
 struct App {
@@ -148,6 +150,16 @@ impl App {
             Setting::FrameRate => {
                 settings.frame_rate_limit = settings.frame_rate_limit.adjusted(adjustment);
                 self.frames.limit_changed(Instant::now());
+            }
+            Setting::BassThreshold => {
+                settings.onset_thresholds.bass =
+                    settings.onset_thresholds.bass.adjusted(adjustment);
+                self.meter.set_onset_thresholds(settings.onset_thresholds);
+            }
+            Setting::BroadbandThreshold => {
+                settings.onset_thresholds.broadband =
+                    settings.onset_thresholds.broadband.adjusted(adjustment);
+                self.meter.set_onset_thresholds(settings.onset_thresholds);
             }
         }
     }
@@ -312,6 +324,18 @@ impl App {
                             let presentation = self.settings.presentation.toggled();
                             self.settings.edit().presentation = presentation;
                             self.meter.set_presentation(presentation);
+                        }
+                        KeyCode::KeyG => {
+                            self.adjust_setting(Setting::BassThreshold, Adjustment::Decrease)
+                        }
+                        KeyCode::KeyH => {
+                            self.adjust_setting(Setting::BassThreshold, Adjustment::Increase)
+                        }
+                        KeyCode::KeyJ => {
+                            self.adjust_setting(Setting::BroadbandThreshold, Adjustment::Decrease)
+                        }
+                        KeyCode::KeyK => {
+                            self.adjust_setting(Setting::BroadbandThreshold, Adjustment::Increase)
                         }
                         KeyCode::KeyM if !event.repeat => {
                             self.adjust_setting(Setting::Mode, Adjustment::Increase)

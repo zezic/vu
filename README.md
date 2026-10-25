@@ -32,6 +32,10 @@ through the frame rate limits: 30, 48, 55, 60, 72, 90, 120, 180, 240, and VSync.
 to 200%. The setting persists in the config file.
 - `C` / `V` - decrease or increase shutter exposure by half a frame, from 1 to 16
 frame intervals. 
+- `G` / `H` - decrease or increase the bass onset threshold in 0.01 steps, from 0
+to 1.
+- `J` / `K` - decrease or increase the broadband onset threshold in 0.01 steps,
+from 0 to 1. Both onset thresholds persist in the config file.
 
 ## Modes
 
@@ -67,8 +71,10 @@ Double-click to reset both values to the default range (53.4 dB) and bend
 Press `F` to replace the gauges with a pseudo-3D wireframe scene. The scene starts
 as a simple cube and evolves through an octahedron, icosahedron, tesseract, and
 torus as energy hits arrive. Each figure is projected in perspective and drawn as
-vector lines with uniform weight and opacity. Depth is still projected
-geometrically, but it no longer shades individual edges.
+vector lines with uniform weight. Edge opacity follows vertex depth: the closest
+vertex renders fully opaque, the farthest at half opacity, and every edge
+interpolates its opacity between those endpoints. Motion blur carries the same
+per-vertex opacities through the exposure.
 
 A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The bands
 drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,

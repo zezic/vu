@@ -6,15 +6,17 @@ struct Uniforms {
 
 struct Instance {
     @location(0) endpoints: vec4<f32>,
-    @location(1) color: vec4<f32>,
-    @location(2) style: vec4<f32>,
+    @location(1) start_color: vec4<f32>,
+    @location(2) end_color: vec4<f32>,
+    @location(3) style: vec4<f32>,
 }
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) @interpolate(flat) endpoints: vec4<f32>,
-    @location(1) @interpolate(flat) color: vec4<f32>,
-    @location(2) @interpolate(flat) style: vec4<f32>,
+    @location(1) @interpolate(flat) start_color: vec4<f32>,
+    @location(2) @interpolate(flat) end_color: vec4<f32>,
+    @location(3) @interpolate(flat) style: vec4<f32>,
 }
 
 @vertex
@@ -37,7 +39,8 @@ fn line_vertex(
     return VertexOutput(
         vec4(clip, 0.0, 1.0),
         instance.endpoints,
-        instance.color,
+        instance.start_color,
+        instance.end_color,
         instance.style,
     );
 }
@@ -58,6 +61,14 @@ fn line_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
         vertex.endpoints.zw,
     );
     let coverage = clamp(width * 0.5 + 0.5 - nearest, 0.0, 1.0);
-    let alpha = vertex.color.a * coverage;
-    return vec4(vertex.color.rgb * alpha, alpha);
+    let along = vertex.endpoints.zw - vertex.endpoints.xy;
+    let fraction = clamp(
+        dot(vertex.position.xy - vertex.endpoints.xy, along)
+            / max(dot(along, along), 1e-6),
+        0.0,
+        1.0,
+    );
+    let color = mix(vertex.start_color, vertex.end_color, fraction);
+    let alpha = color.a * coverage;
+    return vec4(color.rgb * alpha, alpha);
 }

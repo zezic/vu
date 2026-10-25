@@ -175,6 +175,7 @@ pub struct Config {
     pub frame_rate_limit: FrameRateLimit,
     pub shutter_frames: ShutterFrames,
     pub visualizer_text_scale: VisualizerTextScale,
+    pub onset_thresholds: crate::visualizer::OnsetThresholds,
 }
 
 pub fn config_file() -> anyhow::Result<PathBuf> {
