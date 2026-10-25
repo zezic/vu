@@ -505,7 +505,7 @@ mod tests {
             at = end;
         }
         let frame = visualizer.frame();
-        assert!(frame.lines.len() >= 12);
+        assert!(frame.lines.len() + frame.ribbons.len() >= 12);
         assert!(
             !frame.ribbons.is_empty(),
             "motion history must produce swept ribbons"

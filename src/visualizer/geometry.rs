@@ -475,15 +475,13 @@ impl Camera {
             self.center.x + rotated.x * perspective,
             self.center.y + rotated.y * perspective,
         );
-        let depth = ((z - (pose.distance - 1.0)) * 0.5).clamp(0.0, 1.0);
-        Projected { screen, depth }
+        Projected { screen }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Projected {
     pub screen: Vec2,
-    pub depth: f32,
 }
 
 #[cfg(test)]
@@ -530,7 +528,6 @@ mod tests {
             let projected = camera.project(wireframe.vertex(index, 0.0), pose);
             assert!(projected.screen.x.is_finite());
             assert!(projected.screen.y.is_finite());
-            assert!((0.0..=1.0).contains(&projected.depth));
             let radius =
                 (projected.screen.x - camera.center.x).hypot(projected.screen.y - camera.center.y);
             assert!(radius < 440.0, "the figure must fit the window");

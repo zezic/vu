@@ -280,58 +280,41 @@ pub struct DebugSnapshot {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RibbonInstance {
-    /// Older segment pose: a.xy, b.xy.
+    /// First two triangle vertices: a.xy, b.xy.
     pub start: [f32; 4],
-    /// Newer segment pose: a.xy, b.xy.
+    /// Third triangle vertex duplicated: c.xy, c.xy.
     pub end: [f32; 4],
-    /// Tint and opacity at the older pose.
+    /// Tint and opacity at the first vertex.
     pub start_color: [f32; 4],
-    /// Tint and opacity at the newer pose.
+    /// Tint and opacity at the second vertex.
     pub end_color: [f32; 4],
-    /// Tint and opacity of the third vertex for triangle fallback instances.
+    /// Tint and opacity at the third vertex.
     pub third_color: [f32; 4],
-    /// Stroke width, triangle fallback flag, padding, padding.
+    /// Wing-mask flag, padding, padding, padding.
     pub style: [f32; 4],
 }
 
 impl RibbonInstance {
-    fn new(
-        start: [Vec2; 2],
-        end: [Vec2; 2],
-        start_color: [f32; 4],
-        end_color: [f32; 4],
-        width: f32,
-    ) -> Self {
-        Self {
-            start: [start[0].x, start[0].y, start[1].x, start[1].y],
-            end: [end[0].x, end[0].y, end[1].x, end[1].y],
-            start_color,
-            end_color,
-            third_color: end_color,
-            style: [width, 0.0, 0.0, 0.0],
-        }
-    }
-
-    /// A crossing wing triangle. The first vertex is the outer A/B endpoint,
-    /// the second is the body-edge endpoint, and the third is the dual X point.
-    /// The shader masks the outer-to-X edge to zero.
-    fn wing_triangle(points: [Vec2; 3], colors: [[f32; 4]; 3], width: f32) -> Self {
-        let mut ribbon = Self::triangle(points, colors, width);
-        ribbon.style[2] = 1.0;
-        ribbon
-    }
-
-    /// A single alpha-interpolated triangle, used for non-convex sweeps and the
-    /// four crossing-fan regions. The three vertices carry independent colors.
-    fn triangle(points: [Vec2; 3], colors: [[f32; 4]; 3], width: f32) -> Self {
+    /// A single alpha-interpolated triangle. The three vertices carry
+    /// independent colors.
+    fn triangle(points: [Vec2; 3], colors: [[f32; 4]; 3]) -> Self {
         Self {
             start: [points[0].x, points[0].y, points[1].x, points[1].y],
             end: [points[2].x, points[2].y, points[2].x, points[2].y],
             start_color: colors[0],
             end_color: colors[1],
             third_color: colors[2],
-            style: [width, 1.0, 0.0, 0.0],
+            style: [0.0; 4],
         }
+    }
+
+    /// A crossing wing triangle. The first vertex is the outer A/B endpoint,
+    /// the second is the body-edge endpoint, and the third is the dual X point.
+    /// The shader masks the outer-to-X edge to zero.
+    fn wing_triangle(points: [Vec2; 3], colors: [[f32; 4]; 3]) -> Self {
+        let mut ribbon = Self::triangle(points, colors);
+        ribbon.style[0] = 1.0;
+        ribbon
     }
 }
 
@@ -1298,7 +1281,6 @@ struct PoseSnapshot {
 struct LineGeometry {
     start: Vec2,
     end: Vec2,
-    depth: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -1411,7 +1393,6 @@ impl FigureRuntime {
                 LineGeometry {
                     start: a.screen,
                     end: b.screen,
-                    depth: (a.depth + b.depth) * 0.5,
                 }
             }));
         if self.history.len() == MAX_HISTORY {
@@ -1439,31 +1420,21 @@ impl FigureRuntime {
             palette.neutral[1]
         };
         for (index, current) in self.current.iter().enumerate() {
-            let reference = exposure.as_ref().map_or(*current, |exposure| {
-                lerp_line(exposure.first[index], exposure.last[index], 0.5)
-            });
-            let depth_light = 0.32 + 0.68 * (1.0 - reference.depth);
-            let deep = mix(colors.background, palette.neutral[3], 0.22);
-            let far = mix(deep, palette.neutral[2], 0.5);
-            let core = mix(palette.neutral[0], highlight, 0.25 + 0.4 * depth_light);
-            let base = mix(far, core, depth_light);
+            let base = mix(colors.background, palette.neutral[0], 0.55);
             let use_second = self.kind.is_complex() && index % 2 == 1;
             let accent_color = if use_second {
                 palette.vivid_blend(self.palette_phase_b)
             } else {
                 palette.vivid_blend(self.palette_phase_a)
             };
-            let accent_mix = (0.3
-                + accent * self.style.accent_bias * 0.3
-                + music.band(12) * 0.3
-                + if index % 4 == 0 { 0.22 } else { 0.0 })
-            .clamp(0.0, 0.9);
+            let accent_mix = (0.3 + accent * self.style.accent_bias * 0.3 + music.band(12) * 0.3)
+                .clamp(0.0, 0.9);
             let tinted = mix(base, accent_color, accent_mix);
             // Hits brighten the existing accent instead of introducing a third hue.
             let hot_color = mix(accent_color, highlight, 0.5);
             let color = mix(tinted, hot_color, hot * 0.65);
-            let alpha = self.opacity * (0.4 + 0.6 * depth_light) * (0.5 + 0.5 * line_energy);
-            let width = base_width * (0.8 + 0.5 * depth_light) * (1.0 + music.kick * 0.25);
+            let alpha = self.opacity * (0.6 + 0.4 * line_energy);
+            let width = base_width * (1.0 + music.kick * 0.25);
             let rgb = [
                 color.components[0],
                 color.components[1],
@@ -1490,11 +1461,18 @@ impl FigureRuntime {
 
             if segment_intersection(first.start, first.end, last.start, last.end).is_some() {
                 let direction = (middle.end - middle.start).normalized();
-                let normal = if direction.length() > 0.0 {
+                let mut normal = if direction.length() > 0.0 {
                     direction.perpendicular()
                 } else {
                     Vec2::new(0.0, 1.0)
                 };
+                // Keep A1 on the X1 side regardless of projected edge order.
+                if (first.start - middle.start).x * normal.x
+                    + (first.start - middle.start).y * normal.y
+                    < 0.0
+                {
+                    normal = normal * -1.0;
+                }
                 let body_half = (width * 0.5).max(0.5);
                 let l_top = middle.start + normal * body_half;
                 let l_bottom = middle.start - normal * body_half;
@@ -1507,129 +1485,93 @@ impl FigureRuntime {
                 let bm = [rgb[0], rgb[1], rgb[2], fade(distance_b)];
                 let peak = [rgb[0], rgb[1], rgb[2], alpha];
 
-                // Top wings attach to the top long edge and meet at X1. Their
-                // outer-to-X edges are masked to zero by the wing shader.
-                out_ribbons.push(RibbonInstance::wing_triangle(
-                    [first.start, l_top, x1],
-                    [clear, am, peak],
-                    width,
-                ));
-                out_ribbons.push(RibbonInstance::wing_triangle(
-                    [last.end, r_top, x1],
-                    [clear, bm, peak],
-                    width,
-                ));
-                // Bottom wings attach to the bottom long edge and meet at X2.
-                out_ribbons.push(RibbonInstance::wing_triangle(
-                    [last.start, l_bottom, x2],
-                    [clear, am, peak],
-                    width,
-                ));
-                out_ribbons.push(RibbonInstance::wing_triangle(
-                    [first.end, r_bottom, x2],
-                    [clear, bm, peak],
-                    width,
-                ));
                 // The body is two flat-capped quads; the shared long-edge
                 // gradients are the same U -> X -> V ramps as the wings.
                 out_ribbons.push(RibbonInstance::triangle(
                     [l_top, l_bottom, x2],
                     [am, am, peak],
-                    width,
                 ));
-                out_ribbons.push(RibbonInstance::triangle(
-                    [l_top, x2, x1],
-                    [am, peak, peak],
-                    width,
-                ));
+                out_ribbons.push(RibbonInstance::triangle([l_top, x2, x1], [am, peak, peak]));
                 out_ribbons.push(RibbonInstance::triangle(
                     [x1, x2, r_bottom],
                     [peak, peak, bm],
-                    width,
                 ));
                 out_ribbons.push(RibbonInstance::triangle(
                     [x1, r_bottom, r_top],
                     [peak, bm, bm],
-                    width,
+                ));
+                // Top wings attach to the top long edge and meet at X1. Their
+                // outer-to-X edges are masked to zero by the wing shader.
+                out_ribbons.push(RibbonInstance::wing_triangle(
+                    [first.start, l_top, x1],
+                    [clear, am, peak],
+                ));
+                out_ribbons.push(RibbonInstance::wing_triangle(
+                    [last.end, r_top, x1],
+                    [clear, bm, peak],
+                ));
+                // Bottom wings attach to the bottom long edge and meet at X2.
+                out_ribbons.push(RibbonInstance::wing_triangle(
+                    [last.start, l_bottom, x2],
+                    [clear, am, peak],
+                ));
+                out_ribbons.push(RibbonInstance::wing_triangle(
+                    [first.end, r_bottom, x2],
+                    [clear, bm, peak],
                 ));
                 continue;
             }
 
             // A fast edge spreads the same ink over more pixels, so its peak
-            // opacity is lower. Even a motionless edge keeps the central line.
+            // opacity is lower. Even a motionless edge keeps the central body.
             let spread = movement / (width + movement);
             let peak = alpha * (0.35 + 0.65 * (1.0 - spread));
-            out.push(LineInstance::new(
-                middle.start,
-                middle.end,
-                [rgb[0], rgb[1], rgb[2], peak],
-                width,
-            ));
-            if movement <= 0.0 {
-                continue;
-            }
-
-            let motion = ((last.start - first.start) + (last.end - first.end)) * 0.5;
-            let edge = middle.end - middle.start;
-            let direction = if motion.length() > 1e-4 {
-                motion.normalized()
+            let direction = (middle.end - middle.start).normalized();
+            let mut normal = if direction.length() > 0.0 {
+                direction.perpendicular()
             } else {
-                let normal = edge.perpendicular().normalized();
-                if normal.length() > 0.5 {
-                    normal
-                } else {
-                    Vec2::new(1.0, 0.0)
-                }
+                Vec2::new(0.0, 1.0)
             };
-            // The line body sits between the two gradients. Gradients stop at
-            // its edges so their polygons meet the body without overlapping it.
-            let offset = direction * (width * 0.5);
-            let back_start = middle.start - offset;
-            let back_end = middle.end - offset;
-            let front_start = middle.start + offset;
-            let front_end = middle.end + offset;
-            let transparent = [rgb[0], rgb[1], rgb[2], 0.0];
+            // Point the body normal from the first pose toward the last pose.
+            let motion = ((last.start - first.start) + (last.end - first.end)) * 0.5;
+            if normal.x * motion.x + normal.y * motion.y < 0.0 {
+                normal = normal * -1.0;
+            }
+            let half = (width * 0.5).max(0.5);
+            let back_start = middle.start - normal * half;
+            let back_end = middle.end - normal * half;
+            let front_start = middle.start + normal * half;
+            let front_end = middle.end + normal * half;
+            let clear = [rgb[0], rgb[1], rgb[2], 0.0];
             let opaque = [rgb[0], rgb[1], rgb[2], peak];
-            if convex_quad(first.start, first.end, back_end, back_start) {
-                out_ribbons.push(RibbonInstance::new(
-                    [first.start, first.end],
-                    [back_start, back_end],
-                    transparent,
-                    opaque,
-                    width,
-                ));
-            } else {
-                out_ribbons.push(RibbonInstance::triangle(
-                    [first.start, first.end, back_end],
-                    [transparent, transparent, opaque],
-                    width,
-                ));
-                out_ribbons.push(RibbonInstance::triangle(
-                    [first.start, back_end, back_start],
-                    [transparent, opaque, opaque],
-                    width,
-                ));
-            }
-            if convex_quad(front_start, front_end, last.end, last.start) {
-                out_ribbons.push(RibbonInstance::new(
-                    [front_start, front_end],
-                    [last.start, last.end],
-                    opaque,
-                    transparent,
-                    width,
-                ));
-            } else {
-                out_ribbons.push(RibbonInstance::triangle(
-                    [front_start, front_end, last.end],
-                    [opaque, opaque, transparent],
-                    width,
-                ));
-                out_ribbons.push(RibbonInstance::triangle(
-                    [front_start, last.end, last.start],
-                    [opaque, transparent, transparent],
-                    width,
-                ));
-            }
+
+            // One continuous strip: incoming gradient, body, outgoing
+            // gradient. The body is the middle band, so the boundary vertices
+            // and colors are shared exactly with the gradient sections.
+            out_ribbons.push(RibbonInstance::triangle(
+                [first.start, first.end, back_end],
+                [clear, clear, opaque],
+            ));
+            out_ribbons.push(RibbonInstance::triangle(
+                [first.start, back_end, back_start],
+                [clear, opaque, opaque],
+            ));
+            out_ribbons.push(RibbonInstance::triangle(
+                [back_start, back_end, front_end],
+                [opaque, opaque, opaque],
+            ));
+            out_ribbons.push(RibbonInstance::triangle(
+                [back_start, front_end, front_start],
+                [opaque, opaque, opaque],
+            ));
+            out_ribbons.push(RibbonInstance::triangle(
+                [front_start, front_end, last.end],
+                [opaque, opaque, clear],
+            ));
+            out_ribbons.push(RibbonInstance::triangle(
+                [front_start, last.end, last.start],
+                [opaque, clear, clear],
+            ));
         }
     }
 
@@ -1748,30 +1690,10 @@ fn segment_intersection(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> Option<Vec2> 
     }
 }
 
-fn convex_quad(a0: Vec2, b0: Vec2, b1: Vec2, a1: Vec2) -> bool {
-    let points = [a0, b0, b1, a1];
-    let mut sign = 0.0;
-    for index in 0..4 {
-        let a = points[index];
-        let b = points[(index + 1) % 4];
-        let c = points[(index + 2) % 4];
-        let cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
-        if cross.abs() > 1e-6 {
-            if sign == 0.0 {
-                sign = cross.signum();
-            } else if cross.signum() != sign {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 fn lerp_line(from: LineGeometry, to: LineGeometry, fraction: f32) -> LineGeometry {
     LineGeometry {
         start: from.start.lerp(to.start, fraction),
         end: from.end.lerp(to.end, fraction),
-        depth: from.depth + (to.depth - from.depth) * fraction,
     }
 }
 #[derive(Clone, Copy)]
@@ -2160,42 +2082,6 @@ mod tests {
     }
 
     #[test]
-    fn non_convex_sweep_selects_triangle_fallback() {
-        let convex = convex_quad(
-            Vec2::new(0.0, 0.0),
-            Vec2::new(100.0, 0.0),
-            Vec2::new(100.0, 100.0),
-            Vec2::new(0.0, 100.0),
-        );
-        let bowtie = convex_quad(
-            Vec2::new(0.0, 0.0),
-            Vec2::new(100.0, 0.0),
-            Vec2::new(0.0, 100.0),
-            Vec2::new(100.0, 100.0),
-        );
-        assert!(convex);
-        assert!(!bowtie);
-
-        let ribbon = RibbonInstance::triangle(
-            [
-                Vec2::new(0.0, 0.0),
-                Vec2::new(100.0, 0.0),
-                Vec2::new(0.0, 100.0),
-            ],
-            [
-                [1.0, 1.0, 1.0, 0.0],
-                [1.0, 1.0, 1.0, 0.5],
-                [1.0, 1.0, 1.0, 1.0],
-            ],
-            2.0,
-        );
-        assert_eq!(ribbon.style[1], 1.0);
-        assert_eq!(ribbon.start_color[3], 0.0);
-        assert_eq!(ribbon.end_color[3], 0.5);
-        assert_eq!(ribbon.third_color[3], 1.0);
-    }
-
-    #[test]
     fn phase_rebase_preserves_tesseract_and_deformation_geometry() {
         let wireframe = Wireframe::build(FigureKind::Tesseract);
         let mut before = Deformation {
@@ -2301,7 +2187,10 @@ mod tests {
         let latest = latest_anchor.expect("diagnosis must stay visible");
         assert!((first[0] - latest[0]).abs() + (first[1] - latest[1]).abs() > 0.05);
         let frame = visualizer.frame();
-        assert!(frame.lines.len() > visualizer.scene.current.wireframe.edges().len());
+        assert!(
+            !frame.lines.is_empty(),
+            "diagnosis must add line instancing"
+        );
     }
 
     #[test]
@@ -2333,7 +2222,7 @@ mod tests {
         assert!(snapshot.bass_onset.threshold > 0.0);
         assert!(snapshot.broadband_onset.cooldown_time > 0.0);
         assert!(!snapshot.scene.is_empty());
-        assert!(snapshot.lines > 0);
+        assert!(snapshot.lines + snapshot.ribbons > 0);
         assert!(snapshot.ribbons > 0);
     }
 

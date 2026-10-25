@@ -67,7 +67,8 @@ Double-click to reset both values to the default range (53.4 dB) and bend
 Press `F` to replace the gauges with a pseudo-3D wireframe scene. The scene starts
 as a simple cube and evolves through an octahedron, icosahedron, tesseract, and
 torus as energy hits arrive. Each figure is projected in perspective and drawn as
-vector lines with depth-dependent weight and opacity.
+vector lines with uniform weight and opacity. Depth is still projected
+geometrically, but it no longer shades individual edges.
 
 A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The bands
 drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,
@@ -81,11 +82,20 @@ crossfade and parameter changes ease toward their new targets. Every moving edge
 uses the first and last recorded poses across the shutter exposure and
 reconstructs the middle pose as the median of the corresponding endpoints.
 
-For an ordinary sweep, the reconstructed middle pose carries the sharp line body
-at peak opacity `P`; the start-to-middle span fades `0 -> P`, and the
+For an ordinary sweep, the reconstructed middle pose carries a normal-width
+thick body at peak opacity `P`; the start-to-middle span fades `0 -> P`, and the
 middle-to-end span fades `P -> 0`. `P` falls as the frame-one to frame-three
 vertex displacement grows, so a fast edge spreads into a fainter blur while a
 slow edge stays crisp.
+
+The ordinary sweep is one continuous triangle strip: incoming gradient, body,
+and outgoing gradient. The body is the middle band of that strip, so its long
+edges and all boundary vertices/colors are shared directly with the neighboring
+gradient sections. No separate body mesh or line primitive is used.
+
+The strip normal is oriented from the first pose to the last pose, so projected
+back-facing edges use the same attachment order as front-facing edges. Crossing
+bodies orient their normal so that `A1` stays on the `X1` side.
 
 When the first and last edge lines intersect, the crossing is rendered as a
 flat-capped thick body plus four wings. The body spans the median line `AM-BM`
@@ -118,7 +128,7 @@ tesseract rotation. Crossing 2*PI therefore never snaps the geometry.
 The selected Gogh theme drives the scene through its four neutral and twelve vivid
 colors. Simple figures use one vivid accent at a time; tesseract and torus use two.
 Accent hues drift continuously, so a figure can move from one palette color to
-another without a jump. Neutral foregrounds carry depth and brightness, while hit
+another without a jump. Neutral foregrounds provide the base tone, while hit
 flashes brighten the existing accent rather than adding another hue. Theme changes
 crossfade both the gauge colors and the wireframe palette.
 

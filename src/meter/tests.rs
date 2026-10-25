@@ -770,7 +770,9 @@ fn switching_presentation_swaps_overlays_and_keeps_audio_running() -> anyhow::Re
             clock.frame(1.0 / 60.0),
         );
         match &visualizer.overlay {
-            super::Overlay::Visualizer(frame) => assert!(frame.lines.len() >= 12),
+            super::Overlay::Visualizer(frame) => {
+                assert!(frame.lines.len() + frame.ribbons.len() >= 12);
+            }
             super::Overlay::Gauges(_) => panic!("the wireframe presentation must supply lines"),
         }
     }
@@ -845,7 +847,7 @@ fn renders_visualizer_face_and_wireframe_with_hud() -> anyhow::Result<()> {
             super::Overlay::Gauges(_) => panic!("the visualizer must supply line overlay"),
         }
     };
-    assert!(lines.len() >= 12);
+    assert!(lines.len() + ribbons.len() >= 12);
     let mut context = RenderContext::new();
     let id = pollster::block_on(context.device(None)).expect("a compute-capable GPU is required");
     let device = &context.devices[id];
