@@ -125,6 +125,9 @@ mod tests {
             .onset_thresholds
             .broadband
             .adjusted(crate::frame_schedule::Adjustment::Decrease);
+        config.edit().depth_fade = config
+            .depth_fade
+            .adjusted(crate::frame_schedule::Adjustment::Increase);
         config.flush_if_due(config.last_write + SAVE_INTERVAL - Duration::from_millis(1))?;
         assert!(!path.exists());
         config.flush_if_due(config.last_write + SAVE_INTERVAL)?;
@@ -156,6 +159,9 @@ mod tests {
             "(onset_thresholds: (bass: -0.1, broadband: 0.22))",
             "(onset_thresholds: (bass: 0.17, broadband: 1.1))",
             "(onset_thresholds: (bass: 0.17, broadband: NaN))",
+            "(depth_fade: -0.1)",
+            "(depth_fade: 1.1)",
+            "(depth_fade: NaN)",
             "(frame_rate_limit: Fps99)",
             "(mode: Unknown)",
             "(peak_movement: Unknown)",
@@ -185,6 +191,7 @@ mod tests {
             missing.onset_thresholds,
             crate::visualizer::OnsetThresholds::default()
         );
+        assert_eq!(missing.depth_fade, crate::visualizer::DepthFade::default());
         Ok(())
     }
 

@@ -93,6 +93,7 @@ enum Setting {
     Shutter,
     BassThreshold,
     BroadbandThreshold,
+    DepthFade,
 }
 
 struct App {
@@ -160,6 +161,10 @@ impl App {
                 settings.onset_thresholds.broadband =
                     settings.onset_thresholds.broadband.adjusted(adjustment);
                 self.meter.set_onset_thresholds(settings.onset_thresholds);
+            }
+            Setting::DepthFade => {
+                settings.depth_fade = settings.depth_fade.adjusted(adjustment);
+                self.meter.set_depth_fade(settings.depth_fade);
             }
         }
     }
@@ -336,6 +341,12 @@ impl App {
                         }
                         KeyCode::KeyK => {
                             self.adjust_setting(Setting::BroadbandThreshold, Adjustment::Increase)
+                        }
+                        KeyCode::KeyO => {
+                            self.adjust_setting(Setting::DepthFade, Adjustment::Decrease)
+                        }
+                        KeyCode::KeyP => {
+                            self.adjust_setting(Setting::DepthFade, Adjustment::Increase)
                         }
                         KeyCode::KeyM if !event.repeat => {
                             self.adjust_setting(Setting::Mode, Adjustment::Increase)

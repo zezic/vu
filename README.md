@@ -36,6 +36,9 @@ frame intervals.
 to 1.
 - `J` / `K` - decrease or increase the broadband onset threshold in 0.01 steps,
 from 0 to 1. Both onset thresholds persist in the config file.
+- `O` / `P` - decrease or increase the depth opacity modulation in 5% steps, from
+0% (all vertices opaque) to 100% (the farthest vertices fully transparent). The
+setting persists in the config file.
 
 ## Modes
 
@@ -72,9 +75,9 @@ Press `F` to replace the gauges with a pseudo-3D wireframe scene. The scene star
 as a simple cube and evolves through an octahedron, icosahedron, tesseract, and
 torus as energy hits arrive. Each figure is projected in perspective and drawn as
 vector lines with uniform weight. Edge opacity follows vertex depth: the closest
-vertex renders fully opaque, the farthest at half opacity, and every edge
-interpolates its opacity between those endpoints. Motion blur carries the same
-per-vertex opacities through the exposure.
+vertex is fully opaque, the farthest fades by the adjustable depth-fade strength
+(50% by default), and every edge interpolates its opacity between those
+endpoints. Motion blur carries the same per-vertex opacities through the exposure.
 
 A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The bands
 drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,

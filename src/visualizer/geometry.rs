@@ -488,16 +488,21 @@ pub struct Projected {
     pub depth: f32,
 }
 
-/// Maps one figure's view depths onto the edge opacity ramp: the closest vertex
-/// keeps full opacity and the farthest keeps half of it.
+/// Maps one figure's view depths onto the edge opacity ramp. The closest vertex
+/// is always fully opaque; `fade` is how much opacity the farthest vertex loses.
 #[derive(Clone, Copy, Debug)]
 pub struct DepthOpacity {
     closest: f32,
     farthest: f32,
+    fade: f32,
 }
 
 impl DepthOpacity {
-    pub fn new(depths: impl IntoIterator<Item = f32>) -> Self {
+    pub fn new(depths: impl IntoIterator<Item = f32>, fade: f32) -> Self {
+        assert!(
+            fade.is_finite() && (0.0..=1.0).contains(&fade),
+            "depth opacity fade must be finite and between 0 and 1"
+        );
         let mut closest = f32::INFINITY;
         let mut farthest = f32::NEG_INFINITY;
         for depth in depths {
@@ -508,7 +513,11 @@ impl DepthOpacity {
             closest <= farthest,
             "depth opacity needs at least one projected vertex"
         );
-        Self { closest, farthest }
+        Self {
+            closest,
+            farthest,
+            fade,
+        }
     }
 
     #[must_use]
@@ -517,7 +526,8 @@ impl DepthOpacity {
         if span <= 1e-6 {
             1.0
         } else {
-            1.0 - 0.5 * ((depth - self.closest) / span).clamp(0.0, 1.0)
+            let closeness = ((depth - self.closest) / span).clamp(0.0, 1.0);
+            1.0 - self.fade * closeness
         }
     }
 }
@@ -605,12 +615,19 @@ mod tests {
     }
 
     #[test]
-    fn depth_opacity_spans_full_to_half_between_the_nearest_and_farthest_vertex() {
-        let ramp = DepthOpacity::new([3.0, 5.0]);
+    fn depth_opacity_follows_the_configured_fade() {
+        let ramp = DepthOpacity::new([3.0, 5.0], 0.5);
         assert_eq!(ramp.factor(3.0), 1.0);
         assert_eq!(ramp.factor(5.0), 0.5);
         assert!((ramp.factor(4.0) - 0.75).abs() < 1e-6);
-        let flat = DepthOpacity::new([4.0, 4.0]);
+
+        let off = DepthOpacity::new([3.0, 5.0], 0.0);
+        assert_eq!(off.factor(5.0), 1.0);
+
+        let full = DepthOpacity::new([3.0, 5.0], 1.0);
+        assert_eq!(full.factor(5.0), 0.0);
+
+        let flat = DepthOpacity::new([4.0, 4.0], 0.5);
         assert_eq!(flat.factor(4.0), 1.0);
     }
 

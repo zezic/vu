@@ -176,6 +176,7 @@ pub struct Config {
     pub shutter_frames: ShutterFrames,
     pub visualizer_text_scale: VisualizerTextScale,
     pub onset_thresholds: crate::visualizer::OnsetThresholds,
+    pub depth_fade: crate::visualizer::DepthFade,
 }
 
 pub fn config_file() -> anyhow::Result<PathBuf> {

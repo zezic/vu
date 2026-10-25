@@ -719,6 +719,9 @@ pub struct Meter {
     bass_threshold_value: Text,
     broadband_threshold_readout: Readout,
     broadband_threshold_value: Text,
+    depth_fade: visualizer::DepthFade,
+    depth_fade_readout: Readout,
+    depth_fade_value: Text,
     diagnosis_text: Option<Text>,
     diagnosis_anchor: Point,
     diagnosis_color: Color,
@@ -791,6 +794,10 @@ impl Meter {
             &mut fonts,
             &format!("{:.2}", onset_thresholds.broadband.value()),
         );
+        let depth_fade = config.depth_fade;
+        visualizer.set_depth_fade(depth_fade);
+        let depth_fade_readout = Readout::new(&mut fonts, "Depth Fade", ["[O]", "[P]"]);
+        let depth_fade_value = Readout::value(&mut fonts, &format!("{:>3}%", depth_fade.percent()));
         let scene_name = visualizer.scene_name();
         let mode_readout = Readout::gauge_inline(&mut fonts, ["[M]"]);
         let mode_value = Readout::gauge_value(&mut fonts, config.mode.name());
@@ -858,6 +865,9 @@ impl Meter {
             bass_threshold_value,
             broadband_threshold_readout,
             broadband_threshold_value,
+            depth_fade,
+            depth_fade_readout,
+            depth_fade_value,
             diagnosis_text: None,
             diagnosis_anchor: Point::ORIGIN,
             diagnosis_color: Color::new([1.0, 1.0, 1.0, 1.0]),
@@ -1070,6 +1080,17 @@ impl Meter {
         self.face_settings = None;
     }
 
+    pub fn set_depth_fade(&mut self, depth_fade: visualizer::DepthFade) {
+        if self.depth_fade == depth_fade {
+            return;
+        }
+        self.depth_fade = depth_fade;
+        self.visualizer.set_depth_fade(depth_fade);
+        self.depth_fade_value =
+            Readout::value(&mut self.fonts, &format!("{:>3}%", depth_fade.percent()));
+        self.face_settings = None;
+    }
+
     pub fn repair_needles(&mut self) {
         for needle in &mut self.needles {
             needle.motion.repair();
@@ -1277,6 +1298,12 @@ impl Meter {
                     scene,
                     top_left * Affine::translate((0.0, 132.0)),
                     &self.broadband_threshold_value,
+                    &hud_colors,
+                );
+                self.depth_fade_readout.draw_left_aligned(
+                    scene,
+                    top_left * Affine::translate((0.0, 176.0)),
+                    &self.depth_fade_value,
                     &hud_colors,
                 );
                 if self.debug {

@@ -121,6 +121,57 @@ impl Default for OnsetThresholds {
     }
 }
 
+/// Depth opacity modulation strength: 0 keeps every vertex opaque, 1 makes the
+/// farthest vertex fully transparent.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct DepthFade(f32);
+
+impl DepthFade {
+    const STEP: f32 = 0.05;
+
+    pub fn strength(self) -> f32 {
+        self.0
+    }
+
+    pub fn percent(self) -> u32 {
+        (self.0 * 100.0).round() as u32
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        let delta = match adjustment {
+            Adjustment::Decrease => -Self::STEP,
+            Adjustment::Increase => Self::STEP,
+        };
+        Self((self.0 + delta).clamp(0.0, 1.0))
+    }
+}
+
+impl Default for DepthFade {
+    fn default() -> Self {
+        Self(0.5)
+    }
+}
+
+impl TryFrom<f32> for DepthFade {
+    type Error = anyhow::Error;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        anyhow::ensure!(
+            value.is_finite() && (0.0..=1.0).contains(&value),
+            "depth_fade must be finite and between 0 and 1"
+        );
+        Ok(Self(value))
+    }
+}
+
+impl From<DepthFade> for f32 {
+    fn from(value: DepthFade) -> Self {
+        value.0
+    }
+}
+
 /// One exposure-swept line, in physical pixels, uploaded as a vertex instance.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -515,6 +566,7 @@ pub struct Visualizer {
     time: f32,
     transition_cooldown: f32,
     palette: Palette,
+    depth_fade: DepthFade,
     last_spectrum: Spectrum,
     bass_hit_flash: f32,
     broadband_hit_flash: f32,
@@ -551,6 +603,7 @@ impl Visualizer {
             time: 0.0,
             transition_cooldown: 0.0,
             palette: Palette::from_theme(ThemeId::default()),
+            depth_fade: DepthFade::default(),
             last_spectrum: Spectrum::default(),
             bass_hit_flash: 0.0,
             broadband_hit_flash: 0.0,
@@ -684,6 +737,14 @@ impl Visualizer {
     pub fn set_onset_thresholds(&mut self, thresholds: OnsetThresholds) {
         self.bass_onset.threshold = thresholds.bass.value();
         self.broadband_onset.threshold = thresholds.broadband.value();
+    }
+
+    pub fn depth_fade(&self) -> DepthFade {
+        self.depth_fade
+    }
+
+    pub fn set_depth_fade(&mut self, depth_fade: DepthFade) {
+        self.depth_fade = depth_fade;
     }
 
     pub fn diagnosis(&self) -> Option<&DiagnosisReadout> {
@@ -822,6 +883,7 @@ impl Visualizer {
             camera,
             colors,
             &self.palette,
+            self.depth_fade.strength(),
             width,
             self.time,
             &mut self.lines,
@@ -1284,6 +1346,7 @@ impl Scene {
         camera: Camera,
         colors: &MeterColors,
         palette: &Palette,
+        depth_fade: f32,
         width: f32,
         time: f32,
         out: &mut Vec<LineInstance>,
@@ -1308,6 +1371,7 @@ impl Scene {
             camera,
             colors,
             palette,
+            depth_fade,
             width,
             time,
             out,
@@ -1322,6 +1386,7 @@ impl Scene {
                 camera,
                 colors,
                 palette,
+                depth_fade,
                 width,
                 time,
                 out,
@@ -1420,6 +1485,7 @@ impl FigureRuntime {
         camera: Camera,
         colors: &MeterColors,
         palette: &Palette,
+        depth_fade: f32,
         base_width: f32,
         time: f32,
         out: &mut Vec<LineInstance>,
@@ -1465,7 +1531,8 @@ impl FigureRuntime {
             self.vertices.push(camera.project(world, self.pose));
         }
         self.update_kinematics(dt);
-        let depth_opacity = DepthOpacity::new(self.vertices.iter().map(|vertex| vertex.depth));
+        let depth_opacity =
+            DepthOpacity::new(self.vertices.iter().map(|vertex| vertex.depth), depth_fade);
         self.current.clear();
         self.current
             .extend(self.wireframe.edges().iter().map(|edge| {
@@ -2038,6 +2105,30 @@ mod tests {
     }
 
     #[test]
+    fn depth_fade_adjusts_in_five_percent_steps_and_stays_normalized() {
+        let fade = DepthFade::default();
+        assert_eq!(fade.percent(), 50);
+        assert_eq!(fade.adjusted(Adjustment::Increase).percent(), 55);
+        assert_eq!(fade.adjusted(Adjustment::Decrease).percent(), 45);
+
+        let mut lowest = fade;
+        for _ in 0..30 {
+            lowest = lowest.adjusted(Adjustment::Decrease);
+        }
+        assert_eq!(lowest.strength(), 0.0);
+
+        let mut highest = fade;
+        for _ in 0..30 {
+            highest = highest.adjusted(Adjustment::Increase);
+        }
+        assert_eq!(highest.strength(), 1.0);
+
+        assert!(DepthFade::try_from(-0.01).is_err());
+        assert!(DepthFade::try_from(1.01).is_err());
+        assert!(DepthFade::try_from(f32::NAN).is_err());
+    }
+
+    #[test]
     fn setting_onset_thresholds_reaches_the_debug_snapshot() {
         let mut visualizer = Visualizer::new();
         let thresholds = OnsetThresholds {
@@ -2235,6 +2326,26 @@ mod tests {
                 .any(|line| (line.start_color[3] - line.end_color[3]).abs() > 0.01),
             "an edge must interpolate between its endpoint depths"
         );
+
+        visualizer.set_depth_fade(DepthFade::try_from(0.0).unwrap());
+        let next = AudioInterval::new(
+            AudioTime::ZERO.shifted(1.0 / 60.0),
+            AudioTime::ZERO.shifted(2.0 / 60.0),
+        );
+        visualizer.update(
+            next,
+            ShutterFrames::try_from(1.0).unwrap(),
+            1.0 / 60.0,
+            &colors,
+            &palette,
+            (1280.0, 440.0),
+            1.0,
+            1.0,
+        );
+        for edge in &visualizer.scene.current.current {
+            assert_eq!(edge.start_depth_opacity, 1.0);
+            assert_eq!(edge.end_depth_opacity, 1.0);
+        }
     }
 
     #[test]
