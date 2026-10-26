@@ -161,7 +161,7 @@ impl App {
                 };
                 detectors.kick_onset_min_interval = (detectors.kick_onset_min_interval + delta)
                     .clamp(visualizer::FLUX_INTERVAL_MIN, visualizer::FLUX_INTERVAL_MAX);
-                settings.detectors = detectors;
+                settings.detectors = detectors.clone();
                 self.meter.set_detector_settings(detectors);
             }
             Setting::DropGapThreshold => {
@@ -174,7 +174,7 @@ impl App {
                     visualizer::DROP_GAP_THRESHOLD_MIN,
                     visualizer::DROP_GAP_THRESHOLD_MAX,
                 );
-                settings.detectors = detectors;
+                settings.detectors = detectors.clone();
                 self.meter.set_detector_settings(detectors);
             }
             Setting::DepthFade => {

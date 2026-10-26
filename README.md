@@ -87,20 +87,37 @@ A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The band
 drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,
 and the pulse. The accent band shifts which clean vivid theme color each newly
 spawned figure takes.
-Every band runs a spectral-flux onset detector. Each FFT frame compresses every
-bin to `log1p(magnitude)`, takes the positive difference from the previous frame,
-and sums it over the band's bins. The summed flux is smoothed by an attack/release
-exponential filter (5 ms attack, 50 ms release by default). A slow exponential
-average of the smoothed flux (200 ms by default) forms an adaptive threshold;
-sensitivity and a minimum threshold set how far a peak must rise, local-peak
-detection confirms the turn, and a 30 ms minimum gap prevents chatter. Each onset
-carries the peak's ratio to its adaptive threshold as its power.
+Every band extracts a continuous onset flow from its FFT bins. Each bin keeps a
+background envelope with configurable attack and release (320 ms and 200 ms by
+default), and the positive relative excess over that background is divided by
+`background + floor` (1% of the normalized magnitude scale by default), capped
+(1.0 by default), and averaged over the band's bins. The tracked low/high
+references give the band's absolute dynamic range, `ABDR = high - low`; the mean
+ABDR across the bands is `WSDR`, and `DRP = ABDR / WSDR`. The tracked high
+reference is scaled by the per-band `ABL GAIN` (0.5 to 8.0) and shaped by the
+per-band curve (S-curve, amount 2.5 by default), giving `ABL`. The continuous
+per-band onset flow is `excess * DRP * ABL`. The visual band envelope still uses
+the input curve and amount, but the onset detector reads the FFT bins directly
+and does not use the band curve.
 
-The kick and snare detectors each project the 16-band spectral flux through a
-drawable onset kernel and run the same attack/release envelope, slow adaptive
-average, and local-peak detector, with their own dedicated flux settings. The
-kick kernel defaults to bands 00-04 and the snare kernel to bands 05, 06, 10,
-and 12.
+The kick and snare detectors use 0.5 s temporal onset templates. A template is
+defined by two polygons in the normalized time-by-band plane: the inner polygon
+is the maximum, the outer polygon is the zero boundary, and the field between
+them is interpolated. The resulting field is matched against the recent
+per-band onset stream with a normalized dot product. A second, independently
+editable suppression kernel supplies the inhibition projection, scaled by the
+detector's `ONS SUPPRESS` control (0.5 by default). The residual flow runs
+through the detector's own attack/release envelope, slow adaptive average, and local-peak
+detector; only the composite detectors emit boolean onsets. Their local-peak
+threshold and minimum gap are the `ONS THRESH` and `ONS GAP` controls, with a
+140 ms gap by default. Each detector also has an `ONS PRE` trim on the matched
+projection before tracking, so a loud projection can be brought into the
+tracker's range. `KERNEL AREA` limits the template from its start up to the
+chosen fraction, so the leftmost part of the kernel is always kept; the end of
+that effective area is faded out over 10% of its length. The initial templates place a short band mask at the right edge
+of the half-second canvas: bands 00-04 for kick and the snare region around
+bands 05-12. Their default suppression kernels cover the opposite band region
+over the full canvas.
 The drop detector projects the 16 band levels through two drawable kernels: a
 low kernel and a high kernel. Each projection is normalized by its kernel weight
 sum, and the high-minus-low difference is averaged over a rolling window
@@ -110,14 +127,15 @@ scaled mean reaches the confidence threshold (0.15 by default), eligibility
 latches high and stays high even if the confidence later falls; only a composite
 onset from a third, independent onset kernel can clear it and confirm the drop.
 A short deep gap and a long medium gap therefore contribute to the same
-confidence budget, and the threshold may be negative. Its onset kernel projects
-the per-band spectral flux and runs through the same attack/release envelope,
-slow adaptive average, and local-peak detector as the per-band onsets, but with
-its own dedicated flux settings. A kick emits a sequenced quake impulse and
-drives the kick envelope; a snare flips the figure's pitch baseline every Nth
-detection and chokes the kick; a drop always changes the scene, emits a vertical
-quake, and chokes the kick. Flip and quake are damped springs, so both actions
-overshoot slightly and settle.
+confidence budget, and the threshold may be negative. Its onset kernel
+multiplies the continuous per-band onset flow, subtracts its own inverted-kernel
+projection (0.5 by default), and runs through the same attack/release envelope,
+slow adaptive average, and local-peak detector as the other composite
+detectors, with its own dedicated onset settings. A kick emits a sequenced
+quake impulse and drives the kick envelope; a snare flips the figure's pitch
+baseline every Nth detection and chokes the kick; a drop always changes the
+scene, emits a vertical quake, and chokes the kick. Flip and quake are damped
+springs, so both actions overshoot slightly and settle.
 
 All envelopes are smoothed with fast attack and slower release. Shape changes
 crossfade and parameter changes ease toward their new targets. Every moving edge
@@ -197,10 +215,10 @@ the selection.
 
 The inspector follows the selection:
 
-- selecting a band draws its smoothed and raw level history, its raw and
-  smoothed spectral flux with the adaptive threshold, its onset ticks, any
-  confirmed detector it feeds, and every animation property whose state depends
-  on that band.
+- selecting a band draws its smoothed and raw level history, its relative excess
+  and continuous onset flow, its ABDR, ABL, and DRP values, any confirmed
+  detector it feeds, and every animation property whose state depends on that
+  band.
 - selecting a property draws its own history plus a graph for every band and
   envelope that feeds its computation
 - every property row carries small `M` and `S` buttons. `M` mutes that property
@@ -209,7 +227,7 @@ The inspector follows the selection:
   solo persist with the rest of the inspector tuning.
 - every dependency graph carries a short caption naming how its result reaches
   the selected property, for example `×0.18 add to energy`, `rate ×1.8 add`, or
-  `raw + smoothed flux / threshold`
+  `excess + onset flow`
 - four or more dependency graphs wrap into two rows so their traces and captions
   stay legible
 - the property output graph carries small maximum buttons along its bottom
@@ -268,23 +286,58 @@ The inspector follows the selection:
   thumbs are tall enough for comfortable dragging.
 - clicking a detector row or its `DETECTOR` leaf shows that detector's parameters
   in the same bottom parameter section of the tree pane used by ordinary
-  components. `FLUX ONSET` exposes attack, release, average, sensitivity,
-  minimum threshold, and minimum gap. `KICK` exposes its six dedicated
-  onset-flux settings, a kick kernel bank, snare and drop choke times, quake
-  multiplier, quake sequence length, and quake spring. `SNARE` exposes its six
-  dedicated onset-flux settings, a snare kernel bank, flip count, choke, and
-  flip spring. `DROP` exposes the gap window, confidence gain, confidence
-  threshold, its six dedicated onset-flux settings, and quake multiplier, plus
-  three kernel banks (`LOW`, `HIGH`, `ONSET`). Press and drag across a bank to
-  draw its shape; the brush interpolates across columns and release ends the
-  stroke. No separate pane is created. Selecting `KICK`, `SNARE`, or `DROP`
-  (or its `DETECTOR` leaf) switches the inspector extension to that detector's
-  traces. Kick and snare show the composite kernel onset flux against its
-  adaptive threshold, plus the trigger flash. Drop shows the low and high
+  components. The `FLUX ENV` button in the analyzer header opens the per-band
+  onset analyzer: 16 bars show every band's continuous onset flow and a raw
+  excess tick, and clicking a bar selects that band. The analyzer pane exposes
+  the selected band's scaling controls (`LOW REF`, `HIGH REF`, `AUTO REFS`,
+  `ABL GAIN`, `ABL CURVE`, `ABL AMT`) together with the shared relative-excess
+  background settings (`BG ATTACK`, `BG RELEASE`, `EXCESS FLOOR`,
+  `EXCESS CAP`), and the inspector extension graphs that band's raw excess and
+  processed onset flow. A second graph below shows the raw band level with its
+  live low/high reference markers and faint reference lines across the full
+  history. Inside the analyzer pane, below the 16-band flow bank, two internal
+  graphs plot `ABDR`/`WSDR`/`DRP` and `ABL`/`EXCESS`/`ONSET` for the selected
+  band. The local-peak threshold and minimum interval are the `ONS THRESH`
+  and `ONS GAP` controls of each `KICK`, `SNARE`, and `DROP` detector. `KICK`
+  exposes its seven dedicated onset settings, main and suppression kernels,
+  snare and drop choke times, quake multiplier, quake
+  sequence length, and quake spring. `SNARE` exposes its seven dedicated onset
+  settings, main and suppression kernels, flip count, choke, and flip spring. The editor is one overlay canvas over the 16-band
+  onset-input spectrogram; there is no separate kernel window. The spectrogram
+  and computed kernel use the same intensity gradient: transparent red
+  (weakest), red, magenta, blue, cyan, green, and foreground (strongest).
+  `CLEAR` resets the kernel to its initial 0.5 s polygons. The `KERNEL AREA`
+  slider limits the matched fraction from the kernel start up to 10-100% and
+  fades the end of that fraction. `OVERLAY` shows the yellow polygon editor over the
+  spectrogram; `PREVIEW` shows the computed kernel field; `PAUSE` freezes the
+  spectrogram; `SUPPRESS` switches the editor between the main and suppression
+  kernels. The offset bar under the canvas shifts it left or right by up to
+  0.25 s while keeping the kernel fixed for comparison. Each kernel starts as two
+  nested yellow polygons with four control points each. Drag a vertex to reshape
+  it; hovering highlights the nearest control point or edge, with a point
+  hitbox three times its drawn size.
+  Double-click a point to delete it and double-click an edge to add one. The
+  inner polygon is the high contour and the outer polygon is the zero contour,
+  with the field interpolated between them. `DROP` exposes the gap window,
+  confidence gain, confidence threshold, its seven dedicated onset settings,
+  inverted-kernel suppression, and quake multiplier, plus three kernel banks
+  (`LOW`, `HIGH`, `ONSET`). Press and drag across a drop bank to draw its
+  shape; the brush interpolates across columns and release ends the stroke. No separate pane is created. Selecting
+  `KICK`, `SNARE`, or `DROP` (or its `DETECTOR` leaf) switches the inspector
+  extension to that detector's traces. Kick and snare show the composite template
+  onset flow against its adaptive threshold, plus the trigger flash. A
+  suppression graph sits directly below the onset graph: it draws the
+  suppression projection and the weighted part actually subtracted, both
+  growing downward from a zero line at the top. Drop shows the low and high
   projections, their difference, window confidence, latched eligibility,
-  composite onset flux and threshold, and trigger flash. The header reports the
-  detector state, flux or gap values against the threshold, hit total, and last
-  power.
+  composite onset flow and threshold, its suppression analysis, and trigger
+  flash. The header reports the detector state, onset or gap values against the
+  threshold, hit total, and last power. Temporal templates persist per detector
+  as the two polygons; configs written before the polygon editor load their
+  previous step templates or 16-band kick/snare kernels as initial polygons.
+  Per-band ABL settings persist as one recipe per band, while the relative-excess
+  settings are global. Configs with the previous per-band flux recipes still load
+  and use the new defaults.
 - every inspector edit persists in the config: detector changes (also reachable
   through the `G` / `H` and `J` / `K` hotkeys), envelope rates, kick decay, style
   values, component gains, band routing, input shaping, mix modes, extra inputs,
@@ -293,11 +346,10 @@ The inspector follows the selection:
   by a later drop; untuned style values keep their random variation. Adaptive
   reference positions are tracking state, so only the `AUTO REFS` choice is
   stored and the references adapt again after a restart.
-- onset graphs show the decaying trigger flash and mark confirmed triggers along
-  the top. The band flux graph shows raw and smoothed flux plus the adaptive
-  threshold, and marks each onset. Every graph uses the same four-second
-  display-rate history, and each band row's onset strip covers the last 0.6
-  seconds, marking only full-opacity trigger blocks at confirmed flux peaks.
+- composite onset graphs show the decaying trigger flash and mark confirmed
+  triggers along the top. The band onset graph shows raw relative excess and
+  the processed continuous onset flow, without per-band trigger marks. Every
+  graph uses the same four-second display-rate history.
 
 ![Wireframe visualizer with analysis debug panel](./assets/visualizer-debug.png)
 

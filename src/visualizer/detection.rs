@@ -1,20 +1,34 @@
-//! Per-band onset tracking and the kick, snare, and drop detectors.
+//! Per-band relative-excess extraction and the kick, snare, and drop detectors.
 //!
-//! Every band runs a spectral-flux detector: positive log-magnitude changes
-//! are summed over the band's FFT bins, smoothed with an attack/release filter,
-//! and compared with a slow adaptive average. A local peak above that threshold
-//! becomes a band onset.
+//! Every band extracts a continuous onset signal from its FFT bins. Each bin
+//! keeps a background envelope, and the positive relative excess over that
+//! background is capped and averaged over the band. ABDR, WSDR, DRP, and ABL
+//! then position that signal relative to the whole spectrum before the composite
+//! detectors multiply it by their kernels.
 //!
-//! The drop detector projects the band levels onto a low and a high kernel,
-//! accumulates their difference in a rolling window, and gates a composite
-//! onset detector with that window's confidence.
+//! Only the kick, snare, and drop detectors produce boolean onsets, from the
+//! kernel-projected continuous flow. The drop also projects the band levels onto
+//! a low and a high kernel, accumulates their difference in a rolling window,
+//! and gates its onset detector with that window's confidence.
 
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
-use super::spectrum::Spectrum;
-use super::BAND_COUNT;
+use super::spectrum::{RelativeExcessSettings, Spectrum};
+use super::{Curve, BAND_COUNT};
+
+pub const ABL_GAIN_MIN: f32 = 0.5;
+pub const ABL_GAIN_MAX: f32 = 8.0;
+pub const ABL_AMOUNT_MIN: f32 = 0.0;
+pub const EXCESS_ATTACK_MIN: f32 = 0.05;
+pub const EXCESS_ATTACK_MAX: f32 = 2.0;
+pub const EXCESS_RELEASE_MIN: f32 = 0.05;
+pub const EXCESS_RELEASE_MAX: f32 = 2.0;
+pub const EXCESS_FLOOR_MIN: f32 = 0.0;
+pub const EXCESS_FLOOR_MAX: f32 = 0.2;
+pub const EXCESS_CAP_MIN: f32 = 0.1;
+pub const EXCESS_CAP_MAX: f32 = 4.0;
 
 pub const FLUX_ATTACK_MIN: f32 = 0.001;
 pub const FLUX_ATTACK_MAX: f32 = 0.1;
@@ -25,15 +39,18 @@ pub const FLUX_AVERAGE_MAX: f32 = 1.0;
 pub const FLUX_SENSITIVITY_MIN: f32 = 0.5;
 pub const FLUX_SENSITIVITY_MAX: f32 = 5.0;
 pub const FLUX_THRESHOLD_MIN: f32 = 0.0;
-pub const FLUX_THRESHOLD_MAX: f32 = 2.0;
 /// Upper bound of the dedicated composite-onset minimum threshold.
 pub const ONSET_THRESHOLD_MAX: f32 = 0.25;
 pub const FLUX_INTERVAL_MIN: f32 = 0.005;
 pub const FLUX_INTERVAL_MAX: f32 = 0.2;
+pub const FLUX_SUPPRESSION_MIN: f32 = 0.0;
+pub const FLUX_SUPPRESSION_MAX: f32 = 2.0;
+pub const FLUX_PRE_GAIN_MIN: f32 = 0.01;
+pub const FLUX_PRE_GAIN_MAX: f32 = 4.0;
 pub const CHOKE_MIN: f32 = 0.0;
 pub const CHOKE_MAX: f32 = 2.0;
 pub const QUAKE_FACTOR_MIN: f32 = 0.0;
-pub const QUAKE_FACTOR_MAX: f32 = 20.0;
+pub const QUAKE_FACTOR_MAX: f32 = 50.0;
 pub const SEQUENCE_EVERY_MIN: u32 = 1;
 pub const SEQUENCE_EVERY_MAX: u32 = 32;
 pub const DROP_GAP_WINDOW_MIN: f32 = 0.1;
@@ -71,24 +88,6 @@ impl DropKernel {
             Self::Low => "LOW",
             Self::High => "HIGH",
             Self::Onset => "ONSET",
-        }
-    }
-}
-
-/// One drawable kernel in the detector inspector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DetectorKernel {
-    Kick,
-    Snare,
-    Drop(DropKernel),
-}
-
-impl DetectorKernel {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Kick => "KICK",
-            Self::Snare => "SNARE",
-            Self::Drop(kernel) => kernel.label(),
         }
     }
 }
@@ -170,44 +169,382 @@ fn validate_kernel(name: &str, weights: &[f32; BAND_COUNT]) -> anyhow::Result<()
     Ok(())
 }
 
+/// Per-band absolute-loudness shaping. The tracked high reference is scaled by
+/// the gain and then passed through the curve.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BandOnsetSettings {
+    pub abl_gain: f32,
+    pub abl_curve: Curve,
+    pub abl_amount: f32,
+}
+
+impl Default for BandOnsetSettings {
+    fn default() -> Self {
+        Self {
+            abl_gain: 1.0,
+            abl_curve: Curve::SCurve,
+            abl_amount: 2.5,
+        }
+    }
+}
+
+impl BandOnsetSettings {
+    pub fn loudness(self, high: f32) -> f32 {
+        let scaled = (high * self.abl_gain).clamp(0.0, 1.0);
+        self.abl_curve.apply(scaled, self.abl_amount)
+    }
+}
+
+/// Largest number of analysis steps a half-second template can span.
+pub const PATTERN_MAX_STEPS: usize = 192;
+
+/// Which of the two temporal template polygons a vertex belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatternLayer {
+    Inner,
+    Outer,
+}
+
+/// Which of the two temporal templates a point belongs to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PatternKernel {
+    #[default]
+    Main,
+    Suppression,
+}
+
+/// Normalized time-by-band polygon vertices. Time runs left to right and band
+/// runs top to bottom, both in 0..1.
+pub type PatternPolygon = Vec<[f32; 2]>;
+
+/// A time-by-band onset template. The template is always half a second long;
+/// two polygons define its field: the inner polygon is the maximum, the outer
+/// polygon is the zero boundary, and the region between them is interpolated.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemporalPattern {
+    pub inner: PatternPolygon,
+    pub outer: PatternPolygon,
+    pub suppression_inner: PatternPolygon,
+    pub suppression_outer: PatternPolygon,
+    /// Fraction of the half-second template used for matching, 0.1..1.0.
+    #[serde(default = "default_pattern_area")]
+    pub effective: f32,
+}
+
+fn default_pattern_area() -> f32 {
+    1.0
+}
+
+impl Default for TemporalPattern {
+    fn default() -> Self {
+        Self::kick_initial()
+    }
+}
+
+impl TemporalPattern {
+    pub fn kick_initial() -> Self {
+        Self {
+            inner: rectangle(0.8, 1.0, 0.0, 0.28),
+            outer: rectangle(0.8, 1.0, 0.0, 5.0 / BAND_COUNT as f32),
+            suppression_inner: rectangle(0.0, 1.0, 6.0 / BAND_COUNT as f32, 0.95),
+            suppression_outer: rectangle(0.0, 1.0, 5.0 / BAND_COUNT as f32, 1.0),
+            effective: 1.0,
+        }
+    }
+
+    pub fn snare_initial() -> Self {
+        Self {
+            inner: rectangle(0.90, 1.0, 0.34, 0.78),
+            outer: rectangle(0.90, 1.0, 5.0 / BAND_COUNT as f32, 13.0 / BAND_COUNT as f32),
+            suppression_inner: rectangle(0.0, 1.0, 0.0, 4.0 / BAND_COUNT as f32),
+            suppression_outer: rectangle(0.0, 1.0, 0.0, 5.0 / BAND_COUNT as f32),
+            effective: 1.0,
+        }
+    }
+
+    /// Approximates a previous step-grid pattern with a band-region rectangle.
+    pub fn from_legacy_steps(steps: &[[f32; BAND_COUNT]]) -> Self {
+        let mut minimum = BAND_COUNT;
+        let mut maximum = 0;
+        for step in steps {
+            for (band, value) in step.iter().enumerate() {
+                if *value > 0.0 {
+                    minimum = minimum.min(band);
+                    maximum = maximum.max(band);
+                }
+            }
+        }
+        if minimum >= BAND_COUNT {
+            return Self::kick_initial();
+        }
+        let low = minimum as f32 / BAND_COUNT as f32;
+        let high = (maximum + 1) as f32 / BAND_COUNT as f32;
+        let start = if steps.len() == 1 { 0.8 } else { 0.0 };
+        Self {
+            inner: rectangle(start, 1.0, low, high),
+            outer: rectangle(start, 1.0, (low - 0.06).max(0.0), (high + 0.06).min(1.0)),
+            suppression_inner: Vec::new(),
+            suppression_outer: Vec::new(),
+            effective: 1.0,
+        }
+    }
+
+    pub fn contains_band(&self, band: usize) -> bool {
+        let y = (band as f32 + 0.5) / BAND_COUNT as f32;
+        (0..16).any(|step| self.field_value((step as f32 + 0.5) / 16.0, y) > 0.01)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        validate_polygon("inner", &self.inner)?;
+        validate_polygon("outer", &self.outer)?;
+        validate_polygon("suppression inner", &self.suppression_inner)?;
+        validate_polygon("suppression outer", &self.suppression_outer)?;
+        anyhow::ensure!(
+            self.effective.is_finite() && (0.1..=1.0).contains(&self.effective),
+            "temporal pattern effective area must be between 10% and 100%"
+        );
+        Ok(())
+    }
+
+    pub fn polygons(&self, kernel: PatternKernel) -> (&PatternPolygon, &PatternPolygon) {
+        match kernel {
+            PatternKernel::Main => (&self.inner, &self.outer),
+            PatternKernel::Suppression => (&self.suppression_inner, &self.suppression_outer),
+        }
+    }
+
+    /// Field value at normalized time and band.
+    pub fn field_value(&self, x: f32, y: f32) -> f32 {
+        field_value_for(&self.inner, &self.outer, x, y)
+    }
+
+    pub fn suppression_field_value(&self, x: f32, y: f32) -> f32 {
+        field_value_for(&self.suppression_inner, &self.suppression_outer, x, y)
+    }
+
+    /// Effective field at normalized time and band. The retained part starts
+    /// at the template start; the end of the effective area is faded over its
+    /// last 10%.
+    pub fn effective_field_value(&self, x: f32, y: f32) -> f32 {
+        self.effective_field_value_for(PatternKernel::Main, x, y)
+    }
+
+    pub fn suppression_effective_field_value(&self, x: f32, y: f32) -> f32 {
+        self.effective_field_value_for(PatternKernel::Suppression, x, y)
+    }
+
+    pub fn effective_field_value_for(&self, kernel: PatternKernel, x: f32, y: f32) -> f32 {
+        let effective = self.effective.clamp(0.1, 1.0);
+        if x > effective {
+            return 0.0;
+        }
+        let within = (x / effective).clamp(0.0, 1.0);
+        let fade = if effective < 1.0 {
+            ((1.0 - within) / 0.1).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let (inner, outer) = self.polygons(kernel);
+        field_value_for(inner, outer, x, y) * fade
+    }
+
+    fn sample_steps(&self, kernel: PatternKernel, steps: usize) -> Vec<[f32; BAND_COUNT]> {
+        let effective = self.effective.clamp(0.1, 1.0);
+        (0..steps)
+            .map(|step| {
+                let within = (step as f32 + 0.5) / steps as f32;
+                let x = within * effective;
+                std::array::from_fn(|band| {
+                    self.effective_field_value_for(
+                        kernel,
+                        x,
+                        (band as f32 + 0.5) / BAND_COUNT as f32,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Matches the template against the newest part of the onset history and
+    /// returns the main-kernel excitation, the suppression-kernel inhibition,
+    /// and their residual after suppression.
+    fn project(
+        &self,
+        history: &VecDeque<[f32; BAND_COUNT]>,
+        suppression: f32,
+        pre_gain: f32,
+        steps: usize,
+    ) -> OnsetProjection {
+        let take = steps.clamp(1, PATTERN_MAX_STEPS).min(history.len());
+        if take == 0 {
+            return OnsetProjection::default();
+        }
+        let effective_steps =
+            ((take as f32 * self.effective.clamp(0.1, 1.0)).ceil() as usize).clamp(1, take);
+        let offset = history.len() - effective_steps;
+        let pattern = self.sample_steps(PatternKernel::Main, effective_steps);
+        let suppressor_weights = self.sample_steps(PatternKernel::Suppression, effective_steps);
+        let mut excited = 0.0;
+        let mut excitation_weight = 0.0;
+        let mut inhibited = 0.0;
+        let mut inhibition_weight = 0.0;
+        for (step_index, weights) in pattern.iter().enumerate() {
+            let flow = &history[offset + step_index];
+            for band in 0..BAND_COUNT {
+                let weight = weights[band].clamp(0.0, 1.0);
+                excited += weight * flow[band];
+                excitation_weight += weight;
+                let suppressor = suppressor_weights[step_index][band].clamp(0.0, 1.0);
+                inhibited += suppressor * flow[band];
+                inhibition_weight += suppressor;
+            }
+        }
+        let excitation = if excitation_weight > KERNEL_EPSILON {
+            excited / excitation_weight
+        } else {
+            0.0
+        } * pre_gain;
+        let inhibition = if inhibition_weight > KERNEL_EPSILON {
+            inhibited / inhibition_weight
+        } else {
+            0.0
+        } * pre_gain;
+        let suppressed = suppression * inhibition;
+        OnsetProjection {
+            inhibition,
+            suppressed,
+            residual: (excitation - suppressed).max(0.0),
+        }
+    }
+}
+
+fn rectangle(x0: f32, x1: f32, y0: f32, y1: f32) -> PatternPolygon {
+    vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+}
+
+fn field_value_for(inner: &[[f32; 2]], outer: &[[f32; 2]], x: f32, y: f32) -> f32 {
+    if inner.len() < 3 || outer.len() < 3 {
+        return 0.0;
+    }
+    if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+        return 0.0;
+    }
+    if point_in_polygon(inner, x, y) {
+        return 1.0;
+    }
+    if !point_in_polygon(outer, x, y) {
+        return 0.0;
+    }
+    let inner_distance = distance_to_polygon(inner, x, y).max(KERNEL_EPSILON);
+    let outer_distance = distance_to_polygon(outer, x, y).max(KERNEL_EPSILON);
+    (outer_distance / (inner_distance + outer_distance)).clamp(0.0, 1.0)
+}
+
+fn validate_polygon(name: &str, points: &[[f32; 2]]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (3..=32).contains(&points.len()),
+        "temporal {name} polygon must have between 3 and 32 vertices"
+    );
+    for (index, point) in points.iter().enumerate() {
+        anyhow::ensure!(
+            point[0].is_finite()
+                && point[1].is_finite()
+                && (0.0..=1.0).contains(&point[0])
+                && (0.0..=1.0).contains(&point[1]),
+            "temporal {name} vertex {index} must be inside the normalized grid"
+        );
+    }
+    Ok(())
+}
+
+fn point_in_polygon(points: &[[f32; 2]], x: f32, y: f32) -> bool {
+    if points.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut previous = points.len() - 1;
+    for current in 0..points.len() {
+        let a = points[current];
+        let b = points[previous];
+        let crosses = (a[1] > y) != (b[1] > y)
+            && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1] + f32::EPSILON) + a[0];
+        if crosses {
+            inside = !inside;
+        }
+        previous = current;
+    }
+    inside
+}
+
+fn distance_to_polygon(points: &[[f32; 2]], x: f32, y: f32) -> f32 {
+    let mut distance = f32::INFINITY;
+    if points.len() < 2 {
+        return distance;
+    }
+    let mut previous = points.len() - 1;
+    for current in 0..points.len() {
+        distance = distance.min(distance_to_segment(points[previous], points[current], x, y));
+        previous = current;
+    }
+    distance
+}
+
+fn distance_to_segment(a: [f32; 2], b: [f32; 2], x: f32, y: f32) -> f32 {
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    let length_squared = dx * dx + dy * dy;
+    if length_squared <= f32::EPSILON {
+        return ((x - a[0]).powi(2) + (y - a[1]).powi(2)).sqrt();
+    }
+    let t = (((x - a[0]) * dx + (y - a[1]) * dy) / length_squared).clamp(0.0, 1.0);
+    let px = a[0] + t * dx;
+    let py = a[1] + t * dy;
+    ((x - px).powi(2) + (y - py).powi(2)).sqrt()
+}
+
 /// All user-tunable detector configuration. The whole value persists in the
 /// config file and is mirrored by the inspector sliders.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "DetectorSettingsRaw", into = "DetectorSettingsRaw")]
 pub struct DetectorSettings {
-    /// Flux smoothing attack and release time constants in seconds.
-    pub flux_attack: f32,
-    pub flux_release: f32,
-    /// Slow exponential average that forms the adaptive threshold.
-    pub flux_average: f32,
-    pub flux_sensitivity: f32,
-    pub flux_min_threshold: f32,
-    /// Do not report another onset before this interval has elapsed.
-    pub flux_min_interval: f32,
-    /// Per-band weights for the kick onset projection.
-    pub kick_kernel: [f32; BAND_COUNT],
-    /// Dedicated flux tracker settings for the kick onset kernel.
+    /// Per-band absolute-loudness shaping used by the onset flow.
+    pub band_onset: [BandOnsetSettings; BAND_COUNT],
+    /// Per-bin relative-excess background detector.
+    pub excess: RelativeExcessSettings,
+    /// Temporal onset template for the kick detector.
+    pub kick_pattern: TemporalPattern,
+    /// Trim applied to the kick pattern projection before onset tracking.
+    pub kick_onset_pre_gain: f32,
+    /// Dedicated onset tracker settings for the kick onset kernel.
     pub kick_onset_attack: f32,
     pub kick_onset_release: f32,
     pub kick_onset_average: f32,
     pub kick_onset_sensitivity: f32,
     pub kick_onset_min_threshold: f32,
     pub kick_onset_min_interval: f32,
+    /// Weight of the kick suppression-kernel flow subtracted from its onset flow.
+    pub kick_onset_suppression: f32,
     /// Time the kick stays muted after a confirmed snare or drop.
     pub kick_snare_choke: f32,
     pub kick_drop_choke: f32,
     pub kick_quake_factor: f32,
     /// A new quake direction is taken every this many kicks.
     pub kick_sequence_every: u32,
-    /// Per-band weights for the snare onset projection.
-    pub snare_kernel: [f32; BAND_COUNT],
-    /// Dedicated flux tracker settings for the snare onset kernel.
+    /// Temporal onset template for the snare detector.
+    pub snare_pattern: TemporalPattern,
+    /// Trim applied to the snare pattern projection before onset tracking.
+    pub snare_onset_pre_gain: f32,
+    /// Dedicated onset tracker settings for the snare onset kernel.
     pub snare_onset_attack: f32,
     pub snare_onset_release: f32,
     pub snare_onset_average: f32,
     pub snare_onset_sensitivity: f32,
     pub snare_onset_min_threshold: f32,
     pub snare_onset_min_interval: f32,
+    /// Weight of the snare suppression-kernel flow subtracted from its onset flow.
+    pub snare_onset_suppression: f32,
     pub snare_flip_every: u32,
     pub snare_choke: f32,
     pub flip_stiffness: f32,
@@ -221,13 +558,16 @@ pub struct DetectorSettings {
     pub drop_gap_threshold: f32,
     /// Multiplies the window mean around zero before the threshold comparison.
     pub drop_gap_gain: f32,
-    /// Dedicated flux tracker settings for the composite onset kernel.
+    /// Dedicated onset tracker settings for the composite onset kernel.
+    pub drop_onset_pre_gain: f32,
     pub drop_onset_attack: f32,
     pub drop_onset_release: f32,
     pub drop_onset_average: f32,
     pub drop_onset_sensitivity: f32,
     pub drop_onset_min_threshold: f32,
     pub drop_onset_min_interval: f32,
+    /// Weight of the inverted-kernel flow subtracted from the drop onset flow.
+    pub drop_onset_suppression: f32,
     pub drop_quake_factor: f32,
     pub quake_stiffness: f32,
     pub quake_damping: f32,
@@ -236,36 +576,30 @@ pub struct DetectorSettings {
 impl Default for DetectorSettings {
     fn default() -> Self {
         Self {
-            flux_attack: 0.005,
-            flux_release: 0.05,
-            flux_average: 0.2,
-            flux_sensitivity: 1.5,
-            flux_min_threshold: 0.01,
-            flux_min_interval: 0.03,
-            kick_kernel: std::array::from_fn(|band| if band < 5 { 1.0 } else { 0.0 }),
+            band_onset: [BandOnsetSettings::default(); BAND_COUNT],
+            excess: RelativeExcessSettings::default(),
+            kick_pattern: TemporalPattern::kick_initial(),
+            kick_onset_pre_gain: 1.0,
             kick_onset_attack: 0.005,
             kick_onset_release: 0.05,
             kick_onset_average: 0.2,
             kick_onset_sensitivity: 1.5,
             kick_onset_min_threshold: 0.01,
-            kick_onset_min_interval: 0.03,
+            kick_onset_min_interval: 0.14,
+            kick_onset_suppression: 0.5,
             kick_snare_choke: 0.12,
             kick_drop_choke: 0.2,
             kick_quake_factor: 2.0,
             kick_sequence_every: 1,
-            snare_kernel: std::array::from_fn(|band| {
-                if matches!(band, 5 | 6 | 10 | 12) {
-                    1.0
-                } else {
-                    0.0
-                }
-            }),
+            snare_pattern: TemporalPattern::snare_initial(),
+            snare_onset_pre_gain: 1.0,
             snare_onset_attack: 0.005,
             snare_onset_release: 0.05,
             snare_onset_average: 0.2,
             snare_onset_sensitivity: 1.5,
             snare_onset_min_threshold: 0.01,
-            snare_onset_min_interval: 0.03,
+            snare_onset_min_interval: 0.14,
+            snare_onset_suppression: 0.5,
             snare_flip_every: 4,
             snare_choke: 0.12,
             flip_stiffness: 70.0,
@@ -274,12 +608,14 @@ impl Default for DetectorSettings {
             drop_gap_window: 1.0,
             drop_gap_threshold: 0.15,
             drop_gap_gain: 1.0,
+            drop_onset_pre_gain: 1.0,
             drop_onset_attack: 0.005,
             drop_onset_release: 0.05,
             drop_onset_average: 0.2,
             drop_onset_sensitivity: 1.5,
             drop_onset_min_threshold: 0.01,
-            drop_onset_min_interval: 0.03,
+            drop_onset_min_interval: 0.14,
+            drop_onset_suppression: 0.5,
             drop_quake_factor: 1.0,
             quake_stiffness: 140.0,
             quake_damping: 9.0,
@@ -289,42 +625,43 @@ impl Default for DetectorSettings {
 
 impl DetectorSettings {
     pub fn validate(self) -> anyhow::Result<Self> {
+        for (band, settings) in self.band_onset.iter().enumerate() {
+            anyhow::ensure!(
+                settings.abl_gain.is_finite()
+                    && (ABL_GAIN_MIN..=ABL_GAIN_MAX).contains(&settings.abl_gain),
+                "band {band} ABL gain must be between {ABL_GAIN_MIN} and {ABL_GAIN_MAX}"
+            );
+            anyhow::ensure!(
+                settings.abl_amount.is_finite()
+                    && (ABL_AMOUNT_MIN..=Curve::MAX_AMOUNT).contains(&settings.abl_amount),
+                "band {band} ABL amount must be between {ABL_AMOUNT_MIN} and {}",
+                Curve::MAX_AMOUNT
+            );
+        }
         for (name, value, minimum, maximum) in [
             (
-                "flux_attack",
-                self.flux_attack,
-                FLUX_ATTACK_MIN,
-                FLUX_ATTACK_MAX,
+                "excess background_attack",
+                self.excess.background_attack,
+                EXCESS_ATTACK_MIN,
+                EXCESS_ATTACK_MAX,
             ),
             (
-                "flux_release",
-                self.flux_release,
-                FLUX_RELEASE_MIN,
-                FLUX_RELEASE_MAX,
+                "excess background_release",
+                self.excess.background_release,
+                EXCESS_RELEASE_MIN,
+                EXCESS_RELEASE_MAX,
             ),
             (
-                "flux_average",
-                self.flux_average,
-                FLUX_AVERAGE_MIN,
-                FLUX_AVERAGE_MAX,
+                "excess floor",
+                self.excess.floor,
+                EXCESS_FLOOR_MIN,
+                EXCESS_FLOOR_MAX,
             ),
             (
-                "flux_sensitivity",
-                self.flux_sensitivity,
-                FLUX_SENSITIVITY_MIN,
-                FLUX_SENSITIVITY_MAX,
-            ),
-            (
-                "flux_min_threshold",
-                self.flux_min_threshold,
-                FLUX_THRESHOLD_MIN,
-                FLUX_THRESHOLD_MAX,
-            ),
-            (
-                "flux_min_interval",
-                self.flux_min_interval,
-                FLUX_INTERVAL_MIN,
-                FLUX_INTERVAL_MAX,
+                "excess cap",
+                self.excess.cap,
+                EXCESS_CAP_MIN,
+                EXCESS_CAP_MAX,
             ),
         ] {
             anyhow::ensure!(
@@ -333,6 +670,12 @@ impl DetectorSettings {
             );
         }
         for (name, value, minimum, maximum) in [
+            (
+                "drop_onset_pre_gain",
+                self.drop_onset_pre_gain,
+                FLUX_PRE_GAIN_MIN,
+                FLUX_PRE_GAIN_MAX,
+            ),
             (
                 "drop_onset_attack",
                 self.drop_onset_attack,
@@ -369,6 +712,12 @@ impl DetectorSettings {
                 FLUX_INTERVAL_MIN,
                 FLUX_INTERVAL_MAX,
             ),
+            (
+                "drop_onset_suppression",
+                self.drop_onset_suppression,
+                FLUX_SUPPRESSION_MIN,
+                FLUX_SUPPRESSION_MAX,
+            ),
         ] {
             anyhow::ensure!(
                 value.is_finite() && (minimum..=maximum).contains(&value),
@@ -376,6 +725,12 @@ impl DetectorSettings {
             );
         }
         for (name, value, minimum, maximum) in [
+            (
+                "kick_onset_pre_gain",
+                self.kick_onset_pre_gain,
+                FLUX_PRE_GAIN_MIN,
+                FLUX_PRE_GAIN_MAX,
+            ),
             (
                 "kick_onset_attack",
                 self.kick_onset_attack,
@@ -413,6 +768,18 @@ impl DetectorSettings {
                 FLUX_INTERVAL_MAX,
             ),
             (
+                "kick_onset_suppression",
+                self.kick_onset_suppression,
+                FLUX_SUPPRESSION_MIN,
+                FLUX_SUPPRESSION_MAX,
+            ),
+            (
+                "snare_onset_pre_gain",
+                self.snare_onset_pre_gain,
+                FLUX_PRE_GAIN_MIN,
+                FLUX_PRE_GAIN_MAX,
+            ),
+            (
                 "snare_onset_attack",
                 self.snare_onset_attack,
                 FLUX_ATTACK_MIN,
@@ -448,14 +815,20 @@ impl DetectorSettings {
                 FLUX_INTERVAL_MIN,
                 FLUX_INTERVAL_MAX,
             ),
+            (
+                "snare_onset_suppression",
+                self.snare_onset_suppression,
+                FLUX_SUPPRESSION_MIN,
+                FLUX_SUPPRESSION_MAX,
+            ),
         ] {
             anyhow::ensure!(
                 value.is_finite() && (minimum..=maximum).contains(&value),
                 "{name} must be finite and between {minimum} and {maximum}"
             );
         }
-        validate_kernel("kick", &self.kick_kernel)?;
-        validate_kernel("snare", &self.snare_kernel)?;
+        self.kick_pattern.validate()?;
+        self.snare_pattern.validate()?;
         for (name, choke) in [
             ("kick_snare_choke", self.kick_snare_choke),
             ("kick_drop_choke", self.kick_drop_choke),
@@ -525,29 +898,23 @@ impl DetectorSettings {
         Ok(self)
     }
 
-    fn flux_settings(&self) -> FluxSettings {
-        FluxSettings {
-            attack: self.flux_attack,
-            release: self.flux_release,
-            average: self.flux_average,
-            sensitivity: self.flux_sensitivity,
-            min_threshold: self.flux_min_threshold,
-            min_interval: self.flux_min_interval,
+    fn drop_onset_recipe(&self) -> OnsetRecipe {
+        OnsetRecipe {
+            kernel: self.drop_kernels.onset,
+            suppression: self.drop_onset_suppression,
+            pre_gain: self.drop_onset_pre_gain,
+            tracker: FluxSettings {
+                attack: self.drop_onset_attack,
+                release: self.drop_onset_release,
+                average: self.drop_onset_average,
+                sensitivity: self.drop_onset_sensitivity,
+                min_threshold: self.drop_onset_min_threshold,
+                min_interval: self.drop_onset_min_interval,
+            },
         }
     }
 
-    fn drop_onset_flux_settings(&self) -> FluxSettings {
-        FluxSettings {
-            attack: self.drop_onset_attack,
-            release: self.drop_onset_release,
-            average: self.drop_onset_average,
-            sensitivity: self.drop_onset_sensitivity,
-            min_threshold: self.drop_onset_min_threshold,
-            min_interval: self.drop_onset_min_interval,
-        }
-    }
-
-    fn kick_onset_flux_settings(&self) -> FluxSettings {
+    fn kick_onset_tracker(&self) -> FluxSettings {
         FluxSettings {
             attack: self.kick_onset_attack,
             release: self.kick_onset_release,
@@ -558,7 +925,7 @@ impl DetectorSettings {
         }
     }
 
-    fn snare_onset_flux_settings(&self) -> FluxSettings {
+    fn snare_onset_tracker(&self) -> FluxSettings {
         FluxSettings {
             attack: self.snare_onset_attack,
             release: self.snare_onset_release,
@@ -570,59 +937,175 @@ impl DetectorSettings {
     }
 
     pub fn kick_contains(&self, band: usize) -> bool {
-        self.kick_kernel[band] > 0.0
+        self.kick_pattern.contains_band(band)
     }
 
     pub fn snare_contains(&self, band: usize) -> bool {
-        self.snare_kernel[band] > 0.0
+        self.snare_pattern.contains_band(band)
     }
 
-    pub fn kernel_weights(&self, kernel: DetectorKernel) -> [f32; BAND_COUNT] {
-        match kernel {
-            DetectorKernel::Kick => self.kick_kernel,
-            DetectorKernel::Snare => self.snare_kernel,
-            DetectorKernel::Drop(kernel) => self.drop_kernels.weights(kernel),
-        }
+    pub fn drop_kernel_weights(&self, kernel: DropKernel) -> [f32; BAND_COUNT] {
+        self.drop_kernels.weights(kernel)
     }
 
-    pub fn set_kernel_band(&mut self, kernel: DetectorKernel, band: usize, value: f32) {
+    pub fn set_drop_kernel_band(&mut self, kernel: DropKernel, band: usize, value: f32) {
         assert!(band < BAND_COUNT, "kernel bands stay inside the spectrum");
-        let value = value.clamp(DROP_KERNEL_MIN, DROP_KERNEL_MAX);
-        match kernel {
-            DetectorKernel::Kick => self.kick_kernel[band] = value,
-            DetectorKernel::Snare => self.snare_kernel[band] = value,
-            DetectorKernel::Drop(kernel) => self.drop_kernels.set(kernel, band, value),
-        }
+        self.drop_kernels.set(kernel, band, value);
     }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BandFluxSettingsRaw {
+    attack: f32,
+    release: f32,
+    average: f32,
+    sensitivity: f32,
+    min_threshold: f32,
+    min_interval: f32,
+    #[serde(default = "default_flux_gain")]
+    gain: f32,
+}
+
+fn default_flux_gain() -> f32 {
+    1.0
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OptionalKernel {
+    Bare([f32; BAND_COUNT]),
+    Wrapped(Option<[f32; BAND_COUNT]>),
+}
+
+fn deserialize_optional_kernel<'de, D>(
+    deserializer: D,
+) -> Result<Option<[f32; BAND_COUNT]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match OptionalKernel::deserialize(deserializer)? {
+        OptionalKernel::Bare(kernel) => Some(kernel),
+        OptionalKernel::Wrapped(kernel) => kernel,
+    })
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct TemporalPatternRaw {
+    inner: PatternPolygon,
+    outer: PatternPolygon,
+    #[serde(default)]
+    suppression_inner: PatternPolygon,
+    #[serde(default)]
+    suppression_outer: PatternPolygon,
+    #[serde(skip_serializing)]
+    steps: Vec<[f32; BAND_COUNT]>,
+    #[serde(default = "default_pattern_area")]
+    effective: f32,
+}
+
+impl Default for TemporalPatternRaw {
+    fn default() -> Self {
+        Self {
+            inner: Vec::new(),
+            outer: Vec::new(),
+            suppression_inner: Vec::new(),
+            suppression_outer: Vec::new(),
+            steps: Vec::new(),
+            effective: 1.0,
+        }
+    }
+}
+
+impl TemporalPatternRaw {
+    fn into_pattern(self) -> TemporalPattern {
+        if self.inner.len() >= 3 && self.outer.len() >= 3 {
+            TemporalPattern {
+                inner: self.inner,
+                outer: self.outer,
+                suppression_inner: self.suppression_inner,
+                suppression_outer: self.suppression_outer,
+                effective: self.effective,
+            }
+        } else if !self.steps.is_empty() {
+            TemporalPattern::from_legacy_steps(&self.steps)
+        } else {
+            TemporalPattern::kick_initial()
+        }
+    }
+}
+
+impl From<TemporalPattern> for TemporalPatternRaw {
+    fn from(pattern: TemporalPattern) -> Self {
+        Self {
+            inner: pattern.inner,
+            outer: pattern.outer,
+            suppression_inner: pattern.suppression_inner,
+            suppression_outer: pattern.suppression_outer,
+            steps: Vec::new(),
+            effective: pattern.effective,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct DetectorSettingsRaw {
-    flux_attack: f32,
-    flux_release: f32,
-    flux_average: f32,
-    flux_sensitivity: f32,
-    flux_min_threshold: f32,
-    flux_min_interval: f32,
-    kick_kernel: [f32; BAND_COUNT],
+    /// New per-band ABL settings. Missing means all bands use defaults.
+    band_onset: Vec<BandOnsetSettings>,
+    excess: RelativeExcessSettings,
+    /// Settings from the previous per-band flux tracker; accepted but unused.
+    #[serde(rename = "band_flux", skip_serializing)]
+    legacy_band_flux: Vec<BandFluxSettingsRaw>,
+    #[serde(rename = "flux_attack", skip_serializing)]
+    legacy_flux_attack: f32,
+    #[serde(rename = "flux_release", skip_serializing)]
+    legacy_flux_release: f32,
+    #[serde(rename = "flux_average", skip_serializing)]
+    legacy_flux_average: f32,
+    #[serde(rename = "flux_sensitivity", skip_serializing)]
+    legacy_flux_sensitivity: f32,
+    #[serde(rename = "flux_min_threshold", skip_serializing)]
+    legacy_flux_min_threshold: f32,
+    #[serde(rename = "flux_min_interval", skip_serializing)]
+    legacy_flux_min_interval: f32,
+    kick_pattern: Option<TemporalPatternRaw>,
+    #[serde(
+        rename = "kick_kernel",
+        skip_serializing,
+        default,
+        deserialize_with = "deserialize_optional_kernel"
+    )]
+    legacy_kick_kernel: Option<[f32; BAND_COUNT]>,
+    kick_onset_pre_gain: f32,
     kick_onset_attack: f32,
     kick_onset_release: f32,
     kick_onset_average: f32,
     kick_onset_sensitivity: f32,
     kick_onset_min_threshold: f32,
     kick_onset_min_interval: f32,
+    kick_onset_suppression: f32,
     kick_snare_choke: f32,
     kick_drop_choke: f32,
     kick_quake_factor: f32,
     kick_sequence_every: u32,
-    snare_kernel: [f32; BAND_COUNT],
+    snare_pattern: Option<TemporalPatternRaw>,
+    #[serde(
+        rename = "snare_kernel",
+        skip_serializing,
+        default,
+        deserialize_with = "deserialize_optional_kernel"
+    )]
+    legacy_snare_kernel: Option<[f32; BAND_COUNT]>,
+    snare_onset_pre_gain: f32,
     snare_onset_attack: f32,
     snare_onset_release: f32,
     snare_onset_average: f32,
     snare_onset_sensitivity: f32,
     snare_onset_min_threshold: f32,
     snare_onset_min_interval: f32,
+    snare_onset_suppression: f32,
     snare_flip_every: u32,
     snare_choke: f32,
     flip_stiffness: f32,
@@ -630,12 +1113,14 @@ struct DetectorSettingsRaw {
     drop_gap_window: f32,
     drop_gap_threshold: f32,
     drop_gap_gain: f32,
+    drop_onset_pre_gain: f32,
     drop_onset_attack: f32,
     drop_onset_release: f32,
     drop_onset_average: f32,
     drop_onset_sensitivity: f32,
     drop_onset_min_threshold: f32,
     drop_onset_min_interval: f32,
+    drop_onset_suppression: f32,
     drop_low_kernel: [f32; BAND_COUNT],
     drop_high_kernel: [f32; BAND_COUNT],
     drop_onset_kernel: [f32; BAND_COUNT],
@@ -674,7 +1159,14 @@ struct DetectorSettingsRaw {
 
 impl Default for DetectorSettingsRaw {
     fn default() -> Self {
-        DetectorSettings::default().into()
+        let mut raw: Self = DetectorSettings::default().into();
+        raw.band_onset.clear();
+        raw.legacy_band_flux.clear();
+        raw.kick_pattern = None;
+        raw.snare_pattern = None;
+        raw.legacy_kick_kernel = None;
+        raw.legacy_snare_kernel = None;
+        raw
     }
 }
 
@@ -682,31 +1174,70 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
     type Error = anyhow::Error;
 
     fn try_from(raw: DetectorSettingsRaw) -> Result<Self, Self::Error> {
+        let band_onset: [BandOnsetSettings; BAND_COUNT] = if raw.band_onset.is_empty() {
+            [BandOnsetSettings::default(); BAND_COUNT]
+        } else {
+            anyhow::ensure!(
+                raw.band_onset.len() == BAND_COUNT,
+                "band_onset must describe all {BAND_COUNT} bands"
+            );
+            raw.band_onset
+                .try_into()
+                .expect("the band count was checked above")
+        };
+        let kick_pattern = if let Some(pattern) = raw.kick_pattern {
+            pattern.into_pattern()
+        } else if let Some(kernel) = raw.legacy_kick_kernel {
+            validate_kernel("kick", &kernel)?;
+            TemporalPattern::from_legacy_steps(&[kernel])
+        } else {
+            TemporalPattern::kick_initial()
+        };
+        let snare_pattern = if let Some(pattern) = raw.snare_pattern {
+            pattern.into_pattern()
+        } else if let Some(kernel) = raw.legacy_snare_kernel {
+            validate_kernel("snare", &kernel)?;
+            TemporalPattern::from_legacy_steps(&[kernel])
+        } else {
+            TemporalPattern::snare_initial()
+        };
+        let mut kick_pattern = kick_pattern;
+        if kick_pattern.suppression_inner.len() < 3 || kick_pattern.suppression_outer.len() < 3 {
+            let initial = TemporalPattern::kick_initial();
+            kick_pattern.suppression_inner = initial.suppression_inner;
+            kick_pattern.suppression_outer = initial.suppression_outer;
+        }
+        let mut snare_pattern = snare_pattern;
+        if snare_pattern.suppression_inner.len() < 3 || snare_pattern.suppression_outer.len() < 3 {
+            let initial = TemporalPattern::snare_initial();
+            snare_pattern.suppression_inner = initial.suppression_inner;
+            snare_pattern.suppression_outer = initial.suppression_outer;
+        }
         Self {
-            flux_attack: raw.flux_attack,
-            flux_release: raw.flux_release,
-            flux_average: raw.flux_average,
-            flux_sensitivity: raw.flux_sensitivity,
-            flux_min_threshold: raw.flux_min_threshold,
-            flux_min_interval: raw.flux_min_interval,
-            kick_kernel: raw.kick_kernel,
+            band_onset,
+            excess: raw.excess,
+            kick_pattern,
+            kick_onset_pre_gain: raw.kick_onset_pre_gain,
             kick_onset_attack: raw.kick_onset_attack,
             kick_onset_release: raw.kick_onset_release,
             kick_onset_average: raw.kick_onset_average,
             kick_onset_sensitivity: raw.kick_onset_sensitivity,
             kick_onset_min_threshold: raw.kick_onset_min_threshold,
             kick_onset_min_interval: raw.kick_onset_min_interval,
+            kick_onset_suppression: raw.kick_onset_suppression,
             kick_snare_choke: raw.kick_snare_choke,
             kick_drop_choke: raw.kick_drop_choke,
             kick_quake_factor: raw.kick_quake_factor,
             kick_sequence_every: raw.kick_sequence_every,
-            snare_kernel: raw.snare_kernel,
+            snare_pattern,
+            snare_onset_pre_gain: raw.snare_onset_pre_gain,
             snare_onset_attack: raw.snare_onset_attack,
             snare_onset_release: raw.snare_onset_release,
             snare_onset_average: raw.snare_onset_average,
             snare_onset_sensitivity: raw.snare_onset_sensitivity,
             snare_onset_min_threshold: raw.snare_onset_min_threshold,
             snare_onset_min_interval: raw.snare_onset_min_interval,
+            snare_onset_suppression: raw.snare_onset_suppression,
             snare_flip_every: raw.snare_flip_every,
             snare_choke: raw.snare_choke,
             flip_stiffness: raw.flip_stiffness,
@@ -719,12 +1250,14 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
             drop_gap_window: raw.drop_gap_window,
             drop_gap_threshold: raw.drop_gap_threshold,
             drop_gap_gain: raw.drop_gap_gain,
+            drop_onset_pre_gain: raw.drop_onset_pre_gain,
             drop_onset_attack: raw.drop_onset_attack,
             drop_onset_release: raw.drop_onset_release,
             drop_onset_average: raw.drop_onset_average,
             drop_onset_sensitivity: raw.drop_onset_sensitivity,
             drop_onset_min_threshold: raw.drop_onset_min_threshold,
             drop_onset_min_interval: raw.drop_onset_min_interval,
+            drop_onset_suppression: raw.drop_onset_suppression,
             drop_quake_factor: raw.drop_quake_factor,
             quake_stiffness: raw.quake_stiffness,
             quake_damping: raw.quake_damping,
@@ -736,30 +1269,45 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
 impl From<DetectorSettings> for DetectorSettingsRaw {
     fn from(settings: DetectorSettings) -> Self {
         Self {
-            flux_attack: settings.flux_attack,
-            flux_release: settings.flux_release,
-            flux_average: settings.flux_average,
-            flux_sensitivity: settings.flux_sensitivity,
-            flux_min_threshold: settings.flux_min_threshold,
-            flux_min_interval: settings.flux_min_interval,
-            kick_kernel: settings.kick_kernel,
+            band_onset: settings.band_onset.to_vec(),
+            excess: settings.excess,
+            legacy_band_flux: Vec::new(),
+            legacy_flux_attack: 0.0,
+            legacy_flux_release: 0.0,
+            legacy_flux_average: 0.0,
+            legacy_flux_sensitivity: 0.0,
+            legacy_flux_min_threshold: 0.0,
+            legacy_flux_min_interval: 0.0,
+            kick_pattern: Some(settings.kick_pattern.clone().into()),
+            legacy_kick_kernel: Some(std::array::from_fn(|band| if band < 5 { 1.0 } else { 0.0 })),
+            kick_onset_pre_gain: settings.kick_onset_pre_gain,
             kick_onset_attack: settings.kick_onset_attack,
             kick_onset_release: settings.kick_onset_release,
             kick_onset_average: settings.kick_onset_average,
             kick_onset_sensitivity: settings.kick_onset_sensitivity,
             kick_onset_min_threshold: settings.kick_onset_min_threshold,
             kick_onset_min_interval: settings.kick_onset_min_interval,
+            kick_onset_suppression: settings.kick_onset_suppression,
             kick_snare_choke: settings.kick_snare_choke,
             kick_drop_choke: settings.kick_drop_choke,
             kick_quake_factor: settings.kick_quake_factor,
             kick_sequence_every: settings.kick_sequence_every,
-            snare_kernel: settings.snare_kernel,
+            snare_pattern: Some(settings.snare_pattern.clone().into()),
+            legacy_snare_kernel: Some(std::array::from_fn(|band| {
+                if matches!(band, 5 | 6 | 10 | 12) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })),
+            snare_onset_pre_gain: settings.snare_onset_pre_gain,
             snare_onset_attack: settings.snare_onset_attack,
             snare_onset_release: settings.snare_onset_release,
             snare_onset_average: settings.snare_onset_average,
             snare_onset_sensitivity: settings.snare_onset_sensitivity,
             snare_onset_min_threshold: settings.snare_onset_min_threshold,
             snare_onset_min_interval: settings.snare_onset_min_interval,
+            snare_onset_suppression: settings.snare_onset_suppression,
             snare_flip_every: settings.snare_flip_every,
             snare_choke: settings.snare_choke,
             flip_stiffness: settings.flip_stiffness,
@@ -767,12 +1315,14 @@ impl From<DetectorSettings> for DetectorSettingsRaw {
             drop_gap_window: settings.drop_gap_window,
             drop_gap_threshold: settings.drop_gap_threshold,
             drop_gap_gain: settings.drop_gap_gain,
+            drop_onset_pre_gain: settings.drop_onset_pre_gain,
             drop_onset_attack: settings.drop_onset_attack,
             drop_onset_release: settings.drop_onset_release,
             drop_onset_average: settings.drop_onset_average,
             drop_onset_sensitivity: settings.drop_onset_sensitivity,
             drop_onset_min_threshold: settings.drop_onset_min_threshold,
             drop_onset_min_interval: settings.drop_onset_min_interval,
+            drop_onset_suppression: settings.drop_onset_suppression,
             drop_low_kernel: settings.drop_kernels.low,
             drop_high_kernel: settings.drop_kernels.high,
             drop_onset_kernel: settings.drop_kernels.onset,
@@ -797,33 +1347,78 @@ impl From<DetectorSettings> for DetectorSettingsRaw {
     }
 }
 
-/// One confirmed flux peak on a band. Power is the peak's ratio to its adaptive
-/// threshold, so cumulative powers stay independent of the absolute FFT scale.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Onset {
-    pub band: usize,
-    pub power: f32,
-}
-
-/// Onsets produced by one analysis hop, plus the confirmed detectors.
+/// Onsets produced by one analysis hop. Only the composite detectors report
+/// boolean onsets; the per-band signal is a continuous flow.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DetectorEvents {
-    pub bands: [Option<Onset>; BAND_COUNT],
     pub kick: Option<f32>,
     pub snare: Option<f32>,
     pub drop: Option<f32>,
 }
 
-/// One spectral-flux tracker recipe. Per-band onsets and the drop's composite
-/// onset each keep their own copy of these settings.
-#[derive(Clone, Copy, Debug)]
-struct FluxSettings {
+/// One onset tracker recipe. Each composite detector keeps its own copy for
+/// the kernel-projected flow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FluxSettings {
     pub attack: f32,
     pub release: f32,
     pub average: f32,
     pub sensitivity: f32,
     pub min_threshold: f32,
     pub min_interval: f32,
+}
+
+impl Default for FluxSettings {
+    fn default() -> Self {
+        Self {
+            attack: 0.005,
+            release: 0.05,
+            average: 0.2,
+            sensitivity: 1.5,
+            min_threshold: 0.01,
+            min_interval: 0.14,
+        }
+    }
+}
+
+/// One composite detector's onset recipe: the kernel that excites it, the
+/// weight of the inverted-kernel inhibition, and the tracker that turns the
+/// residual flow into onsets.
+#[derive(Clone, Copy, Debug)]
+struct OnsetRecipe {
+    kernel: [f32; BAND_COUNT],
+    suppression: f32,
+    pre_gain: f32,
+    tracker: FluxSettings,
+}
+
+/// One composite projection: the inverted-kernel flow, the part of it the
+/// suppression weight subtracts, and the residual that reaches the tracker.
+#[derive(Clone, Copy, Debug, Default)]
+struct OnsetProjection {
+    /// Inverted-kernel weighted onset flow after pre-gain, before suppression.
+    inhibition: f32,
+    /// Inhibition after the detector's suppression weight.
+    suppressed: f32,
+    /// Excitation minus the weighted inhibition, clamped at zero.
+    residual: f32,
+}
+
+impl OnsetRecipe {
+    /// Projects the per-band onset flow onto the kernel and subtracts the flow
+    /// selected by the inverted kernel. The residual is the transient that
+    /// belongs to this instrument rather than to the rest of the mix.
+    fn project(&self, tracked: &[f32; BAND_COUNT]) -> OnsetProjection {
+        let excited = kernel_projection(&self.kernel, tracked) * self.pre_gain;
+        let inverted: [f32; BAND_COUNT] = std::array::from_fn(|band| 1.0 - self.kernel[band]);
+        let inhibition = kernel_projection(&inverted, tracked) * self.pre_gain;
+        let suppressed = self.suppression * inhibition;
+        OnsetProjection {
+            inhibition,
+            suppressed,
+            residual: (excited - suppressed).max(0.0),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -836,7 +1431,6 @@ struct FluxTracker {
     threshold: f32,
     last_onset: f32,
     primed: bool,
-    triggers: u32,
 }
 
 impl FluxTracker {
@@ -876,7 +1470,6 @@ impl FluxTracker {
         self.threshold = threshold;
         if peak {
             self.last_onset = now - dt;
-            self.triggers = self.triggers.wrapping_add(1);
             // Strength over the adaptive threshold keeps the confirmed
             // detectors independent of the absolute FFT magnitude scale.
             Some(previous / previous_threshold.max(1e-6))
@@ -1036,6 +1629,7 @@ impl DropTracker {
         &mut self,
         now: f32,
         spectrum: &Spectrum,
+        onset_flux: f32,
         settings: &DetectorSettings,
         dt: f32,
     ) -> Option<f32> {
@@ -1054,11 +1648,8 @@ impl DropTracker {
         self.eligible |= self.window.is_full(now, settings.drop_gap_window)
             && self.confidence >= settings.drop_gap_threshold;
 
-        let onset_flux = settings
-            .drop_kernels
-            .projection(DropKernel::Onset, &spectrum.band_flux);
-        let flux_settings = settings.drop_onset_flux_settings();
-        let power = self.onset.observe(onset_flux, now, dt, &flux_settings)?;
+        let onset_settings = settings.drop_onset_recipe().tracker;
+        let power = self.onset.observe(onset_flux, now, dt, &onset_settings)?;
         if !self.eligible {
             return None;
         }
@@ -1086,10 +1677,20 @@ impl DropTracker {
 /// All per-band trackers and the three confirmed detectors. One `observe` call
 /// advances the state by one analysis hop.
 pub struct OnsetBank {
-    bands: [FluxTracker; BAND_COUNT],
+    band_excess: [f32; BAND_COUNT],
+    band_abdr: [f32; BAND_COUNT],
+    band_abl: [f32; BAND_COUNT],
+    band_drp: [f32; BAND_COUNT],
+    band_onset: [f32; BAND_COUNT],
+    /// Newest per-hop onset flows, used by the temporal kick and snare
+    /// templates.
+    onset_history: VecDeque<[f32; BAND_COUNT]>,
     kick: KickTracker,
     snare: SnareTracker,
     drop: DropTracker,
+    kick_projection: OnsetProjection,
+    snare_projection: OnsetProjection,
+    drop_projection: OnsetProjection,
     time: f32,
 }
 
@@ -1102,73 +1703,126 @@ impl Default for OnsetBank {
 impl OnsetBank {
     pub fn new() -> Self {
         Self {
-            bands: [FluxTracker::default(); BAND_COUNT],
+            band_excess: [0.0; BAND_COUNT],
+            band_abdr: [0.0; BAND_COUNT],
+            band_abl: [0.0; BAND_COUNT],
+            band_drp: [0.0; BAND_COUNT],
+            band_onset: [0.0; BAND_COUNT],
+            onset_history: VecDeque::with_capacity(PATTERN_MAX_STEPS),
             kick: KickTracker::default(),
             snare: SnareTracker::default(),
             drop: DropTracker::default(),
+            kick_projection: OnsetProjection::default(),
+            snare_projection: OnsetProjection::default(),
+            drop_projection: OnsetProjection::default(),
             time: 0.0,
         }
     }
 
-    /// Feeds one analysis hop. The kick, snare, and drop detectors project the
-    /// band flux through their onset kernels.
+    /// Feeds one analysis hop. The continuous per-band onset flow is appended
+    /// to the pattern history; kick and snare match their temporal templates
+    /// against it, while drop projects the current flow through its onset
+    /// kernel. Each composite detector then tracks its own onsets.
     pub fn observe(
         &mut self,
         spectrum: &Spectrum,
+        band_abdr: &[f32; BAND_COUNT],
+        band_abl: &[f32; BAND_COUNT],
         settings: &DetectorSettings,
         dt: f32,
     ) -> DetectorEvents {
         self.time += dt;
-        let mut events = DetectorEvents::default();
-        let flux_settings = settings.flux_settings();
-        for (band, tracker) in self.bands.iter_mut().enumerate() {
-            if let Some(power) =
-                tracker.observe(spectrum.band_flux[band], self.time, dt, &flux_settings)
-            {
-                events.bands[band] = Some(Onset { band, power });
-            }
+        let wsdr = band_abdr.iter().sum::<f32>() / BAND_COUNT as f32;
+        for band in 0..BAND_COUNT {
+            let drp = if wsdr > 1e-6 {
+                band_abdr[band] / wsdr
+            } else {
+                0.0
+            };
+            self.band_excess[band] = spectrum.band_excess[band];
+            self.band_abdr[band] = band_abdr[band];
+            self.band_abl[band] = band_abl[band];
+            self.band_drp[band] = drp;
+            self.band_onset[band] = spectrum.band_excess[band] * drp * band_abl[band];
         }
-        let snare_flux = kernel_projection(&settings.snare_kernel, &spectrum.band_flux);
+        if self.onset_history.len() == PATTERN_MAX_STEPS {
+            self.onset_history.pop_front();
+        }
+        self.onset_history.push_back(self.band_onset);
+        let tracked = self.band_onset;
+        let pattern_steps = (0.5 / dt).floor().max(1.0) as usize;
+
+        let mut events = DetectorEvents::default();
+        let snare_projection = settings.snare_pattern.project(
+            &self.onset_history,
+            settings.snare_onset_suppression,
+            settings.snare_onset_pre_gain,
+            pattern_steps,
+        );
+        self.snare_projection = snare_projection;
         if let Some(snare) = self.snare.observe(
-            snare_flux,
+            snare_projection.residual,
             self.time,
             dt,
-            &settings.snare_onset_flux_settings(),
+            &settings.snare_onset_tracker(),
         ) {
             events.snare = Some(snare);
             self.kick.choke(self.time, settings.snare_choke);
         }
-        if let Some(drop) = self.drop.observe(self.time, spectrum, settings, dt) {
+        let drop_recipe = settings.drop_onset_recipe();
+        let drop_projection = drop_recipe.project(&tracked);
+        self.drop_projection = drop_projection;
+        if let Some(drop) =
+            self.drop
+                .observe(self.time, spectrum, drop_projection.residual, settings, dt)
+        {
             events.drop = Some(drop);
             self.kick.choke(self.time, settings.kick_drop_choke);
         }
-        let kick_flux = kernel_projection(&settings.kick_kernel, &spectrum.band_flux);
+        let kick_projection = settings.kick_pattern.project(
+            &self.onset_history,
+            settings.kick_onset_suppression,
+            settings.kick_onset_pre_gain,
+            pattern_steps,
+        );
+        self.kick_projection = kick_projection;
         events.kick = self.kick.observe(
-            kick_flux,
+            kick_projection.residual,
             self.time,
             dt,
-            &settings.kick_onset_flux_settings(),
+            &settings.kick_onset_tracker(),
         );
         events
     }
 
     pub fn reset(&mut self) {
-        for band in &mut self.bands {
-            band.reset();
-        }
+        self.band_excess = [0.0; BAND_COUNT];
+        self.band_abdr = [0.0; BAND_COUNT];
+        self.band_abl = [0.0; BAND_COUNT];
+        self.band_drp = [0.0; BAND_COUNT];
+        self.band_onset = [0.0; BAND_COUNT];
+        self.onset_history.clear();
         self.kick.reset();
         self.snare.reset();
         self.drop.reset();
+        self.kick_projection = OnsetProjection::default();
+        self.snare_projection = OnsetProjection::default();
+        self.drop_projection = OnsetProjection::default();
         self.time = 0.0;
+    }
+
+    pub fn onset_history(&self) -> &VecDeque<[f32; BAND_COUNT]> {
+        &self.onset_history
     }
 
     pub fn status(&self) -> DetectionStatus {
         DetectionStatus {
             bands: std::array::from_fn(|index| BandStatus {
-                raw_flux: self.bands[index].raw,
-                smoothed: self.bands[index].smoothed,
-                threshold: self.bands[index].threshold,
-                triggers: self.bands[index].triggers,
+                excess: self.band_excess[index],
+                onset: self.band_onset[index],
+                abdr: self.band_abdr[index],
+                abl: self.band_abl[index],
+                drp: self.band_drp[index],
             }),
             kick: TriggerStatus {
                 flash: self.kick.flash,
@@ -1191,36 +1845,41 @@ impl OnsetBank {
                 armed: self.drop.eligible,
                 choked: false,
             },
-            kick_flux: OnsetFluxStatus {
-                flux: self.kick.onset.raw,
-                smoothed: self.kick.onset.smoothed,
-                threshold: self.kick.onset.threshold,
-            },
-            snare_flux: OnsetFluxStatus {
-                flux: self.snare.onset.raw,
-                smoothed: self.snare.onset.smoothed,
-                threshold: self.snare.onset.threshold,
-            },
+            kick_flux: onset_flux_status(&self.kick.onset, self.kick_projection),
+            snare_flux: onset_flux_status(&self.snare.onset, self.snare_projection),
             drop_status: DropStatus {
                 low: self.drop.low,
                 high: self.drop.high,
                 diff: self.drop.diff,
                 confidence: self.drop.confidence,
-                onset_flux: self.drop.onset.raw,
-                onset_smoothed: self.drop.onset.smoothed,
-                onset_threshold: self.drop.onset.threshold,
+                onset: onset_flux_status(&self.drop.onset, self.drop_projection),
             },
         }
     }
 }
 
+fn onset_flux_status(tracker: &FluxTracker, projection: OnsetProjection) -> OnsetFluxStatus {
+    OnsetFluxStatus {
+        flux: tracker.raw,
+        smoothed: tracker.smoothed,
+        threshold: tracker.threshold,
+        inhibition: projection.inhibition,
+        suppressed: projection.suppressed,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct BandStatus {
-    pub raw_flux: f32,
-    pub smoothed: f32,
-    pub threshold: f32,
-    /// Number of confirmed flux peaks since the last detector reset.
-    pub triggers: u32,
+    /// Raw relative spectral excess for this band.
+    pub excess: f32,
+    /// Continuous onset flow after DRP and ABL scaling.
+    pub onset: f32,
+    /// Tracked high-minus-low reference distance.
+    pub abdr: f32,
+    /// Absolute band loudness derived from the high reference.
+    pub abl: f32,
+    /// Dynamic-range parity, ABDR / WSDR.
+    pub drp: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1250,18 +1909,20 @@ pub struct DropStatus {
     pub high: f32,
     pub diff: f32,
     pub confidence: f32,
-    pub onset_flux: f32,
-    pub onset_smoothed: f32,
-    pub onset_threshold: f32,
+    pub onset: OnsetFluxStatus,
 }
 
 /// Raw, smoothed, and adaptive-threshold values from one composite onset
-/// tracker.
+/// tracker, plus the suppression flux it subtracts.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OnsetFluxStatus {
     pub flux: f32,
     pub smoothed: f32,
     pub threshold: f32,
+    /// Inverted-kernel weighted tracked flux before the suppression weight.
+    pub inhibition: f32,
+    /// What the suppression weight subtracts from the excitation.
+    pub suppressed: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1381,18 +2042,38 @@ mod tests {
     }
 
     #[test]
-    fn flux_defaults_match_the_onset_recipe() {
+    fn abl_scales_the_high_reference_before_the_curve() {
+        let settings = BandOnsetSettings {
+            abl_gain: 2.0,
+            abl_curve: Curve::Linear,
+            abl_amount: 1.0,
+        };
+        assert!((settings.loudness(0.25) - 0.5).abs() < 1e-6);
+        assert_eq!(BandOnsetSettings::default().loudness(1.0), 1.0);
+        assert_eq!(BandOnsetSettings::default().loudness(0.0), 0.0);
+    }
+
+    #[test]
+    fn band_onset_defaults_match_the_recipe() {
         let settings = defaults();
-        assert_eq!(settings.flux_attack, 0.005);
-        assert_eq!(settings.flux_release, 0.05);
-        assert_eq!(settings.flux_average, 0.2);
-        assert_eq!(settings.flux_min_interval, 0.03);
+        let band = settings.band_onset[0];
+        assert_eq!(band.abl_gain, 1.0);
+        assert_eq!(band.abl_curve, Curve::SCurve);
+        assert_eq!(band.abl_amount, 2.5);
+        assert_eq!(settings.excess.background_attack, 0.320);
+        assert_eq!(settings.excess.background_release, 0.200);
+        assert_eq!(settings.excess.floor, 0.010);
+        assert_eq!(settings.excess.cap, 1.0);
+        assert!(settings
+            .band_onset
+            .iter()
+            .all(|candidate| *candidate == band));
         assert!(settings.validate().is_ok());
     }
 
     #[test]
     fn a_flux_peak_triggers_after_the_local_maximum() {
-        let settings = defaults().flux_settings();
+        let settings = FluxSettings::default();
         let mut tracker = FluxTracker::default();
         let dt = 1.0 / 86.0;
         let mut now = 0.0;
@@ -1404,12 +2085,11 @@ mod tests {
             }
         }
         assert!(fired, "a flux pulse must produce one local-peak onset");
-        assert_eq!(tracker.triggers, 1);
     }
 
     #[test]
     fn a_steady_flux_does_not_trigger() {
-        let settings = defaults().flux_settings();
+        let settings = FluxSettings::default();
         let mut tracker = FluxTracker::default();
         let dt = 1.0 / 86.0;
         let mut now = 0.0;
@@ -1417,22 +2097,26 @@ mod tests {
             now += dt;
             assert!(tracker.observe(0.5, now, dt, &settings).is_none());
         }
-        assert_eq!(tracker.triggers, 0);
     }
 
     #[test]
     fn repeated_flux_peaks_respect_the_minimum_interval() {
-        let mut flux_settings = defaults().flux_settings();
-        flux_settings.min_interval = 0.05;
+        let flux_settings = FluxSettings {
+            min_interval: 0.05,
+            ..FluxSettings::default()
+        };
         let mut tracker = FluxTracker::default();
         let dt = 1.0 / 86.0;
         let mut now = 0.0;
+        let mut fires = 0;
         for flux in [0.0, 0.0, 1.0, 0.0, 1.0, 0.0] {
             now += dt;
-            tracker.observe(flux, now, dt, &flux_settings);
+            if tracker.observe(flux, now, dt, &flux_settings).is_some() {
+                fires += 1;
+            }
         }
         assert_eq!(
-            tracker.triggers, 1,
+            fires, 1,
             "the second pulse lands inside the minimum interval"
         );
     }
@@ -1451,7 +2135,7 @@ mod tests {
     #[test]
     fn a_kick_kernel_onset_fires_after_the_flux_peak() {
         let settings = defaults();
-        let flux = settings.kick_onset_flux_settings();
+        let flux = settings.kick_onset_tracker();
         let mut kick = KickTracker::default();
         let dt = 1.0 / 86.0;
         let mut now = 0.0;
@@ -1475,23 +2159,185 @@ mod tests {
         let mut bank = OnsetBank::new();
         let quiet = Spectrum {
             bands: [0.5; BAND_COUNT],
-            band_flux: [0.0; BAND_COUNT],
             ..Spectrum::default()
         };
+        let abdr = [1.0; BAND_COUNT];
+        let abl = [1.0; BAND_COUNT];
         for _ in 0..8 {
-            bank.observe(&quiet, &settings, dt);
+            bank.observe(&quiet, &abdr, &abl, &settings, dt);
         }
         let pulse = Spectrum {
             bands: [0.5; BAND_COUNT],
-            band_flux: [1.0; BAND_COUNT],
+            band_excess: [1.0; BAND_COUNT],
             ..Spectrum::default()
         };
-        let events = bank.observe(&pulse, &settings, dt);
+        let events = bank.observe(&pulse, &abdr, &abl, &settings, dt);
         assert!(events.snare.is_none());
-        let events = bank.observe(&quiet, &settings, dt);
+        let events = bank.observe(&quiet, &abdr, &abl, &settings, dt);
         assert!(events.snare.is_some(), "snare onset");
         assert!(events.kick.is_none(), "the snare chokes the kick");
         assert!(bank.status().kick.choked);
+    }
+
+    #[test]
+    fn the_suppression_kernel_is_independent_of_the_main_kernel() {
+        let mut settings = defaults();
+        settings.kick_onset_suppression = 1.0;
+        let mut high = [0.0; BAND_COUNT];
+        high[8..].fill(1.0);
+        let projection = settings
+            .kick_pattern
+            .project(&VecDeque::from([high]), 1.0, 1.0, 1);
+        assert!(
+            projection.inhibition > 0.5,
+            "the kick suppressor listens above the kick bands"
+        );
+
+        let mut low = [0.0; BAND_COUNT];
+        low[..5].fill(1.0);
+        let projection = settings
+            .kick_pattern
+            .project(&VecDeque::from([low]), 1.0, 1.0, 1);
+        assert_eq!(
+            projection.inhibition, 0.0,
+            "a kick-band hit is not its own suppressor"
+        );
+    }
+
+    #[test]
+    fn band_onset_flow_applies_drp_and_abl() {
+        let settings = defaults();
+        let dt = 1.0 / 86.0;
+        let mut bank = OnsetBank::new();
+        let spectrum = Spectrum {
+            band_excess: [0.5; BAND_COUNT],
+            ..Spectrum::default()
+        };
+        let abdr = std::array::from_fn(|band| if band == 0 { 16.0 } else { 0.0 });
+        let mut abl = [1.0; BAND_COUNT];
+        abl[0] = 0.5;
+        bank.observe(&spectrum, &abdr, &abl, &settings, dt);
+        let status = bank.status();
+        assert!((status.bands[0].drp - 16.0).abs() < 1e-6);
+        assert!((status.bands[0].abl - 0.5).abs() < 1e-6);
+        assert!((status.bands[0].onset - 4.0).abs() < 1e-6);
+        assert_eq!(status.bands[1].onset, 0.0);
+        bank.observe(&spectrum, &abdr, &abl, &settings, dt);
+        assert!(
+            (bank.status().bands[0].onset - 4.0).abs() < 1e-6,
+            "the onset flow stays continuous while the excess is present"
+        );
+    }
+
+    #[test]
+    fn temporal_pattern_interpolates_between_polygons() {
+        let pattern = TemporalPattern {
+            inner: rectangle(0.25, 0.75, 0.25, 0.75),
+            outer: rectangle(0.1, 0.9, 0.1, 0.9),
+            suppression_inner: Vec::new(),
+            suppression_outer: Vec::new(),
+            effective: 1.0,
+        };
+        assert!((pattern.field_value(0.5, 0.5) - 1.0).abs() < 1e-6);
+        assert_eq!(pattern.field_value(0.05, 0.5), 0.0);
+        let edge = pattern.field_value(0.15, 0.5);
+        assert!(edge > 0.0 && edge < 1.0, "annulus value was {edge}");
+    }
+
+    #[test]
+    fn initial_patterns_have_four_points_in_both_kernels() {
+        for pattern in [
+            TemporalPattern::kick_initial(),
+            TemporalPattern::snare_initial(),
+        ] {
+            for polygon in [
+                &pattern.inner,
+                &pattern.outer,
+                &pattern.suppression_inner,
+                &pattern.suppression_outer,
+            ] {
+                assert_eq!(polygon.len(), 4);
+            }
+        }
+    }
+
+    #[test]
+    fn effective_area_keeps_the_leftmost_part_and_fades_its_end() {
+        let pattern = TemporalPattern {
+            inner: rectangle(0.0, 1.0, 0.0, 1.0),
+            outer: rectangle(0.0, 1.0, 0.0, 1.0),
+            suppression_inner: Vec::new(),
+            suppression_outer: Vec::new(),
+            effective: 0.5,
+        };
+        assert!((pattern.effective_field_value(0.25, 0.5) - 1.0).abs() < 1e-6);
+        assert_eq!(pattern.effective_field_value(0.5, 0.5), 0.0);
+        assert_eq!(pattern.effective_field_value(0.9, 0.5), 0.0);
+        assert!((pattern.effective_field_value(0.45, 0.5) - 1.0).abs() < 1e-6);
+        assert!((pattern.effective_field_value(0.48, 0.5) - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn onset_pre_gain_trims_the_pattern_projection() {
+        let mut settings = defaults();
+        settings.kick_onset_suppression = 0.0;
+        settings.kick_onset_pre_gain = 0.25;
+        let history = VecDeque::from([[1.0; BAND_COUNT]]);
+        let full = settings
+            .kick_pattern
+            .project(&history, settings.kick_onset_suppression, 1.0, 1);
+        let projection = settings.kick_pattern.project(
+            &history,
+            settings.kick_onset_suppression,
+            settings.kick_onset_pre_gain,
+            1,
+        );
+        assert!((projection.residual - full.residual * 0.25).abs() < 1e-6);
+        assert!((projection.inhibition - full.inhibition * 0.25).abs() < 1e-6);
+        assert!((projection.suppressed - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_suppression_kernel_suppresses_other_instrument_flow() {
+        let mut settings = defaults();
+        settings.snare_onset_suppression = 1.0;
+        let mut low = [0.0; BAND_COUNT];
+        low[..5].fill(1.0);
+        let low_history = VecDeque::from([low]);
+        let projection = settings.snare_pattern.project(
+            &low_history,
+            settings.snare_onset_suppression,
+            settings.snare_onset_pre_gain,
+            1,
+        );
+        assert_eq!(
+            projection.residual, 0.0,
+            "a low-only transient must not confirm a snare"
+        );
+        assert!(projection.inhibition > 0.0);
+        assert_eq!(projection.suppressed, projection.inhibition);
+
+        let broadband = VecDeque::from([[1.0; BAND_COUNT]]);
+        let unsuppressed =
+            settings
+                .snare_pattern
+                .project(&broadband, 0.0, settings.snare_onset_pre_gain, 1);
+        settings.snare_onset_suppression = 0.5;
+        let projection = settings.snare_pattern.project(
+            &broadband,
+            settings.snare_onset_suppression,
+            settings.snare_onset_pre_gain,
+            1,
+        );
+        assert!((projection.inhibition - unsuppressed.inhibition).abs() < 1e-6);
+        assert!(
+            (projection.suppressed - projection.inhibition * 0.5).abs() < 1e-6,
+            "half the suppression projection is subtracted from a broadband hit"
+        );
+        assert!(
+            (projection.residual - (unsuppressed.residual - projection.suppressed).max(0.0)).abs()
+                < 1e-6
+        );
     }
 
     fn gap_settings() -> DetectorSettings {
@@ -1502,16 +2348,11 @@ mod tests {
         }
     }
 
-    fn drop_spectrum(low: f32, high: f32, flux: [f32; BAND_COUNT]) -> Spectrum {
+    fn drop_spectrum(low: f32, high: f32) -> Spectrum {
         Spectrum {
             bands: std::array::from_fn(|band| if band < 4 { low } else { high }),
-            band_flux: flux,
             ..Spectrum::default()
         }
-    }
-
-    fn low_flux(value: f32) -> [f32; BAND_COUNT] {
-        std::array::from_fn(|band| if band < 4 { value } else { 0.0 })
     }
 
     #[test]
@@ -1523,12 +2364,7 @@ mod tests {
         for _ in 0..12 {
             now += dt;
             assert_eq!(
-                drop.observe(
-                    now,
-                    &drop_spectrum(0.0, 0.8, [0.0; BAND_COUNT]),
-                    &settings,
-                    dt
-                ),
+                drop.observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt),
                 None
             );
         }
@@ -1539,18 +2375,13 @@ mod tests {
 
         now += dt;
         assert_eq!(
-            drop.observe(now, &drop_spectrum(0.0, 0.8, low_flux(1.0)), &settings, dt),
+            drop.observe(now, &drop_spectrum(0.0, 0.8), 1.0, &settings, dt),
             None,
             "the onset is confirmed on the release hop"
         );
         now += dt;
         let power = drop
-            .observe(
-                now,
-                &drop_spectrum(0.0, 0.8, [0.0; BAND_COUNT]),
-                &settings,
-                dt,
-            )
+            .observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt)
             .expect("the composite onset confirms the drop");
         assert!(power > 0.0);
         assert!(!drop.eligible);
@@ -1565,12 +2396,7 @@ mod tests {
         let mut now = 0.0;
         for _ in 0..12 {
             now += dt;
-            drop.observe(
-                now,
-                &drop_spectrum(0.0, 0.8, [0.0; BAND_COUNT]),
-                &settings,
-                dt,
-            );
+            drop.observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt);
         }
         assert!(drop.eligible);
 
@@ -1578,26 +2404,16 @@ mod tests {
         // latched eligibility yet.
         for _ in 0..20 {
             now += dt;
-            drop.observe(
-                now,
-                &drop_spectrum(0.6, 0.6, [0.0; BAND_COUNT]),
-                &settings,
-                dt,
-            );
+            drop.observe(now, &drop_spectrum(0.6, 0.6), 0.0, &settings, dt);
         }
         assert!(drop.confidence < settings.drop_gap_threshold);
         assert!(drop.eligible, "the high state stays latched");
 
         now += dt;
-        drop.observe(now, &drop_spectrum(0.6, 0.6, low_flux(1.0)), &settings, dt);
+        drop.observe(now, &drop_spectrum(0.6, 0.6), 1.0, &settings, dt);
         now += dt;
         assert!(drop
-            .observe(
-                now,
-                &drop_spectrum(0.6, 0.6, [0.0; BAND_COUNT]),
-                &settings,
-                dt,
-            )
+            .observe(now, &drop_spectrum(0.6, 0.6), 0.0, &settings, dt,)
             .is_some());
         assert!(!drop.eligible, "the confirming onset clears the latch");
         assert_eq!(drop.confidence, 0.0);
@@ -1614,12 +2430,7 @@ mod tests {
             let mut now = 0.0;
             for _ in 0..12 {
                 now += dt;
-                drop.observe(
-                    now,
-                    &drop_spectrum(0.4, 0.5, [0.0; BAND_COUNT]),
-                    &settings,
-                    dt,
-                );
+                drop.observe(now, &drop_spectrum(0.4, 0.5), 0.0, &settings, dt);
             }
             assert!((drop.confidence - 0.1 * gain).abs() < 1e-5);
             assert_eq!(drop.eligible, eligible, "gain {gain}");
@@ -1633,17 +2444,17 @@ mod tests {
         let mut drop = DropTracker::default();
         let dt = 1.0 / 86.0;
         let mut now = 0.0;
-        let quiet = drop_spectrum(0.0, 0.8, [0.0; BAND_COUNT]);
+        let quiet = drop_spectrum(0.0, 0.8);
         for _ in 0..12 {
             now += dt;
-            drop.observe(now, &quiet, &settings, dt);
+            drop.observe(now, &quiet, 0.0, &settings, dt);
         }
         assert!(drop.eligible);
         now += dt;
-        drop.observe(now, &drop_spectrum(0.0, 0.8, low_flux(1.0)), &settings, dt);
+        drop.observe(now, &drop_spectrum(0.0, 0.8), 1.0, &settings, dt);
         now += dt;
         assert_eq!(
-            drop.observe(now, &quiet, &settings, dt),
+            drop.observe(now, &quiet, 0.0, &settings, dt),
             None,
             "the dedicated minimum threshold blocks the composite onset"
         );
@@ -1651,12 +2462,12 @@ mod tests {
         settings.drop_onset_min_threshold = 0.01;
         for _ in 0..40 {
             now += dt;
-            drop.observe(now, &quiet, &settings, dt);
+            drop.observe(now, &quiet, 0.0, &settings, dt);
         }
         now += dt;
-        drop.observe(now, &drop_spectrum(0.0, 0.8, low_flux(1.0)), &settings, dt);
+        drop.observe(now, &drop_spectrum(0.0, 0.8), 1.0, &settings, dt);
         now += dt;
-        assert!(drop.observe(now, &quiet, &settings, dt).is_some());
+        assert!(drop.observe(now, &quiet, 0.0, &settings, dt).is_some());
     }
 
     #[test]
@@ -1668,49 +2479,29 @@ mod tests {
         let mut now = 0.0;
         for _ in 0..12 {
             now += dt;
-            drop.observe(
-                now,
-                &drop_spectrum(0.0, 0.8, [0.0; BAND_COUNT]),
-                &settings,
-                dt,
-            );
+            drop.observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt);
         }
         assert!(!drop.eligible, "0.14 s cannot fill a 0.5 s window");
 
         now += dt;
-        drop.observe(now, &drop_spectrum(0.0, 0.8, low_flux(1.0)), &settings, dt);
+        drop.observe(now, &drop_spectrum(0.0, 0.8), 1.0, &settings, dt);
         now += dt;
         assert_eq!(
-            drop.observe(
-                now,
-                &drop_spectrum(0.0, 0.8, [0.0; BAND_COUNT]),
-                &settings,
-                dt
-            ),
+            drop.observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt),
             None,
             "an onset inside a partial window is ignored"
         );
 
         for _ in 0..40 {
             now += dt;
-            drop.observe(
-                now,
-                &drop_spectrum(0.0, 0.8, [0.0; BAND_COUNT]),
-                &settings,
-                dt,
-            );
+            drop.observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt);
         }
         assert!(drop.eligible, "the window is now full");
         now += dt;
-        drop.observe(now, &drop_spectrum(0.0, 0.8, low_flux(1.0)), &settings, dt);
+        drop.observe(now, &drop_spectrum(0.0, 0.8), 1.0, &settings, dt);
         now += dt;
         assert!(drop
-            .observe(
-                now,
-                &drop_spectrum(0.0, 0.8, [0.0; BAND_COUNT]),
-                &settings,
-                dt
-            )
+            .observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt)
             .is_some());
     }
 
@@ -1723,12 +2514,7 @@ mod tests {
         let mut now = 0.0;
         for _ in 0..12 {
             now += dt;
-            drop.observe(
-                now,
-                &drop_spectrum(0.6, 0.5, [0.0; BAND_COUNT]),
-                &settings,
-                dt,
-            );
+            drop.observe(now, &drop_spectrum(0.6, 0.5), 0.0, &settings, dt);
         }
         assert!((drop.confidence + 0.1).abs() < 1e-5);
         assert!(
@@ -1806,15 +2592,23 @@ mod tests {
     #[test]
     fn invalid_settings_are_rejected_early() {
         let mut settings = defaults();
-        settings.flux_attack = 0.0;
+        settings.band_onset[0].abl_gain = 0.0;
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();
-        settings.kick_kernel[0] = -0.1;
+        settings.excess.cap = 0.0;
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();
-        settings.snare_kernel[0] = f32::NAN;
+        settings.kick_onset_pre_gain = 0.0;
+        assert!(settings.validate().is_err());
+
+        let mut settings = defaults();
+        settings.kick_pattern.inner[0][0] = -0.1;
+        assert!(settings.validate().is_err());
+
+        let mut settings = defaults();
+        settings.snare_pattern.outer[0][1] = f32::NAN;
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();
@@ -1858,13 +2652,17 @@ mod tests {
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();
+        settings.drop_onset_suppression = 3.0;
+        assert!(settings.validate().is_err());
+
+        let mut settings = defaults();
         settings.kick_sequence_every = 0;
         assert!(settings.validate().is_err());
     }
 
     #[test]
     fn the_onset_power_is_the_smoothed_flux_at_the_peak() {
-        let settings = defaults().flux_settings();
+        let settings = FluxSettings::default();
         let mut tracker = FluxTracker::default();
         let dt = 1.0 / 86.0;
         let mut now = 0.0;

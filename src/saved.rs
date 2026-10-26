@@ -118,15 +118,18 @@ mod tests {
             .visualizer_text_scale
             .adjusted(crate::frame_schedule::Adjustment::Increase);
         config.edit().detectors.kick_onset_min_interval = 0.05;
-        config.edit().detectors.kick_kernel[0] = 0.4;
+        config.edit().detectors.kick_onset_pre_gain = 0.2;
+        config.edit().detectors.kick_pattern.inner[0] = [0.4, 0.1];
+        config.edit().detectors.kick_onset_suppression = 1.2;
         config.edit().detectors.snare_onset_attack = 0.01;
         config.edit().detectors.drop_gap_window = 0.6;
         config.edit().detectors.drop_gap_gain = 2.0;
         config.edit().detectors.drop_gap_threshold = -0.1;
         config.edit().detectors.drop_onset_attack = 0.01;
         config.edit().detectors.drop_kernels.low[0] = 0.5;
-        config.edit().detectors.flux_attack = 0.02;
-        config.edit().detectors.flux_sensitivity = 2.0;
+        config.edit().detectors.band_onset[3].abl_gain = 2.5;
+        config.edit().detectors.band_onset[3].abl_amount = 3.0;
+        config.edit().detectors.excess.floor = 0.02;
         config.edit().depth_fade = config
             .depth_fade
             .adjusted(crate::frame_schedule::Adjustment::Increase);
@@ -164,16 +167,18 @@ mod tests {
             "(visualizer_text_scale: 0.5)",
             "(visualizer_text_scale: 2.5)",
             "(visualizer_text_scale: NaN)",
-            "(detectors: (flux_attack: 0.0))",
-            "(detectors: (flux_sensitivity: 9.0))",
-            "(detectors: (flux_average: 2.0))",
+            "(detectors: (band_onset: [(abl_gain: 1.0, abl_curve: SCurve, abl_amount: 2.5)]))",
+            "(detectors: (excess: (background_attack: 0.0)))",
+            "(detectors: (excess: (cap: 0.0)))",
             "(detectors: (kick_sequence_every: 0))",
             "(detectors: (kick_onset_attack: 0.0))",
             "(detectors: (kick_onset_min_interval: 0.0))",
-            "(detectors: (kick_kernel: [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))",
+            "(detectors: (kick_onset_suppression: 3.0))",
+            "(detectors: (snare_onset_suppression: NaN))",
+            "(detectors: (kick_kernel: (2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)))",
             "(detectors: (snare_onset_sensitivity: 9.0))",
             "(detectors: (snare_onset_min_threshold: 3.0))",
-            "(detectors: (snare_kernel: [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))",
+            "(detectors: (snare_kernel: (2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)))",
             "(detectors: (drop_gap_window: 0.0))",
             "(detectors: (drop_gap_window: 5.0))",
             "(detectors: (drop_gap_threshold: 1.5))",
@@ -255,6 +260,49 @@ mod tests {
             legacy.detectors,
             crate::visualizer::DetectorSettings::default()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_flux_fields_load_without_overriding_new_defaults() -> anyhow::Result<()> {
+        let legacy: Config = ron::from_str(
+            "(detectors: (flux_attack: 0.02, flux_release: 0.08, flux_average: 0.3, \
+             flux_sensitivity: 2.0, flux_min_threshold: 0.02, flux_min_interval: 0.05))",
+        )?;
+        assert_eq!(
+            legacy.detectors.band_onset,
+            [crate::visualizer::BandOnsetSettings::default(); crate::visualizer::BAND_COUNT]
+        );
+        assert_eq!(
+            legacy.detectors.excess,
+            crate::visualizer::RelativeExcessSettings::default()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_band_flux_recipes_load_with_new_defaults() -> anyhow::Result<()> {
+        let legacy: Config = ron::from_str(
+            "(detectors: (band_flux: [(attack: 0.005, release: 0.05, average: 0.2, \
+             sensitivity: 1.5, min_threshold: 0.01, min_interval: 0.03)]))",
+        )?;
+        assert_eq!(
+            legacy.detectors.band_onset,
+            [crate::visualizer::BandOnsetSettings::default(); crate::visualizer::BAND_COUNT]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_band_kernels_seed_temporal_patterns() -> anyhow::Result<()> {
+        let legacy: Config = ron::from_str(
+            "(detectors: (kick_kernel: (0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, \
+             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)))",
+        )?;
+        let pattern = legacy.detectors.kick_pattern;
+        assert!(pattern.contains_band(0));
+        assert!(!pattern.contains_band(15));
+        assert_eq!(pattern.suppression_inner.len(), 4);
         Ok(())
     }
 

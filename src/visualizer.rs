@@ -14,14 +14,18 @@ pub use computation::{
     TreeTarget,
 };
 pub use detection::{
-    DetectorKernel, DetectorSettings, DropKernel, DropKernels, DropStatus, OnsetFluxStatus,
-    QuakeDirection, TriggerStatus, CHOKE_MAX, CHOKE_MIN, DROP_GAP_GAIN_MAX, DROP_GAP_GAIN_MIN,
-    DROP_GAP_THRESHOLD_MAX, DROP_GAP_THRESHOLD_MIN, DROP_GAP_WINDOW_MAX, DROP_GAP_WINDOW_MIN,
-    FLUX_ATTACK_MAX, FLUX_ATTACK_MIN, FLUX_AVERAGE_MAX, FLUX_AVERAGE_MIN, FLUX_INTERVAL_MAX,
-    FLUX_INTERVAL_MIN, FLUX_RELEASE_MAX, FLUX_RELEASE_MIN, FLUX_SENSITIVITY_MAX,
-    FLUX_SENSITIVITY_MIN, FLUX_THRESHOLD_MAX, FLUX_THRESHOLD_MIN, ONSET_THRESHOLD_MAX,
-    QUAKE_FACTOR_MAX, QUAKE_FACTOR_MIN, SEQUENCE_EVERY_MAX, SEQUENCE_EVERY_MIN, SPRING_DAMPING_MAX,
-    SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX, SPRING_STIFFNESS_MIN,
+    BandOnsetSettings, DetectorSettings, DropKernel, DropKernels, DropStatus, FluxSettings,
+    OnsetFluxStatus, PatternKernel, PatternLayer, QuakeDirection, TemporalPattern, TriggerStatus,
+    ABL_AMOUNT_MIN, ABL_GAIN_MAX, ABL_GAIN_MIN, CHOKE_MAX, CHOKE_MIN, DROP_GAP_GAIN_MAX,
+    DROP_GAP_GAIN_MIN, DROP_GAP_THRESHOLD_MAX, DROP_GAP_THRESHOLD_MIN, DROP_GAP_WINDOW_MAX,
+    DROP_GAP_WINDOW_MIN, EXCESS_ATTACK_MAX, EXCESS_ATTACK_MIN, EXCESS_CAP_MAX, EXCESS_CAP_MIN,
+    EXCESS_FLOOR_MAX, EXCESS_FLOOR_MIN, EXCESS_RELEASE_MAX, EXCESS_RELEASE_MIN, FLUX_ATTACK_MAX,
+    FLUX_ATTACK_MIN, FLUX_AVERAGE_MAX, FLUX_AVERAGE_MIN, FLUX_INTERVAL_MAX, FLUX_INTERVAL_MIN,
+    FLUX_PRE_GAIN_MAX, FLUX_PRE_GAIN_MIN, FLUX_RELEASE_MAX, FLUX_RELEASE_MIN, FLUX_SENSITIVITY_MAX,
+    FLUX_SENSITIVITY_MIN, FLUX_SUPPRESSION_MAX, FLUX_SUPPRESSION_MIN, FLUX_THRESHOLD_MIN,
+    ONSET_THRESHOLD_MAX, QUAKE_FACTOR_MAX, QUAKE_FACTOR_MIN, SEQUENCE_EVERY_MAX,
+    SEQUENCE_EVERY_MIN, SPRING_DAMPING_MAX, SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX,
+    SPRING_STIFFNESS_MIN,
 };
 use detection::{OnsetBank, QuakeSequence, Spring};
 
@@ -46,7 +50,7 @@ use geometry::{
     soft_saturate, Camera, Deformation, DepthOpacity, FigureKind, Pose, Projected, Vec2, Vec3,
     Wireframe,
 };
-pub use spectrum::BAND_COUNT;
+pub use spectrum::{RelativeExcessSettings, BAND_COUNT};
 use spectrum::{Spectrum, SpectrumAnalyzer};
 
 pub use renderer::Renderer;
@@ -871,11 +875,13 @@ fn input_dependencies(input: Input) -> Vec<Dependency> {
     }
 }
 
-/// A band or a property selected in the analysis panel.
+/// A band, a property, or the per-band onset analyzer selected in the
+/// analysis panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DebugSelection {
     Band(usize),
     Property(Property),
+    Flux,
 }
 
 impl DebugSelection {
@@ -883,6 +889,7 @@ impl DebugSelection {
         match self {
             Self::Band(index) => palette.vivid(index),
             Self::Property(property) => palette.vivid(property.index()),
+            Self::Flux => palette.vivid(9),
         }
     }
 }
@@ -895,12 +902,12 @@ pub struct DebugSample {
     pub at: f32,
     pub bands: [f32; BAND_COUNT],
     pub raw_bands: [f32; BAND_COUNT],
-    /// Raw spectral flux, smoothed flux, and adaptive threshold per band.
-    pub band_flux: [f32; BAND_COUNT],
-    pub band_smoothed_flux: [f32; BAND_COUNT],
-    pub band_threshold: [f32; BAND_COUNT],
-    /// Confirmed flux peaks per band, used to mark trigger blocks.
-    pub band_onset_count: [u32; BAND_COUNT],
+    /// Relative spectral excess, continuous onset flow, and its scaling terms.
+    pub band_excess: [f32; BAND_COUNT],
+    pub band_onset: [f32; BAND_COUNT],
+    pub band_abdr: [f32; BAND_COUNT],
+    pub band_abl: [f32; BAND_COUNT],
+    pub band_drp: [f32; BAND_COUNT],
     pub power: f32,
     pub raw_power: f32,
     pub bass: f32,
@@ -949,9 +956,11 @@ impl DebugHistory {
 pub struct BandDebug {
     pub value: f32,
     pub raw: f32,
-    pub raw_flux: f32,
-    pub smoothed_flux: f32,
-    pub threshold: f32,
+    pub excess: f32,
+    pub onset: f32,
+    pub abdr: f32,
+    pub abl: f32,
+    pub drp: f32,
     pub low_hz: f32,
     pub high_hz: f32,
     pub role: BandRole,
@@ -1253,6 +1262,9 @@ impl Visualizer {
             lines: Vec::with_capacity(MAX_LINES),
             ribbons: Vec::with_capacity(MAX_RIBBONS),
         };
+        visualizer
+            .analyzer
+            .set_relative_excess(visualizer.detectors.excess);
         visualizer.apply_style_tuning();
         visualizer
     }
@@ -1386,9 +1398,15 @@ impl Visualizer {
     fn observe(&mut self, spectrum: Spectrum, hop: f32) {
         self.analysis_revision = self.analysis_revision.wrapping_add(1);
         self.last_spectrum = spectrum;
+        let mut band_abdr = [0.0; BAND_COUNT];
+        let mut band_abl = [0.0; BAND_COUNT];
         for (index, band) in self.bands.iter_mut().enumerate() {
-            let shaped = self.band_shapes[index].observe(spectrum.bands[index], hop);
-            band.advance(shaped, hop);
+            let value = spectrum.bands[index];
+            let shape = &mut self.band_shapes[index];
+            shape.track(value, hop);
+            band.advance(shape.apply(value), hop);
+            band_abdr[index] = (shape.high - shape.low).max(0.0);
+            band_abl[index] = self.detectors.band_onset[index].loudness(shape.high);
         }
         let power = self.power_shape.observe(spectrum.power, hop);
         self.power.advance(power, hop);
@@ -1396,7 +1414,9 @@ impl Visualizer {
         self.bass.advance(bass, hop);
         let treble = self.treble_shape.observe(spectrum.treble, hop);
         self.treble.advance(treble, hop);
-        let events = self.onsets.observe(&spectrum, &self.detectors, hop);
+        let events = self
+            .onsets
+            .observe(&spectrum, &band_abdr, &band_abl, &self.detectors, hop);
         if let Some(power) = events.drop {
             self.drop_hits = self.drop_hits.saturating_add(1);
             self.push_action(Action::Drop(power));
@@ -1468,17 +1488,122 @@ impl Visualizer {
     }
 
     pub fn detector_settings(&self) -> DetectorSettings {
-        self.detectors
+        self.detectors.clone()
     }
 
     pub fn set_detector_settings(&mut self, settings: DetectorSettings) {
         self.detectors = settings
             .validate()
             .expect("detector settings are validated before they reach the visualizer");
+        self.analyzer.set_relative_excess(self.detectors.excess);
     }
 
-    pub fn set_kernel_band(&mut self, kernel: DetectorKernel, band: usize, value: f32) {
-        self.detectors.set_kernel_band(kernel, band, value);
+    pub fn set_drop_kernel_band(&mut self, kernel: DropKernel, band: usize, value: f32) {
+        self.detectors.set_drop_kernel_band(kernel, band, value);
+    }
+
+    pub fn hop_seconds(&self) -> f32 {
+        self.analyzer.hop_seconds()
+    }
+
+    pub fn onset_history(&self) -> &VecDeque<[f32; BAND_COUNT]> {
+        self.onsets.onset_history()
+    }
+
+    pub fn clear_pattern(&mut self, detector: Detector) {
+        match detector {
+            Detector::Kick => self.detectors.kick_pattern = TemporalPattern::kick_initial(),
+            Detector::Snare => self.detectors.snare_pattern = TemporalPattern::snare_initial(),
+            Detector::Drop | Detector::Flux => {
+                unreachable!("only kick and snare have temporal patterns")
+            }
+        }
+    }
+
+    pub fn set_pattern_vertex(
+        &mut self,
+        detector: Detector,
+        kernel: PatternKernel,
+        layer: PatternLayer,
+        vertex: usize,
+        point: [f32; 2],
+    ) {
+        let pattern = match detector {
+            Detector::Kick => &mut self.detectors.kick_pattern,
+            Detector::Snare => &mut self.detectors.snare_pattern,
+            Detector::Drop | Detector::Flux => {
+                unreachable!("only kick and snare have temporal patterns")
+            }
+        };
+        let polygon = match (kernel, layer) {
+            (PatternKernel::Main, PatternLayer::Inner) => &mut pattern.inner,
+            (PatternKernel::Main, PatternLayer::Outer) => &mut pattern.outer,
+            (PatternKernel::Suppression, PatternLayer::Inner) => &mut pattern.suppression_inner,
+            (PatternKernel::Suppression, PatternLayer::Outer) => &mut pattern.suppression_outer,
+        };
+        assert!(
+            vertex < polygon.len(),
+            "pattern vertices stay inside the polygon"
+        );
+        polygon[vertex] = [point[0].clamp(0.0, 1.0), point[1].clamp(0.0, 1.0)];
+    }
+
+    pub fn insert_pattern_vertex(
+        &mut self,
+        detector: Detector,
+        kernel: PatternKernel,
+        layer: PatternLayer,
+        edge: usize,
+        point: [f32; 2],
+    ) {
+        let pattern = match detector {
+            Detector::Kick => &mut self.detectors.kick_pattern,
+            Detector::Snare => &mut self.detectors.snare_pattern,
+            Detector::Drop | Detector::Flux => {
+                unreachable!("only kick and snare have temporal patterns")
+            }
+        };
+        let polygon = match (kernel, layer) {
+            (PatternKernel::Main, PatternLayer::Inner) => &mut pattern.inner,
+            (PatternKernel::Main, PatternLayer::Outer) => &mut pattern.outer,
+            (PatternKernel::Suppression, PatternLayer::Inner) => &mut pattern.suppression_inner,
+            (PatternKernel::Suppression, PatternLayer::Outer) => &mut pattern.suppression_outer,
+        };
+        assert!(
+            edge < polygon.len(),
+            "pattern edges stay inside the polygon"
+        );
+        polygon.insert(
+            edge + 1,
+            [point[0].clamp(0.0, 1.0), point[1].clamp(0.0, 1.0)],
+        );
+    }
+
+    pub fn remove_pattern_vertex(
+        &mut self,
+        detector: Detector,
+        kernel: PatternKernel,
+        layer: PatternLayer,
+        vertex: usize,
+    ) {
+        let pattern = match detector {
+            Detector::Kick => &mut self.detectors.kick_pattern,
+            Detector::Snare => &mut self.detectors.snare_pattern,
+            Detector::Drop | Detector::Flux => {
+                unreachable!("only kick and snare have temporal patterns")
+            }
+        };
+        let polygon = match (kernel, layer) {
+            (PatternKernel::Main, PatternLayer::Inner) => &mut pattern.inner,
+            (PatternKernel::Main, PatternLayer::Outer) => &mut pattern.outer,
+            (PatternKernel::Suppression, PatternLayer::Inner) => &mut pattern.suppression_inner,
+            (PatternKernel::Suppression, PatternLayer::Outer) => &mut pattern.suppression_outer,
+        };
+        assert!(
+            polygon.len() > 3 && vertex < polygon.len(),
+            "a polygon keeps a usable number of vertices"
+        );
+        polygon.remove(vertex);
     }
 
     pub fn routing(&self) -> &BandRouting {
@@ -1566,6 +1691,7 @@ impl Visualizer {
         let detectors = &self.detectors;
         match detector {
             Detector::Kick => match setting {
+                FluxSetting::PreGain => detectors.kick_onset_pre_gain,
                 FluxSetting::Attack => detectors.kick_onset_attack,
                 FluxSetting::Release => detectors.kick_onset_release,
                 FluxSetting::Average => detectors.kick_onset_average,
@@ -1574,6 +1700,7 @@ impl Visualizer {
                 FluxSetting::MinInterval => detectors.kick_onset_min_interval,
             },
             Detector::Snare => match setting {
+                FluxSetting::PreGain => detectors.snare_onset_pre_gain,
                 FluxSetting::Attack => detectors.snare_onset_attack,
                 FluxSetting::Release => detectors.snare_onset_release,
                 FluxSetting::Average => detectors.snare_onset_average,
@@ -1582,6 +1709,7 @@ impl Visualizer {
                 FluxSetting::MinInterval => detectors.snare_onset_min_interval,
             },
             Detector::Drop => match setting {
+                FluxSetting::PreGain => detectors.drop_onset_pre_gain,
                 FluxSetting::Attack => detectors.drop_onset_attack,
                 FluxSetting::Release => detectors.drop_onset_release,
                 FluxSetting::Average => detectors.drop_onset_average,
@@ -1590,7 +1718,7 @@ impl Visualizer {
                 FluxSetting::MinInterval => detectors.drop_onset_min_interval,
             },
             Detector::Flux => {
-                unreachable!("the per-band flux detector uses its global parameters")
+                unreachable!("the per-band onset analyzer uses its own parameters")
             }
         }
     }
@@ -1599,6 +1727,7 @@ impl Visualizer {
         let detectors = &mut self.detectors;
         let slot = match detector {
             Detector::Kick => match setting {
+                FluxSetting::PreGain => &mut detectors.kick_onset_pre_gain,
                 FluxSetting::Attack => &mut detectors.kick_onset_attack,
                 FluxSetting::Release => &mut detectors.kick_onset_release,
                 FluxSetting::Average => &mut detectors.kick_onset_average,
@@ -1607,6 +1736,7 @@ impl Visualizer {
                 FluxSetting::MinInterval => &mut detectors.kick_onset_min_interval,
             },
             Detector::Snare => match setting {
+                FluxSetting::PreGain => &mut detectors.snare_onset_pre_gain,
                 FluxSetting::Attack => &mut detectors.snare_onset_attack,
                 FluxSetting::Release => &mut detectors.snare_onset_release,
                 FluxSetting::Average => &mut detectors.snare_onset_average,
@@ -1615,6 +1745,7 @@ impl Visualizer {
                 FluxSetting::MinInterval => &mut detectors.snare_onset_min_interval,
             },
             Detector::Drop => match setting {
+                FluxSetting::PreGain => &mut detectors.drop_onset_pre_gain,
                 FluxSetting::Attack => &mut detectors.drop_onset_attack,
                 FluxSetting::Release => &mut detectors.drop_onset_release,
                 FluxSetting::Average => &mut detectors.drop_onset_average,
@@ -1623,7 +1754,30 @@ impl Visualizer {
                 FluxSetting::MinInterval => &mut detectors.drop_onset_min_interval,
             },
             Detector::Flux => {
-                unreachable!("the per-band flux detector uses its global parameters")
+                unreachable!("the per-band onset analyzer uses its own parameters")
+            }
+        };
+        *slot = value;
+    }
+
+    fn onset_suppression(&self, detector: Detector) -> f32 {
+        match detector {
+            Detector::Kick => self.detectors.kick_onset_suppression,
+            Detector::Snare => self.detectors.snare_onset_suppression,
+            Detector::Drop => self.detectors.drop_onset_suppression,
+            Detector::Flux => {
+                unreachable!("the per-band onset analyzer has no composite suppression")
+            }
+        }
+    }
+
+    fn set_onset_suppression(&mut self, detector: Detector, value: f32) {
+        let slot = match detector {
+            Detector::Kick => &mut self.detectors.kick_onset_suppression,
+            Detector::Snare => &mut self.detectors.snare_onset_suppression,
+            Detector::Drop => &mut self.detectors.drop_onset_suppression,
+            Detector::Flux => {
+                unreachable!("the per-band onset analyzer has no composite suppression")
             }
         };
         *slot = value;
@@ -1632,13 +1786,24 @@ impl Visualizer {
     /// Current value of one adjustable computation parameter.
     pub fn parameter_value(&self, parameter: Parameter) -> f32 {
         match parameter {
-            Parameter::FluxAttack => self.detectors.flux_attack,
-            Parameter::FluxRelease => self.detectors.flux_release,
-            Parameter::FluxAverage => self.detectors.flux_average,
-            Parameter::FluxSensitivity => self.detectors.flux_sensitivity,
-            Parameter::FluxMinThreshold => self.detectors.flux_min_threshold,
-            Parameter::FluxMinInterval => self.detectors.flux_min_interval,
+            Parameter::PatternArea(detector) => match detector {
+                Detector::Kick => self.detectors.kick_pattern.effective,
+                Detector::Snare => self.detectors.snare_pattern.effective,
+                Detector::Drop | Detector::Flux => {
+                    unreachable!("only kick and snare have temporal patterns")
+                }
+            },
+            Parameter::BandAblGain(band) => self.detectors.band_onset[band].abl_gain,
+            Parameter::BandAblCurve(band) => {
+                self.detectors.band_onset[band].abl_curve.index() as f32
+            }
+            Parameter::BandAblAmount(band) => self.detectors.band_onset[band].abl_amount,
+            Parameter::ExcessAttack => self.detectors.excess.background_attack,
+            Parameter::ExcessRelease => self.detectors.excess.background_release,
+            Parameter::ExcessFloor => self.detectors.excess.floor,
+            Parameter::ExcessCap => self.detectors.excess.cap,
             Parameter::OnsetFlux(detector, setting) => self.onset_flux_value(detector, setting),
+            Parameter::OnsetSuppression(detector) => self.onset_suppression(detector),
             Parameter::KickSnareChoke => self.detectors.kick_snare_choke,
             Parameter::KickDropChoke => self.detectors.kick_drop_choke,
             Parameter::KickQuakeFactor => self.detectors.kick_quake_factor,
@@ -1683,15 +1848,42 @@ impl Visualizer {
         let (minimum, maximum) = parameter.range();
         let value = value.clamp(minimum, maximum);
         match parameter {
-            Parameter::FluxAttack => self.detectors.flux_attack = value,
-            Parameter::FluxRelease => self.detectors.flux_release = value,
-            Parameter::FluxAverage => self.detectors.flux_average = value,
-            Parameter::FluxSensitivity => self.detectors.flux_sensitivity = value,
-            Parameter::FluxMinThreshold => self.detectors.flux_min_threshold = value,
-            Parameter::FluxMinInterval => self.detectors.flux_min_interval = value,
+            Parameter::PatternArea(detector) => {
+                let pattern = match detector {
+                    Detector::Kick => &mut self.detectors.kick_pattern,
+                    Detector::Snare => &mut self.detectors.snare_pattern,
+                    Detector::Drop | Detector::Flux => {
+                        unreachable!("only kick and snare have temporal patterns")
+                    }
+                };
+                pattern.effective = value;
+            }
+            Parameter::BandAblGain(band) => self.detectors.band_onset[band].abl_gain = value,
+            Parameter::BandAblCurve(band) => {
+                self.detectors.band_onset[band].abl_curve =
+                    Curve::from_index(value.round() as usize);
+            }
+            Parameter::BandAblAmount(band) => self.detectors.band_onset[band].abl_amount = value,
+            Parameter::ExcessAttack => {
+                self.detectors.excess.background_attack = value;
+                self.analyzer.set_relative_excess(self.detectors.excess);
+            }
+            Parameter::ExcessRelease => {
+                self.detectors.excess.background_release = value;
+                self.analyzer.set_relative_excess(self.detectors.excess);
+            }
+            Parameter::ExcessFloor => {
+                self.detectors.excess.floor = value;
+                self.analyzer.set_relative_excess(self.detectors.excess);
+            }
+            Parameter::ExcessCap => {
+                self.detectors.excess.cap = value;
+                self.analyzer.set_relative_excess(self.detectors.excess);
+            }
             Parameter::OnsetFlux(detector, setting) => {
                 self.set_onset_flux_value(detector, setting, value);
             }
+            Parameter::OnsetSuppression(detector) => self.set_onset_suppression(detector, value),
             Parameter::KickSnareChoke => self.detectors.kick_snare_choke = value,
             Parameter::KickDropChoke => self.detectors.kick_drop_choke = value,
             Parameter::KickQuakeFactor => self.detectors.kick_quake_factor = value,
@@ -1750,6 +1942,7 @@ impl Visualizer {
     fn envelope(&self, target: EnvelopeTarget) -> &Envelope {
         match target {
             EnvelopeTarget::Band(component) => &self.bands[self.routing[component]],
+            EnvelopeTarget::BandIndex(band) => &self.bands[band],
             EnvelopeTarget::Power => &self.power,
             EnvelopeTarget::Bass => &self.bass,
             EnvelopeTarget::Treble => &self.treble,
@@ -1759,6 +1952,7 @@ impl Visualizer {
     fn envelope_mut(&mut self, target: EnvelopeTarget) -> &mut Envelope {
         match target {
             EnvelopeTarget::Band(component) => &mut self.bands[self.routing[component]],
+            EnvelopeTarget::BandIndex(band) => &mut self.bands[band],
             EnvelopeTarget::Power => &mut self.power,
             EnvelopeTarget::Bass => &mut self.bass,
             EnvelopeTarget::Treble => &mut self.treble,
@@ -1768,6 +1962,7 @@ impl Visualizer {
     fn shape(&self, target: EnvelopeTarget) -> &InputShape {
         match target {
             EnvelopeTarget::Band(component) => &self.band_shapes[self.routing[component]],
+            EnvelopeTarget::BandIndex(band) => &self.band_shapes[band],
             EnvelopeTarget::Power => &self.power_shape,
             EnvelopeTarget::Bass => &self.bass_shape,
             EnvelopeTarget::Treble => &self.treble_shape,
@@ -1777,6 +1972,7 @@ impl Visualizer {
     fn shape_mut(&mut self, target: EnvelopeTarget) -> &mut InputShape {
         match target {
             EnvelopeTarget::Band(component) => &mut self.band_shapes[self.routing[component]],
+            EnvelopeTarget::BandIndex(band) => &mut self.band_shapes[band],
             EnvelopeTarget::Power => &mut self.power_shape,
             EnvelopeTarget::Bass => &mut self.bass_shape,
             EnvelopeTarget::Treble => &mut self.treble_shape,
@@ -1855,10 +2051,11 @@ impl Visualizer {
             at,
             bands: self.bands.map(|band| band.value),
             raw_bands: self.last_spectrum.bands,
-            band_flux: std::array::from_fn(|index| status.bands[index].raw_flux),
-            band_smoothed_flux: std::array::from_fn(|index| status.bands[index].smoothed),
-            band_threshold: std::array::from_fn(|index| status.bands[index].threshold),
-            band_onset_count: std::array::from_fn(|index| status.bands[index].triggers),
+            band_excess: std::array::from_fn(|index| status.bands[index].excess),
+            band_onset: std::array::from_fn(|index| status.bands[index].onset),
+            band_abdr: std::array::from_fn(|index| status.bands[index].abdr),
+            band_abl: std::array::from_fn(|index| status.bands[index].abl),
+            band_drp: std::array::from_fn(|index| status.bands[index].drp),
             power: self.power.value,
             raw_power: self.last_spectrum.power,
             bass: self.bass.value,
@@ -1901,9 +2098,11 @@ impl Visualizer {
             BandDebug {
                 value: self.bands[index].value,
                 raw: self.last_spectrum.bands[index],
-                raw_flux: status.bands[index].raw_flux,
-                smoothed_flux: status.bands[index].smoothed,
-                threshold: status.bands[index].threshold,
+                excess: status.bands[index].excess,
+                onset: status.bands[index].onset,
+                abdr: status.bands[index].abdr,
+                abl: status.bands[index].abl,
+                drp: status.bands[index].drp,
                 low_hz,
                 high_hz,
                 role: BandRole::for_index(index),
@@ -3202,32 +3401,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detector_defaults_describe_the_flux_onset_bank() {
+    fn detector_defaults_describe_the_onset_bank() {
         let detectors = DetectorSettings::default();
-        assert_eq!(detectors.flux_attack, 0.005);
-        assert_eq!(detectors.flux_release, 0.05);
-        assert_eq!(detectors.flux_average, 0.2);
-        assert_eq!(detectors.flux_min_interval, 0.03);
+        let band = detectors.band_onset[0];
+        assert_eq!(band.abl_gain, 1.0);
+        assert_eq!(band.abl_curve, Curve::SCurve);
+        assert_eq!(band.abl_amount, 2.5);
+        assert!(detectors
+            .band_onset
+            .iter()
+            .all(|candidate| *candidate == band));
+        assert_eq!(detectors.excess.background_attack, 0.320);
+        assert_eq!(detectors.excess.background_release, 0.200);
+        assert_eq!(detectors.excess.floor, 0.010);
+        assert_eq!(detectors.excess.cap, 1.0);
         assert!(detectors.kick_contains(0));
         assert!(detectors.kick_contains(4));
         assert!(!detectors.kick_contains(5));
         assert!(detectors.snare_contains(5));
         assert!(detectors.snare_contains(12));
-        assert_eq!(detectors.kick_onset_min_interval, 0.03);
+        assert_eq!(detectors.kick_onset_min_interval, 0.14);
+        assert_eq!(detectors.kick_onset_pre_gain, 1.0);
+        assert_eq!(detectors.kick_onset_suppression, 0.5);
         assert_eq!(detectors.snare_onset_attack, 0.005);
+        assert_eq!(detectors.snare_onset_pre_gain, 1.0);
+        assert_eq!(detectors.snare_onset_suppression, 0.5);
         assert_eq!(detectors.drop_gap_window, 1.0);
         assert_eq!(detectors.drop_gap_threshold, 0.15);
         assert_eq!(detectors.drop_gap_gain, 1.0);
+        assert_eq!(detectors.drop_onset_pre_gain, 1.0);
         assert_eq!(detectors.drop_onset_attack, 0.005);
         assert_eq!(detectors.drop_onset_min_threshold, 0.01);
+        assert_eq!(detectors.drop_onset_suppression, 0.5);
         assert_eq!(detectors.drop_kernels.low[0], 1.0);
         assert_eq!(detectors.drop_kernels.low[4], 0.0);
         assert_eq!(detectors.drop_kernels.high[4], 1.0);
         assert_eq!(detectors.drop_kernels.onset[0], 1.0);
-        assert!(detectors.validate().is_ok());
+        assert!(detectors.clone().validate().is_ok());
 
         let mut broken = detectors;
-        broken.flux_attack = 0.0;
+        broken.band_onset[7].abl_gain = 0.0;
         assert!(broken.validate().is_err());
     }
 
@@ -3239,6 +3452,29 @@ mod tests {
             assert_eq!(threshold.range(), (0.0, 0.25));
             visualizer.set_parameter(threshold, 100.0);
             assert_eq!(visualizer.parameter_value(threshold), 0.25);
+        }
+    }
+
+    #[test]
+    fn suppression_slider_spans_zero_to_double_subtraction() {
+        let mut visualizer = Visualizer::new();
+        for detector in [Detector::Kick, Detector::Snare, Detector::Drop] {
+            let suppression = Parameter::OnsetSuppression(detector);
+            assert_eq!(suppression.label(), "ONS SUPPRESS");
+            assert_eq!(
+                suppression.range(),
+                (FLUX_SUPPRESSION_MIN, FLUX_SUPPRESSION_MAX)
+            );
+            visualizer.set_parameter(suppression, 100.0);
+            assert_eq!(
+                visualizer.parameter_value(suppression),
+                FLUX_SUPPRESSION_MAX
+            );
+            visualizer.set_parameter(suppression, -1.0);
+            assert_eq!(
+                visualizer.parameter_value(suppression),
+                FLUX_SUPPRESSION_MIN
+            );
         }
     }
 
@@ -3320,7 +3556,7 @@ mod tests {
             drop_onset_attack: 0.015,
             ..DetectorSettings::default()
         };
-        visualizer.set_detector_settings(settings);
+        visualizer.set_detector_settings(settings.clone());
         let snapshot = visualizer.debug_snapshot();
         assert!(
             (visualizer.parameter_value(Parameter::OnsetFlux(
@@ -3368,25 +3604,118 @@ mod tests {
     }
 
     #[test]
-    fn flux_sliders_clamp_and_format_time_constants() {
+    fn abl_and_excess_sliders_clamp_and_format() {
         let mut visualizer = Visualizer::new();
-        visualizer.set_parameter(Parameter::FluxAttack, 1.0);
+        let gain = Parameter::BandAblGain(4);
+        let amount = Parameter::BandAblAmount(4);
+        visualizer.set_parameter(gain, 100.0);
+        assert_eq!(visualizer.parameter_value(gain), ABL_GAIN_MAX);
         assert_eq!(
-            visualizer.parameter_value(Parameter::FluxAttack),
-            FLUX_ATTACK_MAX
+            visualizer.parameter_value(Parameter::BandAblGain(3)),
+            1.0,
+            "editing one band must not touch another"
         );
-        visualizer.set_parameter(Parameter::FluxAttack, 0.0);
+        visualizer.set_parameter(gain, 0.0);
+        assert_eq!(visualizer.parameter_value(gain), ABL_GAIN_MIN);
+        visualizer.set_parameter(amount, 100.0);
+        assert_eq!(visualizer.parameter_value(amount), Curve::MAX_AMOUNT);
+        let curve = Parameter::BandAblCurve(4);
+        visualizer.set_parameter(curve, 3.0);
+        assert_eq!(visualizer.parameter_value(curve), 3.0);
+        assert_eq!(curve.format(3.0), Curve::from_index(3).name());
+        assert_eq!(gain.format(2.0), "2.00");
+
+        let attack = Parameter::ExcessAttack;
+        visualizer.set_parameter(attack, 100.0);
+        assert_eq!(visualizer.parameter_value(attack), EXCESS_ATTACK_MAX);
+        let floor = Parameter::ExcessFloor;
+        visualizer.set_parameter(floor, 100.0);
+        assert_eq!(visualizer.parameter_value(floor), EXCESS_FLOOR_MAX);
+        let cap = Parameter::ExcessCap;
+        visualizer.set_parameter(cap, 100.0);
+        assert_eq!(visualizer.parameter_value(cap), EXCESS_CAP_MAX);
+        assert_eq!(floor.format(0.0123), "0.012");
         assert_eq!(
-            visualizer.parameter_value(Parameter::FluxAttack),
-            FLUX_ATTACK_MIN
+            Parameter::OnsetFlux(Detector::Kick, FluxSetting::MinThreshold).range(),
+            (FLUX_THRESHOLD_MIN, ONSET_THRESHOLD_MAX)
         );
-        visualizer.set_parameter(Parameter::FluxSensitivity, 100.0);
+    }
+
+    #[test]
+    fn temporal_pattern_clear_and_vertex_edits_persist() {
+        let mut visualizer = Visualizer::new();
+        visualizer.clear_pattern(Detector::Kick);
         assert_eq!(
-            visualizer.parameter_value(Parameter::FluxSensitivity),
-            FLUX_SENSITIVITY_MAX
+            visualizer.detector_settings().kick_pattern,
+            TemporalPattern::kick_initial()
         );
-        assert_eq!(Parameter::FluxAttack.format(0.005), "5ms");
-        assert_eq!(Parameter::FluxMinThreshold.format(0.0123), "0.012");
+        visualizer.set_pattern_vertex(
+            Detector::Kick,
+            PatternKernel::Main,
+            PatternLayer::Inner,
+            0,
+            [0.2, 0.1],
+        );
+        let vertex = visualizer.detector_settings().kick_pattern.inner[0];
+        assert!((vertex[0] - 0.2).abs() < 1e-6);
+        assert!((vertex[1] - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn kernel_area_slider_limits_the_temporal_template() {
+        let mut visualizer = Visualizer::new();
+        let area = Parameter::PatternArea(Detector::Kick);
+        visualizer.set_parameter(area, 0.5);
+        assert!((visualizer.parameter_value(area) - 0.5).abs() < 1e-6);
+        assert_eq!(
+            visualizer.parameter_value(Parameter::PatternArea(Detector::Snare)),
+            1.0,
+            "the area is per detector"
+        );
+        assert_eq!(area.format(0.5), "50%");
+        assert_eq!(area.range(), (0.1, 1.0));
+    }
+
+    #[test]
+    fn onset_pre_gain_slider_trims_each_detector() {
+        let mut visualizer = Visualizer::new();
+        let kick = Parameter::OnsetFlux(Detector::Kick, FluxSetting::PreGain);
+        visualizer.set_parameter(kick, 0.1);
+        assert!((visualizer.parameter_value(kick) - 0.1).abs() < 1e-6);
+        assert_eq!(
+            visualizer.parameter_value(Parameter::OnsetFlux(Detector::Snare, FluxSetting::PreGain)),
+            1.0,
+            "the trim is per detector"
+        );
+        assert_eq!(
+            Parameter::OnsetFlux(Detector::Kick, FluxSetting::PreGain).range(),
+            (FLUX_PRE_GAIN_MIN, FLUX_PRE_GAIN_MAX)
+        );
+        assert_eq!(
+            Parameter::OnsetFlux(Detector::Kick, FluxSetting::PreGain).format(0.25),
+            "0.25"
+        );
+    }
+
+    #[test]
+    fn raw_band_shape_parameters_target_the_selected_band() {
+        let mut visualizer = Visualizer::new();
+        let target = EnvelopeTarget::BandIndex(7);
+        visualizer.set_parameter(Parameter::InputLow(target), 0.3);
+        visualizer.set_parameter(Parameter::InputHigh(target), 0.7);
+        visualizer.set_parameter(Parameter::InputCurve(target), 3.0);
+        visualizer.set_parameter(Parameter::InputAmount(target), 2.0);
+        let shape = visualizer.band_shape(7);
+        assert_eq!(shape.low, 0.3);
+        assert_eq!(shape.high, 0.7);
+        assert_eq!(shape.curve.index(), 3);
+        assert_eq!(shape.amount, 2.0);
+        assert!(shape.is_adaptive());
+        visualizer.toggle_adaptive(target);
+        assert!(!visualizer.band_shape(7).is_adaptive());
+        let other = visualizer.band_shape(6);
+        assert_eq!(other.low, 0.0);
+        assert_eq!(other.high, 1.0);
     }
 
     #[test]
@@ -3444,7 +3773,7 @@ mod tests {
             snare_flip_every: 2,
             ..DetectorSettings::default()
         };
-        visualizer.set_detector_settings(settings);
+        visualizer.set_detector_settings(settings.clone());
 
         visualizer.handle_action(Action::Kick(0.5), 0.0);
         assert!(visualizer.kick >= 0.5);
@@ -3480,7 +3809,13 @@ mod tests {
         // Isolate the kick kernel so a broadband click cannot choke it
         // through the snare detector.
         visualizer.set_detector_settings(DetectorSettings {
-            snare_kernel: [0.0; BAND_COUNT],
+            snare_pattern: TemporalPattern {
+                inner: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
+                outer: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
+                suppression_inner: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
+                suppression_outer: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
+                effective: 1.0,
+            },
             ..DetectorSettings::default()
         });
         visualizer.set_samplerate(48_000);
@@ -3542,7 +3877,7 @@ mod tests {
             drop_gap_threshold: 0.1,
             ..DetectorSettings::default()
         };
-        visualizer.set_detector_settings(settings);
+        visualizer.set_detector_settings(settings.clone());
         let hop = 1.0 / 86.0;
         let quiet = Spectrum {
             bands: std::array::from_fn(|band| if band < 4 { 0.0 } else { 0.8 }),
@@ -3558,8 +3893,9 @@ mod tests {
         assert!(armed.drop_status.confidence >= settings.drop_gap_threshold);
 
         let mut burst = quiet;
+        burst.band_excess = [1.0; BAND_COUNT];
         for band in 0..4 {
-            burst.band_flux[band] = 5.0;
+            burst.bands[band] = 1.0;
         }
         visualizer.observe(burst, hop);
         assert_eq!(visualizer.debug_snapshot().drop_hits, 0);
@@ -3915,19 +4251,26 @@ mod tests {
         assert!(snapshot.drop_status.high.is_finite());
         assert!(snapshot.drop_status.diff.is_finite());
         assert!(snapshot.drop_status.confidence.is_finite());
-        assert!(snapshot.drop_status.onset_flux.is_finite());
-        assert!(snapshot.drop_status.onset_smoothed.is_finite());
-        assert!(snapshot.drop_status.onset_threshold.is_finite());
+        assert!(snapshot.drop_status.onset.flux.is_finite());
+        assert!(snapshot.drop_status.onset.smoothed.is_finite());
+        assert!(snapshot.drop_status.onset.threshold.is_finite());
+        assert!(snapshot.drop_status.onset.inhibition.is_finite());
+        assert!(snapshot.drop_status.onset.suppressed.is_finite());
         assert!(snapshot.kick_flux.flux.is_finite());
         assert!(snapshot.kick_flux.smoothed.is_finite());
         assert!(snapshot.kick_flux.threshold.is_finite());
+        assert!(snapshot.kick_flux.inhibition.is_finite());
+        assert!(snapshot.kick_flux.suppressed.is_finite());
         assert!(snapshot.snare_flux.flux.is_finite());
         assert!(snapshot.snare_flux.smoothed.is_finite());
         assert!(snapshot.snare_flux.threshold.is_finite());
-        assert!(snapshot
-            .bands
-            .iter()
-            .all(|band| band.smoothed_flux.is_finite()));
+        assert!(snapshot.snare_flux.inhibition.is_finite());
+        assert!(snapshot.snare_flux.suppressed.is_finite());
+        assert!(snapshot.bands.iter().all(|band| band.excess.is_finite()
+            && band.onset.is_finite()
+            && band.abdr.is_finite()
+            && band.abl.is_finite()
+            && band.drp.is_finite()));
         assert!(!snapshot.scene.is_empty());
         assert!(snapshot.lines + snapshot.ribbons > 0);
         assert!(snapshot.ribbons > 0);
@@ -4022,9 +4365,9 @@ mod tests {
         let sequence = Parameter::KickSequenceEvery;
         visualizer.set_parameter(sequence, 100.0);
         assert_eq!(visualizer.parameter_value(sequence), 32.0);
-        let flux = Parameter::FluxAttack;
-        visualizer.set_parameter(flux, 0.02);
-        assert!((visualizer.parameter_value(flux) - 0.02).abs() < 1e-6);
+        let abl_gain = Parameter::BandAblGain(0);
+        visualizer.set_parameter(abl_gain, 2.0);
+        assert!((visualizer.parameter_value(abl_gain) - 2.0).abs() < 1e-6);
 
         let style = Parameter::Style(StyleInput::PhaseRate);
         visualizer.set_parameter(style, 2.25);

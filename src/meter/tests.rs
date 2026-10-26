@@ -907,7 +907,7 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
         meter.tree_target,
         meter.visualizer.mixer(),
     );
-    assert_eq!(tree.sliders.len(), 10);
+    assert_eq!(tree.sliders.len(), 12);
     let threshold = tree
         .sliders
         .iter()
@@ -944,7 +944,69 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
 }
 
 #[test]
-fn kick_kernel_bank_paints_the_kick_kernel() -> anyhow::Result<()> {
+fn flux_analyzer_bank_selects_the_band_for_its_controls() -> anyhow::Result<()> {
+    use crate::config::VisualizerTextScale;
+    use crate::visualizer::{DebugSelection, EnvelopeTarget, Parameter, Presentation, Property};
+
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Visualizer,
+        ..Default::default()
+    })?;
+    meter.set_debug(true);
+    meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
+    let view = View::fit(Size::new(1280.0, 440.0));
+    let text_scale = VisualizerTextScale::default();
+    meter.debug_selection = Some(DebugSelection::Property(Property::Kick));
+
+    let layout = super::debug::Layout::new(&view, text_scale);
+    assert!(meter.click_debug(&view, layout.flux_button.center()));
+    assert_eq!(meter.debug_selection, Some(DebugSelection::Flux));
+    assert_eq!(meter.flux_band, 0);
+
+    let panel = super::debug::flux_analyzer_layout(&view, text_scale, meter.flux_band);
+    let action = super::debug::TreeAction::ToggleAdaptive(EnvelopeTarget::BandIndex(0));
+    let center = panel.action_center(action).expect("auto refs action");
+    assert!(meter.visualizer.band_shape(0).is_adaptive());
+    assert!(meter.click_debug(&view, center));
+    assert!(!meter.visualizer.band_shape(0).is_adaptive());
+
+    let bank = panel.flux_bank.expect("the flux analyzer bank");
+    assert_eq!(bank.selected, 0);
+    let point = Point::new(
+        bank.rect.x0 + bank.rect.width() * 0.76,
+        bank.rect.center().y,
+    );
+    assert!(meter.click_debug(&view, point));
+    assert_eq!(meter.flux_band, 12);
+    assert_eq!(meter.debug_selection, Some(DebugSelection::Flux));
+
+    let panel = super::debug::flux_analyzer_layout(&view, text_scale, meter.flux_band);
+    assert!(panel.sliders.iter().all(|slider| matches!(
+        slider.parameter,
+        Parameter::BandAblGain(12)
+            | Parameter::BandAblCurve(12)
+            | Parameter::BandAblAmount(12)
+            | Parameter::InputLow(EnvelopeTarget::BandIndex(12))
+            | Parameter::InputHigh(EnvelopeTarget::BandIndex(12))
+            | Parameter::ExcessAttack
+            | Parameter::ExcessRelease
+            | Parameter::ExcessFloor
+            | Parameter::ExcessCap
+    )));
+    let gain = Parameter::BandAblGain(12);
+    let before = meter.visualizer.parameter_value(gain);
+    let slider = panel
+        .sliders
+        .iter()
+        .find(|slider| slider.parameter == gain)
+        .expect("ABL gain slider");
+    assert!(meter.click_debug(&view, slider.track.center()));
+    assert_ne!(meter.visualizer.parameter_value(gain), before);
+    Ok(())
+}
+
+#[test]
+fn kick_temporal_polygon_editor_drags_vertices_and_toggles_views() -> anyhow::Result<()> {
     use crate::config::VisualizerTextScale;
     use crate::visualizer::{DebugSelection, Detector, Presentation, Property, TreeTarget};
     let mut meter = Meter::new(&crate::config::Config {
@@ -964,18 +1026,139 @@ fn kick_kernel_bank_paints_the_kick_kernel() -> anyhow::Result<()> {
         meter.tree_target,
         meter.visualizer.mixer(),
     );
-    assert_eq!(tree.kernels.len(), 1);
-    let bank = tree.kernels[0];
-    let band = 2;
-    let point = Point::new(
-        bank.rect.x0
-            + (band as f64 + 0.5) * bank.rect.width() / crate::visualizer::BAND_COUNT as f64,
-        bank.rect.y1 - bank.rect.height() * 0.75,
+    let temporal = tree.temporal.expect("the kick temporal editor");
+
+    let initial = meter.detector_settings().kick_pattern.inner[0];
+    let start = Point::new(
+        temporal.canvas.x0 + temporal.canvas.width() * f64::from(initial[0]),
+        temporal.canvas.y0 + temporal.canvas.height() * f64::from(initial[1]),
     );
-    assert!(meter.click_debug(&view, point));
-    let value = meter.detector_settings().kick_kernel[band];
-    assert!((value - 0.75).abs() < 0.02, "kick kernel value was {value}");
+    let end = Point::new(
+        temporal.canvas.x0 + temporal.canvas.width() * 0.9,
+        temporal.canvas.y0 + temporal.canvas.height() * 0.1,
+    );
+    assert!(meter.click_debug(&view, start));
+    meter.set_pointer(Some(end));
     meter.end_slider_drag();
+    let vertex = meter.detector_settings().kick_pattern.inner[0];
+    assert!((vertex[0] - 0.9).abs() < 0.02);
+    assert!((vertex[1] - 0.1).abs() < 0.02);
+
+    let overlay = tree
+        .action_center(super::debug::TreeAction::TogglePatternOverlay)
+        .expect("overlay toggle");
+    assert!(meter.temporal_view.overlay);
+    assert!(meter.click_debug(&view, overlay));
+    assert!(!meter.temporal_view.overlay);
+    assert!(meter.click_debug(&view, overlay));
+    assert!(meter.temporal_view.overlay);
+    let preview = tree
+        .action_center(super::debug::TreeAction::TogglePatternPreview)
+        .expect("preview toggle");
+    assert!(meter.temporal_view.preview);
+    assert!(meter.click_debug(&view, preview));
+    assert!(!meter.temporal_view.preview);
+    let suppress = tree
+        .action_center(super::debug::TreeAction::TogglePatternSuppression)
+        .expect("suppression toggle");
+    assert_eq!(
+        meter.temporal_view.kernel,
+        crate::visualizer::PatternKernel::Main
+    );
+    assert!(meter.click_debug(&view, suppress));
+    assert_eq!(
+        meter.temporal_view.kernel,
+        crate::visualizer::PatternKernel::Suppression
+    );
+    let suppression = meter.detector_settings().kick_pattern.suppression_inner[0];
+    let suppression_start = Point::new(
+        temporal.canvas.x0 + temporal.canvas.width() * f64::from(suppression[0]),
+        temporal.canvas.y0 + temporal.canvas.height() * f64::from(suppression[1]),
+    );
+    let suppression_end = Point::new(
+        temporal.canvas.x0 + temporal.canvas.width() * 0.5,
+        temporal.canvas.y0 + temporal.canvas.height() * 0.5,
+    );
+    assert!(meter.click_debug(&view, suppression_start));
+    meter.set_pointer(Some(suppression_end));
+    meter.end_slider_drag();
+    let suppression = meter.detector_settings().kick_pattern.suppression_inner[0];
+    assert!((suppression[0] - 0.5).abs() < 0.02);
+    assert!((suppression[1] - 0.5).abs() < 0.02);
+    assert!((meter.detector_settings().kick_pattern.inner[0][0] - 0.9).abs() < 0.02);
+
+    let pause = tree
+        .action_center(super::debug::TreeAction::TogglePatternPause)
+        .expect("pause toggle");
+    assert!(meter.click_debug(&view, pause));
+    assert!(meter.temporal_view.paused);
+    assert!(meter.temporal_view.frozen.is_some());
+
+    let offset_point = Point::new(
+        temporal.offset.x0 + temporal.offset.width() * 0.75,
+        temporal.offset.center().y,
+    );
+    assert!(meter.click_debug(&view, offset_point));
+    assert!((meter.temporal_view.offset - 0.125).abs() < 0.01);
+
+    let clear = tree
+        .action_center(super::debug::TreeAction::ClearPattern(Detector::Kick))
+        .expect("clear action");
+    assert!(meter.click_debug(&view, clear));
+    let initial = crate::visualizer::TemporalPattern::kick_initial();
+    assert_eq!(meter.detector_settings().kick_pattern.inner, initial.inner);
+    assert_eq!(
+        meter.detector_settings().kick_pattern.suppression_inner,
+        initial.suppression_inner
+    );
+    Ok(())
+}
+
+#[test]
+fn temporal_polygon_double_click_deletes_and_adds_points() -> anyhow::Result<()> {
+    use crate::config::VisualizerTextScale;
+    use crate::visualizer::{DebugSelection, Detector, Presentation, Property, TreeTarget};
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Visualizer,
+        ..Default::default()
+    })?;
+    meter.set_debug(true);
+    meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
+    meter.debug_selection = Some(DebugSelection::Property(Property::Crossfade));
+    meter.tree_target = Some(TreeTarget::Detector(Detector::Kick));
+    let view = View::fit(Size::new(1280.0, 440.0));
+    let text_scale = VisualizerTextScale::default();
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Crossfade,
+        meter.tree_target,
+        meter.visualizer.mixer(),
+    );
+    let temporal = tree.temporal.expect("the kick temporal editor");
+    let points = meter.detector_settings().kick_pattern.inner;
+    let before = points.len();
+    let vertex = Point::new(
+        temporal.canvas.x0 + temporal.canvas.width() * f64::from(points[0][0]),
+        temporal.canvas.y0 + temporal.canvas.height() * f64::from(points[0][1]),
+    );
+    assert!(meter.click_debug(&view, vertex));
+    assert!(meter.click_debug(&view, vertex));
+    assert_eq!(
+        meter.detector_settings().kick_pattern.inner.len(),
+        before - 1
+    );
+
+    let points = meter.detector_settings().kick_pattern.inner;
+    let edge = Point::new(
+        temporal.canvas.x0
+            + temporal.canvas.width() * (f64::from(points[2][0]) + f64::from(points[0][0])) * 0.5,
+        temporal.canvas.y0
+            + temporal.canvas.height() * (f64::from(points[2][1]) + f64::from(points[0][1])) * 0.5,
+    );
+    assert!(meter.click_debug(&view, edge));
+    assert!(meter.click_debug(&view, edge));
+    assert_eq!(meter.detector_settings().kick_pattern.inner.len(), before);
     Ok(())
 }
 

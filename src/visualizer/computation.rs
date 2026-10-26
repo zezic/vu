@@ -51,23 +51,21 @@ impl Detector {
         }
     }
 
+    /// Parameters for a detector selected in the tree. The per-band onset
+    /// analyzer builds its own parameter list.
     pub fn parameters(self) -> Vec<Parameter> {
         match self {
-            Self::Flux => vec![
-                Parameter::FluxAttack,
-                Parameter::FluxRelease,
-                Parameter::FluxAverage,
-                Parameter::FluxSensitivity,
-                Parameter::FluxMinThreshold,
-                Parameter::FluxMinInterval,
-            ],
+            Self::Flux => unreachable!("the flux analyzer has its own panel"),
             Self::Kick => vec![
+                Parameter::PatternArea(Detector::Kick),
+                Parameter::OnsetFlux(Detector::Kick, FluxSetting::PreGain),
                 Parameter::OnsetFlux(Detector::Kick, FluxSetting::Attack),
                 Parameter::OnsetFlux(Detector::Kick, FluxSetting::Release),
                 Parameter::OnsetFlux(Detector::Kick, FluxSetting::Average),
                 Parameter::OnsetFlux(Detector::Kick, FluxSetting::Sensitivity),
                 Parameter::OnsetFlux(Detector::Kick, FluxSetting::MinThreshold),
                 Parameter::OnsetFlux(Detector::Kick, FluxSetting::MinInterval),
+                Parameter::OnsetSuppression(Detector::Kick),
                 Parameter::KickSnareChoke,
                 Parameter::KickDropChoke,
                 Parameter::KickQuakeFactor,
@@ -76,12 +74,15 @@ impl Detector {
                 Parameter::QuakeDamping,
             ],
             Self::Snare => vec![
+                Parameter::PatternArea(Detector::Snare),
+                Parameter::OnsetFlux(Detector::Snare, FluxSetting::PreGain),
                 Parameter::OnsetFlux(Detector::Snare, FluxSetting::Attack),
                 Parameter::OnsetFlux(Detector::Snare, FluxSetting::Release),
                 Parameter::OnsetFlux(Detector::Snare, FluxSetting::Average),
                 Parameter::OnsetFlux(Detector::Snare, FluxSetting::Sensitivity),
                 Parameter::OnsetFlux(Detector::Snare, FluxSetting::MinThreshold),
                 Parameter::OnsetFlux(Detector::Snare, FluxSetting::MinInterval),
+                Parameter::OnsetSuppression(Detector::Snare),
                 Parameter::SnareFlipEvery,
                 Parameter::SnareChoke,
                 Parameter::FlipStiffness,
@@ -91,12 +92,14 @@ impl Detector {
                 Parameter::DropGapWindow,
                 Parameter::DropGapGain,
                 Parameter::DropGapThreshold,
+                Parameter::OnsetFlux(Detector::Drop, FluxSetting::PreGain),
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::Attack),
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::Release),
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::Average),
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::Sensitivity),
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::MinThreshold),
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::MinInterval),
+                Parameter::OnsetSuppression(Detector::Drop),
                 Parameter::DropQuakeFactor,
             ],
         }
@@ -106,6 +109,7 @@ impl Detector {
 /// One setting of a detector's dedicated spectral-flux tracker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FluxSetting {
+    PreGain,
     Attack,
     Release,
     Average,
@@ -117,6 +121,7 @@ pub enum FluxSetting {
 impl FluxSetting {
     pub fn label(self) -> &'static str {
         match self {
+            Self::PreGain => "ONS PRE",
             Self::Attack => "ONS ATTACK",
             Self::Release => "ONS RELEASE",
             Self::Average => "ONS AVERAGE",
@@ -128,6 +133,7 @@ impl FluxSetting {
 
     pub fn range(self) -> (f32, f32) {
         match self {
+            Self::PreGain => (super::FLUX_PRE_GAIN_MIN, super::FLUX_PRE_GAIN_MAX),
             Self::Attack => (super::FLUX_ATTACK_MIN, super::FLUX_ATTACK_MAX),
             Self::Release => (super::FLUX_RELEASE_MIN, super::FLUX_RELEASE_MAX),
             Self::Average => (super::FLUX_AVERAGE_MIN, super::FLUX_AVERAGE_MAX),
@@ -139,6 +145,7 @@ impl FluxSetting {
 
     pub fn step(self) -> f32 {
         match self {
+            Self::PreGain => 0.01,
             Self::Attack | Self::MinThreshold => 0.001,
             Self::Release | Self::Average | Self::MinInterval => 0.005,
             Self::Sensitivity => 0.05,
@@ -147,6 +154,7 @@ impl FluxSetting {
 
     pub fn format(self, value: f32) -> String {
         match self {
+            Self::PreGain => format!("{value:.2}"),
             Self::Attack | Self::Release | Self::Average | Self::MinInterval => {
                 format!("{:.0}ms", value * 1000.0)
             }
@@ -316,6 +324,8 @@ impl<'de> Deserialize<'de> for BandRouting {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EnvelopeTarget {
     Band(BandComponent),
+    /// A raw FFT band selected in the onset flow analyzer.
+    BandIndex(usize),
     Power,
     Bass,
     Treble,
@@ -540,7 +550,7 @@ pub enum Curve {
 impl Curve {
     /// Upper bound of the curve amount. The S-curve applies one smoothstep
     /// per unit, so the slider range also bounds the iteration count.
-    const MAX_AMOUNT: f32 = 8.0;
+    pub const MAX_AMOUNT: f32 = 8.0;
 
     pub fn from_index(index: usize) -> Self {
         match index {
@@ -569,7 +579,7 @@ impl Curve {
         }
     }
 
-    fn apply(self, value: f32, amount: f32) -> f32 {
+    pub fn apply(self, value: f32, amount: f32) -> f32 {
         assert!(
             (0.0..=Self::MAX_AMOUNT).contains(&amount),
             "curve amount {amount} is outside 0..={}",
@@ -671,22 +681,32 @@ impl InputShape {
         matches!(self.tracking, ReferenceTracking::Adaptive)
     }
 
-    pub fn apply(self, value: f32) -> f32 {
+    /// Updates the adaptive references for one hop without shaping the value.
+    pub fn track(&mut self, value: f32, dt: f32) {
+        if self.is_adaptive() {
+            self.adapt(value, dt);
+        }
+    }
+
+    /// Rescales the value between the low/high references without applying the
+    /// curve.
+    pub fn normalized(self, value: f32) -> f32 {
         assert!(
             self.low < self.high,
             "input shape reference points must be ordered"
         );
-        let normalized = ((value - self.low) / (self.high - self.low)).clamp(0.0, 1.0);
-        self.curve.apply(normalized, self.amount)
+        ((value - self.low) / (self.high - self.low)).clamp(0.0, 1.0)
+    }
+
+    pub fn apply(self, value: f32) -> f32 {
+        self.curve.apply(self.normalized(value), self.amount)
     }
 
     /// Advances one raw input sample. An adaptive shape tracks the references
     /// before scaling, so the following envelope sees a slowly normalized signal
     /// rather than a value that jumps when the user drags a reference.
     pub fn observe(&mut self, value: f32, dt: f32) -> f32 {
-        if self.is_adaptive() {
-            self.adapt(value, dt);
-        }
+        self.track(value, dt);
         self.apply(value)
     }
 
@@ -747,14 +767,21 @@ impl InputShape {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Parameter {
-    FluxAttack,
-    FluxRelease,
-    FluxAverage,
-    FluxSensitivity,
-    FluxMinThreshold,
-    FluxMinInterval,
-    /// One setting of a detector's dedicated onset-flux tracker.
+    /// Fraction of the temporal kernel used for matching.
+    PatternArea(Detector),
+    /// Per-band absolute-loudness gain, curve, and amount.
+    BandAblGain(usize),
+    BandAblCurve(usize),
+    BandAblAmount(usize),
+    /// Global relative-excess background detector settings.
+    ExcessAttack,
+    ExcessRelease,
+    ExcessFloor,
+    ExcessCap,
+    /// One setting of a detector's dedicated onset tracker.
     OnsetFlux(Detector, FluxSetting),
+    /// How much suppression flux a detector subtracts from its onset.
+    OnsetSuppression(Detector),
     KickSnareChoke,
     KickDropChoke,
     KickQuakeFactor,
@@ -788,13 +815,16 @@ pub enum Parameter {
 impl Parameter {
     pub fn label(self) -> &'static str {
         match self {
-            Self::FluxAttack => "ATTACK",
-            Self::FluxRelease => "RELEASE",
-            Self::FluxAverage => "AVERAGE",
-            Self::FluxSensitivity => "SENSITIVITY",
-            Self::FluxMinThreshold => "MIN THRESH",
-            Self::FluxMinInterval => "MIN GAP",
+            Self::PatternArea(_) => "KERNEL AREA",
+            Self::BandAblGain(_) => "ABL GAIN",
+            Self::BandAblCurve(_) => "ABL CURVE",
+            Self::BandAblAmount(_) => "ABL AMT",
+            Self::ExcessAttack => "BG ATTACK",
+            Self::ExcessRelease => "BG RELEASE",
+            Self::ExcessFloor => "EXCESS FLOOR",
+            Self::ExcessCap => "EXCESS CAP",
             Self::OnsetFlux(_, setting) => setting.label(),
+            Self::OnsetSuppression(_) => "ONS SUPPRESS",
             Self::KickSnareChoke => "SNARE CHOKE",
             Self::KickDropChoke => "DROP CHOKE",
             Self::KickQuakeFactor => "QUAKE x",
@@ -835,13 +865,16 @@ impl Parameter {
 
     pub fn range(self) -> (f32, f32) {
         match self {
-            Self::FluxAttack => (super::FLUX_ATTACK_MIN, super::FLUX_ATTACK_MAX),
-            Self::FluxRelease => (super::FLUX_RELEASE_MIN, super::FLUX_RELEASE_MAX),
-            Self::FluxAverage => (super::FLUX_AVERAGE_MIN, super::FLUX_AVERAGE_MAX),
-            Self::FluxSensitivity => (super::FLUX_SENSITIVITY_MIN, super::FLUX_SENSITIVITY_MAX),
-            Self::FluxMinThreshold => (super::FLUX_THRESHOLD_MIN, super::FLUX_THRESHOLD_MAX),
-            Self::FluxMinInterval => (super::FLUX_INTERVAL_MIN, super::FLUX_INTERVAL_MAX),
+            Self::PatternArea(_) => (0.1, 1.0),
+            Self::BandAblGain(_) => (super::ABL_GAIN_MIN, super::ABL_GAIN_MAX),
+            Self::BandAblCurve(_) => (0.0, 3.0),
+            Self::BandAblAmount(_) => (super::ABL_AMOUNT_MIN, Curve::MAX_AMOUNT),
+            Self::ExcessAttack => (super::EXCESS_ATTACK_MIN, super::EXCESS_ATTACK_MAX),
+            Self::ExcessRelease => (super::EXCESS_RELEASE_MIN, super::EXCESS_RELEASE_MAX),
+            Self::ExcessFloor => (super::EXCESS_FLOOR_MIN, super::EXCESS_FLOOR_MAX),
+            Self::ExcessCap => (super::EXCESS_CAP_MIN, super::EXCESS_CAP_MAX),
             Self::OnsetFlux(_, setting) => setting.range(),
+            Self::OnsetSuppression(_) => (super::FLUX_SUPPRESSION_MIN, super::FLUX_SUPPRESSION_MAX),
             Self::KickSnareChoke | Self::KickDropChoke => (super::CHOKE_MIN, super::CHOKE_MAX),
             Self::KickQuakeFactor => (super::QUAKE_FACTOR_MIN, super::QUAKE_FACTOR_MAX),
             Self::KickSequenceEvery => (
@@ -888,11 +921,13 @@ impl Parameter {
 
     pub fn step(self) -> f32 {
         match self {
-            Self::FluxAttack => 0.001,
-            Self::FluxRelease | Self::FluxAverage | Self::FluxMinInterval => 0.005,
-            Self::FluxSensitivity => 0.05,
-            Self::FluxMinThreshold => 0.001,
+            Self::PatternArea(_) => 0.01,
+            Self::BandAblGain(_) | Self::BandAblAmount(_) | Self::ExcessCap => 0.01,
+            Self::BandAblCurve(_) => 1.0,
+            Self::ExcessAttack | Self::ExcessRelease => 0.005,
+            Self::ExcessFloor => 0.001,
             Self::OnsetFlux(_, setting) => setting.step(),
+            Self::OnsetSuppression(_) => 0.01,
             Self::KickSequenceEvery | Self::SnareFlipEvery => 1.0,
             Self::DropGapWindow
             | Self::DropGapGain
@@ -918,11 +953,13 @@ impl Parameter {
 
     pub fn format(self, value: f32) -> String {
         match self {
-            Self::FluxAttack | Self::FluxRelease | Self::FluxAverage | Self::FluxMinInterval => {
-                format!("{:.0}ms", value * 1000.0)
+            Self::PatternArea(_) => format!("{:.0}%", value * 100.0),
+            Self::BandAblGain(_) | Self::BandAblAmount(_) | Self::ExcessCap => {
+                format!("{value:.2}")
             }
-            Self::FluxSensitivity => format!("{value:.2}"),
-            Self::FluxMinThreshold => format!("{value:.3}"),
+            Self::BandAblCurve(_) => Curve::from_index(value.round() as usize).name().to_owned(),
+            Self::ExcessAttack | Self::ExcessRelease => format!("{:.0}ms", value * 1000.0),
+            Self::ExcessFloor => format!("{value:.3}"),
             Self::OnsetFlux(_, setting) => setting.format(value),
             Self::FlipStiffness | Self::QuakeStiffness => format!("{value:.1}"),
             Self::BandSource(_) => format!("B{:02}", value.round() as usize),
@@ -942,13 +979,15 @@ impl Parameter {
         let (minimum, maximum) = self.range();
         let value = value.clamp(minimum, maximum);
         match self {
-            Self::FluxAttack
-            | Self::FluxRelease
-            | Self::FluxAverage
-            | Self::FluxMinInterval
-            | Self::DropGapGain
+            Self::DropGapGain
             | Self::Attack(_)
-            | Self::Release(_) => (value / minimum).ln() / (maximum / minimum).ln(),
+            | Self::Release(_)
+            | Self::BandAblGain(_)
+            | Self::ExcessAttack
+            | Self::ExcessRelease
+            | Self::OnsetFlux(_, FluxSetting::PreGain) => {
+                (value / minimum).ln() / (maximum / minimum).ln()
+            }
             Self::OnsetFlux(_, setting) if setting.is_time() => {
                 (value / minimum).ln() / (maximum / minimum).ln()
             }
@@ -960,13 +999,13 @@ impl Parameter {
         let (minimum, maximum) = self.range();
         let fraction = fraction.clamp(0.0, 1.0);
         match self {
-            Self::FluxAttack
-            | Self::FluxRelease
-            | Self::FluxAverage
-            | Self::FluxMinInterval
-            | Self::DropGapGain
+            Self::DropGapGain
             | Self::Attack(_)
-            | Self::Release(_) => {
+            | Self::Release(_)
+            | Self::BandAblGain(_)
+            | Self::ExcessAttack
+            | Self::ExcessRelease
+            | Self::OnsetFlux(_, FluxSetting::PreGain) => {
                 let fraction = (fraction * 256.0).round() / 256.0;
                 minimum * (maximum / minimum).powf(fraction)
             }
@@ -2469,6 +2508,19 @@ static ENTRANCE: ComputeNode = branch(
 mod tests {
     use super::*;
     use strum::{EnumCount, VariantArray};
+
+    #[test]
+    fn normalized_rescaling_stops_before_the_curve() {
+        let shape = InputShape {
+            low: 0.2,
+            high: 0.8,
+            curve: Curve::Inflated,
+            amount: 2.0,
+            tracking: ReferenceTracking::Manual,
+        };
+        assert!((shape.normalized(0.5) - 0.5).abs() < 1e-6);
+        assert!((shape.apply(0.5) - 0.5_f32.powf(1.0 / 3.0)).abs() < 1e-6);
+    }
 
     #[test]
     fn input_shapes_rescale_and_bend_before_the_envelope() {

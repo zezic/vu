@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use rustfft::{num_complex::Complex32, Fft, FftPlanner};
+use serde::{Deserialize, Serialize};
 
 pub const BAND_COUNT: usize = 16;
 /// Analysis window. Longer windows resolve the lowest log bands; the hop keeps
@@ -11,10 +12,31 @@ const MIN_FREQUENCY: f32 = 32.0;
 const MAX_FREQUENCY: f32 = 16_000.0;
 const BASS_BANDS: usize = 4;
 const TREBLE_BANDS: usize = 4;
-/// Magnitude gain inside the flux compression. The analyzer already receives
-/// post-preamp samples, so this stays at unity unless the compression needs
-/// rescaling.
-const FLUX_GAIN: f32 = 1.0;
+const BIN_COUNT: usize = FFT_SIZE / 2;
+
+/// Parameters of the per-bin relative spectral excess detector.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RelativeExcessSettings {
+    /// Background envelope attack and release time constants in seconds.
+    pub background_attack: f32,
+    pub background_release: f32,
+    /// Floor added to the background before the relative excess division.
+    pub floor: f32,
+    /// Upper bound of one bin's relative excess.
+    pub cap: f32,
+}
+
+impl Default for RelativeExcessSettings {
+    fn default() -> Self {
+        Self {
+            background_attack: 0.320,
+            background_release: 0.200,
+            floor: 0.010,
+            cap: 1.0,
+        }
+    }
+}
 
 /// One analysis hop, normalized to 0..1 for the visible scene parameters.
 #[derive(Clone, Copy, Debug, Default)]
@@ -24,8 +46,8 @@ pub struct Spectrum {
     pub power: f32,
     pub bass: f32,
     pub treble: f32,
-    /// Positive log-magnitude flux summed over each band's FFT bins.
-    pub band_flux: [f32; BAND_COUNT],
+    /// Mean capped relative excess of each band's FFT bins.
+    pub band_excess: [f32; BAND_COUNT],
 }
 
 pub struct SpectrumAnalyzer {
@@ -40,7 +62,8 @@ pub struct SpectrumAnalyzer {
     fft_buffer: Vec<Complex32>,
     band_bins: [(usize, usize); BAND_COUNT],
     frequency_edges: [f32; BAND_COUNT + 1],
-    previous_log_magnitude: Vec<f32>,
+    bin_background: Vec<f32>,
+    excess: RelativeExcessSettings,
 }
 
 impl SpectrumAnalyzer {
@@ -67,7 +90,8 @@ impl SpectrumAnalyzer {
             fft_buffer: vec![Complex32::ZERO; FFT_SIZE],
             band_bins,
             frequency_edges,
-            previous_log_magnitude: vec![0.0; FFT_SIZE / 2],
+            bin_background: vec![0.0; BIN_COUNT],
+            excess: RelativeExcessSettings::default(),
         }
     }
 
@@ -111,7 +135,22 @@ impl SpectrumAnalyzer {
         self.ring_position = 0;
         self.filled = 0;
         self.since_hop = 0;
-        self.previous_log_magnitude.fill(0.0);
+        self.bin_background.fill(0.0);
+    }
+
+    pub fn set_relative_excess(&mut self, settings: RelativeExcessSettings) {
+        assert!(
+            settings.background_attack.is_finite()
+                && settings.background_attack > 0.0
+                && settings.background_release.is_finite()
+                && settings.background_release > 0.0
+                && settings.floor.is_finite()
+                && settings.floor >= 0.0
+                && settings.cap.is_finite()
+                && settings.cap > 0.0,
+            "relative excess settings must be positive and finite"
+        );
+        self.excess = settings;
     }
 
     pub fn hop_seconds(&self) -> f32 {
@@ -145,20 +184,31 @@ impl SpectrumAnalyzer {
         }
         self.fft.process(&mut self.fft_buffer);
         let norm = 2.0 / self.window_sum;
+        let hop = self.hop_seconds();
+        let attack_alpha = (-hop / self.excess.background_attack).exp();
+        let release_alpha = (-hop / self.excess.background_release).exp();
         let mut bands = [0.0; BAND_COUNT];
-        let mut band_flux = [0.0; BAND_COUNT];
+        let mut band_excess = [0.0; BAND_COUNT];
         for (band, &(start, end)) in self.band_bins.iter().enumerate() {
             let mut power = 0.0;
-            let mut flux = 0.0;
+            let mut excess = 0.0;
             for bin in start..end {
                 let magnitude = self.fft_buffer[bin].norm() * norm;
                 power += magnitude * magnitude;
-                let compressed = (FLUX_GAIN * magnitude).ln_1p();
-                flux += (compressed - self.previous_log_magnitude[bin]).max(0.0);
-                self.previous_log_magnitude[bin] = compressed;
+                let background = self.bin_background[bin];
+                let denominator = (background + self.excess.floor).max(1e-9);
+                excess += ((magnitude - background) / denominator)
+                    .max(0.0)
+                    .min(self.excess.cap);
+                let alpha = if magnitude > background {
+                    attack_alpha
+                } else {
+                    release_alpha
+                };
+                self.bin_background[bin] = alpha * background + (1.0 - alpha) * magnitude;
             }
             bands[band] = normalize_db(power.sqrt(), -72.0, 24.0);
-            band_flux[band] = flux;
+            band_excess[band] = excess / (end - start) as f32;
         }
         let rms = (energy / FFT_SIZE as f32).sqrt();
         let power = normalize_db(rms, -60.0, 12.0);
@@ -169,7 +219,7 @@ impl SpectrumAnalyzer {
             power,
             bass,
             treble,
-            band_flux,
+            band_excess,
         }
     }
 
@@ -243,6 +293,32 @@ mod tests {
     }
 
     #[test]
+    fn relative_excess_caps_on_a_rise_and_decays_into_the_background() {
+        let mut analyzer = SpectrumAnalyzer::new(48_000);
+        analyzer.set_relative_excess(RelativeExcessSettings {
+            background_attack: 0.05,
+            background_release: 0.05,
+            cap: 0.5,
+            ..RelativeExcessSettings::default()
+        });
+        for _ in 0..FFT_SIZE {
+            analyzer.push(0.0);
+        }
+        let band = expected_band(&analyzer, 40.0);
+        let mut peak = 0.0_f32;
+        let mut last = 0.0_f32;
+        for sample in 0..48_000 {
+            let phase = std::f32::consts::TAU * 40.0 * sample as f32 / 48_000.0;
+            if let Some(spectrum) = analyzer.push(phase.sin()) {
+                peak = peak.max(spectrum.band_excess[band]);
+                last = spectrum.band_excess[band];
+            }
+        }
+        assert!((peak - 0.5).abs() < 1e-5, "the ratio cap bounds the rise");
+        assert!(last < 0.05, "a held tone sinks into the background: {last}");
+    }
+
+    #[test]
     fn log_bands_are_ordered_and_cover_the_audio_range() {
         let analyzer = SpectrumAnalyzer::new(48_000);
         let edges = analyzer.frequency_edges();
@@ -277,36 +353,5 @@ mod tests {
         assert!(silence.bands.iter().all(|&band| band < 0.01));
         assert!(silence.power < 0.01);
         assert_eq!(silence.bass, 0.0);
-        assert!(silence.band_flux.iter().all(|&flux| flux == 0.0));
-    }
-
-    #[test]
-    fn flux_peaks_at_a_tone_onset_and_decays_on_a_sustain() {
-        let mut analyzer = SpectrumAnalyzer::new(48_000);
-        let mut onset = None;
-        let mut steady = Spectrum::default();
-        for sample in 0..60_000 {
-            let value = if sample < 8_000 {
-                0.0
-            } else {
-                (std::f32::consts::TAU * 1_000.0 * (sample - 8_000) as f32 / 48_000.0).sin()
-            };
-            if let Some(spectrum) = analyzer.push(value) {
-                if sample >= 8_000 && onset.is_none() {
-                    onset = Some(spectrum);
-                }
-                steady = spectrum;
-            }
-        }
-        let band = expected_band(&analyzer, 1_000.0);
-        let onset = onset.expect("the tone produced an analyzed hop");
-        assert!(
-            onset.band_flux[band] > 0.0,
-            "the rising tone must produce positive flux in its band"
-        );
-        assert!(
-            steady.band_flux[band] < onset.band_flux[band],
-            "a steady tone must have less flux than its onset"
-        );
     }
 }

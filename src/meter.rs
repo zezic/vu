@@ -704,9 +704,18 @@ struct SliderDrag {
 
 #[derive(Clone, Copy)]
 struct KernelDrag {
-    kernel: visualizer::DetectorKernel,
+    kernel: visualizer::DropKernel,
     rect: Rect,
     last: Point,
+}
+
+#[derive(Clone, Copy)]
+struct PatternDrag {
+    detector: visualizer::Detector,
+    canvas: Rect,
+    kernel: visualizer::PatternKernel,
+    layer: visualizer::PatternLayer,
+    vertex: usize,
 }
 
 pub struct Meter {
@@ -724,10 +733,15 @@ pub struct Meter {
     debug_snapshot: Option<visualizer::DebugSnapshot>,
     debug_selection: Option<visualizer::DebugSelection>,
     tree_target: Option<visualizer::TreeTarget>,
+    flux_band: usize,
     graph_max: [Option<debug::GraphMax>; visualizer::Property::COUNT],
     debug_pointer: Option<Point>,
     slider_drag: Option<SliderDrag>,
     kernel_drag: Option<KernelDrag>,
+    pattern_drag: Option<PatternDrag>,
+    temporal_view: debug::TemporalView,
+    offset_drag: Option<Rect>,
+    pattern_click: Option<(std::time::Instant, Point)>,
     debug_clock: f32,
     debug_analysis_revision: u64,
     text_scale: VisualizerTextScale,
@@ -805,9 +819,9 @@ impl Meter {
         let text_scale_readout = Readout::inline(&mut fonts, ["[-]", "[+]"]);
         let text_scale_value =
             Readout::value(&mut fonts, &format!("Text {:>3}%", text_scale.percent()));
-        let detectors = config.detectors;
+        let detectors = config.detectors.clone();
         let mut visualizer = Visualizer::new();
-        visualizer.set_detector_settings(detectors);
+        visualizer.set_detector_settings(detectors.clone());
         let kick_gap_readout = Readout::new(&mut fonts, "Kick Gap", ["[G]", "[H]"]);
         let kick_gap_value = Readout::value(
             &mut fonts,
@@ -885,10 +899,15 @@ impl Meter {
             debug_snapshot: None,
             debug_selection: None,
             tree_target: None,
+            flux_band: 0,
             graph_max: [None; visualizer::Property::COUNT],
             debug_pointer: None,
             slider_drag: None,
             kernel_drag: None,
+            pattern_drag: None,
+            temporal_view: debug::TemporalView::editing(),
+            offset_drag: None,
+            pattern_click: None,
             debug_clock: 0.0,
             debug_analysis_revision: 0,
             text_scale,
@@ -1016,6 +1035,8 @@ impl Meter {
         self.debug_pointer = pointer;
         self.update_sliders(pointer);
         self.update_kernels(pointer);
+        self.update_pattern(pointer);
+        self.update_offset(pointer);
         if self.debug && self.presentation == Presentation::Visualizer {
             self.face_settings = None;
         }
@@ -1059,6 +1080,21 @@ impl Meter {
                     self.begin_kernel(kernel, rect, position);
                     return true;
                 }
+                if let Some(temporal) = tree.temporal {
+                    if temporal.offset.contains(position) {
+                        self.begin_offset(temporal.offset, position);
+                        return true;
+                    }
+                    if temporal.canvas.contains(position) {
+                        self.handle_pattern_click(
+                            temporal.detector,
+                            temporal.canvas,
+                            position,
+                            scale,
+                        );
+                        return true;
+                    }
+                }
                 if let Some(row) = tree.row_at(position) {
                     if let Some(contribution) = row.contribution() {
                         let badge = Rect::new(
@@ -1081,9 +1117,9 @@ impl Meter {
                 return true;
             }
         }
-        let detector_focused = self
-            .debug_selection
-            .is_some_and(|selection| debug::detector_focused(selection, self.tree_target));
+        let detector_focused = self.debug_selection.is_some_and(|selection| {
+            debug::detector_focused(selection, self.tree_target, self.flux_band)
+        });
         if !detector_focused {
             if let Some(selection) = self.debug_selection {
                 if let Some((property, max)) = debug::graph_max_button_at(
@@ -1102,6 +1138,37 @@ impl Meter {
             }
         }
         let layout = debug::Layout::new(view, self.text_scale);
+        if layout.flux_button.contains(position) {
+            self.debug_selection = Some(visualizer::DebugSelection::Flux);
+            self.tree_target = None;
+            self.clear_drag();
+            self.face_settings = None;
+            return true;
+        }
+        if self.debug_selection == Some(visualizer::DebugSelection::Flux) {
+            let panel = debug::flux_analyzer_layout(view, self.text_scale, self.flux_band);
+            let panel_scale = view.ui_scale() * f64::from(self.text_scale.factor());
+            if panel.rect.width() >= debug::TREE_MIN_VISIBLE_WIDTH * panel_scale
+                && panel.rect.height() >= 200.0 * panel_scale
+                && panel.rect.contains(position)
+            {
+                if let Some(action) = panel.action_at(position) {
+                    self.apply_tree_action(action);
+                    return true;
+                }
+                if let Some(slider) = panel.slider_at(position) {
+                    self.begin_slider(slider.parameter, slider.track, position);
+                    return true;
+                }
+                if let Some(band) = panel.flux_band_at(position) {
+                    self.flux_band = band;
+                    self.clear_drag();
+                    self.face_settings = None;
+                    return true;
+                }
+                return true;
+            }
+        }
         if !layout.panel.contains(position) {
             return false;
         }
@@ -1119,6 +1186,9 @@ impl Meter {
             Some(item) => Some(item),
             None => None,
         };
+        if let Some(visualizer::DebugSelection::Band(index)) = selection {
+            self.flux_band = index;
+        }
         if selection != self.debug_selection {
             self.tree_target = None;
             self.clear_drag();
@@ -1148,8 +1218,34 @@ impl Meter {
                 }
             }
             debug::TreeAction::ToggleAdaptive(target) => self.visualizer.toggle_adaptive(target),
+            debug::TreeAction::ClearPattern(detector) => {
+                self.visualizer.clear_pattern(detector);
+                self.set_detector_settings(self.visualizer.detector_settings());
+            }
+            debug::TreeAction::TogglePatternOverlay => {
+                self.temporal_view.overlay = !self.temporal_view.overlay;
+            }
+            debug::TreeAction::TogglePatternPreview => {
+                self.temporal_view.preview = !self.temporal_view.preview;
+            }
+            debug::TreeAction::TogglePatternPause => {
+                self.temporal_view.paused = !self.temporal_view.paused;
+                if self.temporal_view.paused {
+                    self.temporal_view.frozen = Some(self.visualizer.onset_history().clone());
+                } else {
+                    self.temporal_view.frozen = None;
+                }
+                self.temporal_view.offset = 0.0;
+            }
+            debug::TreeAction::TogglePatternSuppression => {
+                self.temporal_view.kernel = match self.temporal_view.kernel {
+                    visualizer::PatternKernel::Main => visualizer::PatternKernel::Suppression,
+                    visualizer::PatternKernel::Suppression => visualizer::PatternKernel::Main,
+                };
+            }
         }
         self.clear_drag();
+        self.pattern_click = None;
         self.face_settings = None;
     }
 
@@ -1159,7 +1255,7 @@ impl Meter {
         self.set_parameter(parameter, value);
     }
 
-    fn begin_kernel(&mut self, kernel: visualizer::DetectorKernel, rect: Rect, position: Point) {
+    fn begin_kernel(&mut self, kernel: visualizer::DropKernel, rect: Rect, position: Point) {
         self.slider_drag = None;
         self.kernel_drag = Some(KernelDrag {
             kernel,
@@ -1181,13 +1277,7 @@ impl Meter {
         });
     }
 
-    fn paint_kernel(
-        &mut self,
-        kernel: visualizer::DetectorKernel,
-        rect: Rect,
-        from: Point,
-        to: Point,
-    ) {
+    fn paint_kernel(&mut self, kernel: visualizer::DropKernel, rect: Rect, from: Point, to: Point) {
         let band_at = |x: f64| {
             (((x - rect.x0) / rect.width()).clamp(0.0, 0.999_999) * visualizer::BAND_COUNT as f64)
                 as usize
@@ -1211,15 +1301,175 @@ impl Meter {
                 (f64::from(from_value) + (f64::from(to_value) - f64::from(from_value)) * position)
                     as f32
             };
-            self.visualizer.set_kernel_band(kernel, band, value);
+            self.visualizer.set_drop_kernel_band(kernel, band, value);
         }
         self.detectors = self.visualizer.detector_settings();
+        self.face_settings = None;
+    }
+
+    fn handle_pattern_click(
+        &mut self,
+        detector: visualizer::Detector,
+        canvas: Rect,
+        position: Point,
+        scale: f64,
+    ) {
+        let settings = self.visualizer.detector_settings();
+        let pattern = match detector {
+            visualizer::Detector::Kick => &settings.kick_pattern,
+            visualizer::Detector::Snare => &settings.snare_pattern,
+            visualizer::Detector::Drop | visualizer::Detector::Flux => return,
+        };
+        let kernel = self.temporal_view.kernel;
+        let hit = if self.temporal_view.overlay {
+            debug::pattern_hit(pattern, kernel, canvas, position, scale)
+        } else {
+            None
+        };
+        let now = std::time::Instant::now();
+        let double = self.pattern_click.take().is_some_and(|(at, previous)| {
+            now.duration_since(at) <= std::time::Duration::from_millis(400)
+                && previous.distance(position) <= 6.0
+        });
+        if double {
+            match hit {
+                Some(debug::PatternHit::Vertex { layer, index }) => {
+                    let polygon = match (kernel, layer) {
+                        (visualizer::PatternKernel::Main, visualizer::PatternLayer::Inner) => {
+                            &pattern.inner
+                        }
+                        (visualizer::PatternKernel::Main, visualizer::PatternLayer::Outer) => {
+                            &pattern.outer
+                        }
+                        (
+                            visualizer::PatternKernel::Suppression,
+                            visualizer::PatternLayer::Inner,
+                        ) => &pattern.suppression_inner,
+                        (
+                            visualizer::PatternKernel::Suppression,
+                            visualizer::PatternLayer::Outer,
+                        ) => &pattern.suppression_outer,
+                    };
+                    if polygon.len() > 3 {
+                        self.visualizer
+                            .remove_pattern_vertex(detector, kernel, layer, index);
+                        self.detectors = self.visualizer.detector_settings();
+                    }
+                }
+                Some(debug::PatternHit::Edge {
+                    layer,
+                    index,
+                    point,
+                }) => {
+                    let polygon = match (kernel, layer) {
+                        (visualizer::PatternKernel::Main, visualizer::PatternLayer::Inner) => {
+                            &pattern.inner
+                        }
+                        (visualizer::PatternKernel::Main, visualizer::PatternLayer::Outer) => {
+                            &pattern.outer
+                        }
+                        (
+                            visualizer::PatternKernel::Suppression,
+                            visualizer::PatternLayer::Inner,
+                        ) => &pattern.suppression_inner,
+                        (
+                            visualizer::PatternKernel::Suppression,
+                            visualizer::PatternLayer::Outer,
+                        ) => &pattern.suppression_outer,
+                    };
+                    if polygon.len() < 32 {
+                        self.visualizer
+                            .insert_pattern_vertex(detector, kernel, layer, index, point);
+                        self.detectors = self.visualizer.detector_settings();
+                    }
+                }
+                None => {}
+            }
+            self.clear_drag();
+            self.face_settings = None;
+            return;
+        }
+        self.pattern_click = Some((now, position));
+        match hit {
+            Some(debug::PatternHit::Vertex { layer, index }) => {
+                self.begin_polygon(detector, canvas, kernel, layer, index);
+            }
+            _ => self.clear_drag(),
+        }
+        self.face_settings = None;
+    }
+
+    fn begin_polygon(
+        &mut self,
+        detector: visualizer::Detector,
+        canvas: Rect,
+        kernel: visualizer::PatternKernel,
+        layer: visualizer::PatternLayer,
+        vertex: usize,
+    ) {
+        self.slider_drag = None;
+        self.kernel_drag = None;
+        self.pattern_drag = Some(PatternDrag {
+            detector,
+            canvas,
+            kernel,
+            layer,
+            vertex,
+        });
+        self.face_settings = None;
+    }
+
+    fn update_pattern(&mut self, pointer: Option<Point>) {
+        let (Some(pointer), Some(drag)) = (pointer, self.pattern_drag) else {
+            return;
+        };
+        let point = [
+            ((pointer.x - drag.canvas.x0) / drag.canvas.width()).clamp(0.0, 1.0) as f32,
+            ((pointer.y - drag.canvas.y0) / drag.canvas.height()).clamp(0.0, 1.0) as f32,
+        ];
+        self.visualizer.set_pattern_vertex(
+            drag.detector,
+            drag.kernel,
+            drag.layer,
+            drag.vertex,
+            point,
+        );
+        self.detectors = self.visualizer.detector_settings();
+        self.face_settings = None;
+    }
+
+    fn begin_offset(&mut self, rect: Rect, position: Point) {
+        self.slider_drag = None;
+        self.kernel_drag = None;
+        self.pattern_drag = None;
+        self.pattern_click = None;
+        self.offset_drag = Some(rect);
+        if !self.temporal_view.paused {
+            self.temporal_view.paused = true;
+            self.temporal_view.frozen = Some(self.visualizer.onset_history().clone());
+        }
+        self.set_offset(rect, position.x);
+        self.face_settings = None;
+    }
+
+    fn update_offset(&mut self, pointer: Option<Point>) {
+        let (Some(pointer), Some(rect)) = (pointer, self.offset_drag) else {
+            return;
+        };
+        self.set_offset(rect, pointer.x);
+    }
+
+    fn set_offset(&mut self, rect: Rect, x: f64) {
+        let fraction = ((x - rect.x0) / rect.width()).clamp(0.0, 1.0);
+        self.temporal_view.offset = ((fraction * 0.5) - 0.25) as f32;
         self.face_settings = None;
     }
 
     fn clear_drag(&mut self) {
         self.slider_drag = None;
         self.kernel_drag = None;
+        self.pattern_drag = None;
+        self.offset_drag = None;
     }
 
     /// Clears the inspector selection without changing the debug panel toggle.
@@ -1233,7 +1483,7 @@ impl Meter {
 
     /// Live detector settings, including slider edits, for config sync.
     pub fn detector_settings(&self) -> visualizer::DetectorSettings {
-        self.detectors
+        self.detectors.clone()
     }
 
     /// Live inspector tuning, including slider edits, for config sync.
@@ -1371,8 +1621,8 @@ impl Meter {
         if self.detectors == settings {
             return;
         }
-        self.detectors = settings;
-        self.visualizer.set_detector_settings(settings);
+        self.detectors = settings.clone();
+        self.visualizer.set_detector_settings(settings.clone());
         self.kick_gap_value = Readout::value(
             &mut self.fonts,
             &format!("{:.0}ms", settings.kick_onset_min_interval * 1000.0),
@@ -1646,6 +1896,8 @@ impl Meter {
                             self.debug_selection,
                             self.debug_pointer,
                             self.tree_target,
+                            self.flux_band,
+                            &self.temporal_view,
                             &self.graph_max,
                         );
                     }
