@@ -74,8 +74,8 @@ const PHASE_PERIOD: f32 = TAU * 100.0;
 /// The top-level display selected by the presentation hotkey.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Presentation {
-    #[default]
     Gauges,
+    #[default]
     Visualizer,
 }
 
@@ -210,9 +210,14 @@ pub struct InputTuning {
 
 impl InputTuning {
     fn band(index: usize) -> Self {
+        // The factory preset damps this band faster than the linear ramp.
+        let (attack, release) = match index {
+            7 => (2.0291474, 2.0105636),
+            _ => (14.0, 5.0 + 5.0 * index as f32 / (BAND_COUNT - 1) as f32),
+        };
         Self {
-            attack: 14.0,
-            release: 5.0 + 5.0 * index as f32 / (BAND_COUNT - 1) as f32,
+            attack,
+            release,
             shape: InputShape::adaptive(),
         }
     }
@@ -3420,27 +3425,27 @@ mod tests {
         assert_eq!(detectors.excess.floor, 0.010);
         assert_eq!(detectors.excess.cap, 1.0);
         assert!(detectors.kick_contains(0));
-        assert!(detectors.kick_contains(4));
-        assert!(!detectors.kick_contains(5));
-        assert!(detectors.snare_contains(5));
-        assert!(detectors.snare_contains(12));
-        assert_eq!(detectors.kick_onset_min_interval, 0.14);
-        assert_eq!(detectors.kick_onset_pre_gain, 1.0);
+        assert!(detectors.kick_contains(15));
+        assert!(detectors.snare_contains(4));
+        assert!(detectors.snare_contains(15));
+        assert!(!detectors.snare_contains(1));
+        assert_eq!(detectors.kick_onset_min_interval, 0.09514833);
+        assert_eq!(detectors.kick_onset_pre_gain, 0.49823883);
         assert_eq!(detectors.kick_onset_suppression, 0.5);
-        assert_eq!(detectors.snare_onset_attack, 0.005);
-        assert_eq!(detectors.snare_onset_pre_gain, 1.0);
-        assert_eq!(detectors.snare_onset_suppression, 0.5);
+        assert_eq!(detectors.snare_onset_attack, 0.001);
+        assert_eq!(detectors.snare_onset_pre_gain, 1.0054638);
+        assert_eq!(detectors.snare_onset_suppression, 0.32999998);
         assert_eq!(detectors.drop_gap_window, 1.0);
-        assert_eq!(detectors.drop_gap_threshold, 0.15);
+        assert_eq!(detectors.drop_gap_threshold, -0.3);
         assert_eq!(detectors.drop_gap_gain, 1.0);
-        assert_eq!(detectors.drop_onset_pre_gain, 1.0);
-        assert_eq!(detectors.drop_onset_attack, 0.005);
-        assert_eq!(detectors.drop_onset_min_threshold, 0.01);
+        assert_eq!(detectors.drop_onset_pre_gain, 1.0054638);
+        assert_eq!(detectors.drop_onset_attack, 0.024582442);
+        assert_eq!(detectors.drop_onset_min_threshold, 0.125);
         assert_eq!(detectors.drop_onset_suppression, 0.5);
-        assert_eq!(detectors.drop_kernels.low[0], 1.0);
-        assert_eq!(detectors.drop_kernels.low[4], 0.0);
-        assert_eq!(detectors.drop_kernels.high[4], 1.0);
-        assert_eq!(detectors.drop_kernels.onset[0], 1.0);
+        assert_eq!(detectors.drop_kernels.low[0], 0.9628592);
+        assert_eq!(detectors.drop_kernels.low[4], 0.80759937);
+        assert_eq!(detectors.drop_kernels.high[4], 0.2293353);
+        assert_eq!(detectors.drop_kernels.onset[0], 0.44955054);
         assert!(detectors.clone().validate().is_ok());
 
         let mut broken = detectors;
@@ -3486,11 +3491,10 @@ mod tests {
     fn default_kernels_select_their_bands() {
         let detectors = DetectorSettings::default();
         assert!(detectors.kick_contains(0));
-        assert!(detectors.kick_contains(4));
-        assert!(!detectors.kick_contains(5));
-        assert!(detectors.snare_contains(5));
-        assert!(detectors.snare_contains(12));
-        assert!(!detectors.snare_contains(4));
+        assert!(detectors.kick_contains(15));
+        assert!(detectors.snare_contains(4));
+        assert!(detectors.snare_contains(15));
+        assert!(!detectors.snare_contains(1));
     }
 
     #[test]
@@ -3586,10 +3590,10 @@ mod tests {
                 .abs()
                 < 1e-6
         );
-        assert!(visualizer.detector_settings().kick_contains(4));
-        assert!(!visualizer.detector_settings().kick_contains(5));
-        assert!(visualizer.detector_settings().snare_contains(5));
-        assert!(!visualizer.detector_settings().snare_contains(4));
+        assert!(visualizer.detector_settings().kick_contains(0));
+        assert!(visualizer.detector_settings().kick_contains(15));
+        assert!(visualizer.detector_settings().snare_contains(4));
+        assert!(!visualizer.detector_settings().snare_contains(1));
         assert_eq!(snapshot.kick_hits, 0);
         assert_eq!(snapshot.snare_hits, 0);
         assert_eq!(snapshot.drop_hits, 0);
@@ -3682,11 +3686,12 @@ mod tests {
     fn kernel_area_slider_limits_the_temporal_template() {
         let mut visualizer = Visualizer::new();
         let area = Parameter::PatternArea(Detector::Kick);
+        let snare_area = visualizer.parameter_value(Parameter::PatternArea(Detector::Snare));
         visualizer.set_parameter(area, 0.5);
         assert!((visualizer.parameter_value(area) - 0.5).abs() < 1e-6);
         assert_eq!(
             visualizer.parameter_value(Parameter::PatternArea(Detector::Snare)),
-            1.0,
+            snare_area,
             "the area is per detector"
         );
         assert_eq!(area.format(0.5), "50%");
@@ -3697,11 +3702,13 @@ mod tests {
     fn onset_pre_gain_slider_trims_each_detector() {
         let mut visualizer = Visualizer::new();
         let kick = Parameter::OnsetFlux(Detector::Kick, FluxSetting::PreGain);
+        let snare = Parameter::OnsetFlux(Detector::Snare, FluxSetting::PreGain);
+        let snare_gain = visualizer.parameter_value(snare);
         visualizer.set_parameter(kick, 0.1);
         assert!((visualizer.parameter_value(kick) - 0.1).abs() < 1e-6);
         assert_eq!(
-            visualizer.parameter_value(Parameter::OnsetFlux(Detector::Snare, FluxSetting::PreGain)),
-            1.0,
+            visualizer.parameter_value(snare),
+            snare_gain,
             "the trim is per detector"
         );
         assert_eq!(
@@ -3890,8 +3897,15 @@ mod tests {
     fn a_confident_gap_and_composite_onset_confirm_a_drop() {
         let mut visualizer = Visualizer::new();
         let settings = DetectorSettings {
+            drop_kernels: DropKernels {
+                low: std::array::from_fn(|band| if band < 4 { 1.0 } else { 0.0 }),
+                high: std::array::from_fn(|band| if band >= 4 { 1.0 } else { 0.0 }),
+                onset: std::array::from_fn(|band| if band < 4 { 1.0 } else { 0.0 }),
+            },
             drop_gap_window: 0.1,
             drop_gap_threshold: 0.1,
+            drop_low_lp: 0.0,
+            drop_high_lp: 0.0,
             ..DetectorSettings::default()
         };
         visualizer.set_detector_settings(settings.clone());
@@ -3951,22 +3965,29 @@ mod tests {
                 );
                 frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
             }
-            let frame = visualizer.frame();
-            let mut min_x = f32::INFINITY;
-            let mut max_x = f32::NEG_INFINITY;
-            for ribbon in frame.ribbons {
-                for corner in [ribbon.start, ribbon.end] {
-                    min_x = min_x.min(corner[0]).min(corner[2]);
-                    max_x = max_x.max(corner[0]).max(corner[2]);
-                }
-            }
-            (frame.ribbons.len(), max_x - min_x)
+            let exposure_start = frame.start().shifted(-f64::from(shutter) / 60.0);
+            let exposure = visualizer
+                .scene
+                .current
+                .exposure_poses(exposure_start, frame.start())
+                .expect("exposure poses");
+            let movement = exposure
+                .first
+                .iter()
+                .zip(&exposure.last)
+                .map(|(first, last)| {
+                    (last.start - first.start)
+                        .length()
+                        .max((last.end - first.end).length())
+                })
+                .sum();
+            (visualizer.frame().ribbons.len(), movement)
         }
-        let (short_count, short_spread) = trail(1.0);
-        let (long_count, long_spread) = trail(8.0);
+        let (short_count, short_movement) = trail(1.0);
+        let (long_count, long_movement) = trail(8.0);
         assert!(short_count > 0);
         assert!(long_count > 0);
-        assert!(long_spread > short_spread);
+        assert!(long_movement > short_movement);
     }
 
     #[test]
@@ -4569,10 +4590,11 @@ mod tests {
     fn band_components_can_be_rerouted() {
         let mut visualizer = Visualizer::new();
         let detectors = visualizer.detector_settings();
-        assert!(Property::Spin.depends_on_band(4, visualizer.routing(), &detectors));
+        let original = visualizer.band_for(BandComponent::Spin);
+        assert!(Property::Spin.depends_on_band(original, visualizer.routing(), &detectors));
         visualizer.set_parameter(Parameter::BandSource(BandComponent::Spin), 7.0);
         assert_eq!(visualizer.band_for(BandComponent::Spin), 7);
-        assert!(!Property::Spin.depends_on_band(4, visualizer.routing(), &detectors));
+        assert!(!Property::Spin.depends_on_band(original, visualizer.routing(), &detectors));
         assert!(Property::Spin.depends_on_band(7, visualizer.routing(), &detectors));
         assert_eq!(
             Property::Spin.component_gains(Input::Band(BandComponent::Spin)),
@@ -4620,8 +4642,8 @@ mod tests {
             );
         }
         assert!(Property::Kick.depends_on_band_onset(0, &detectors));
-        assert!(!Property::Kick.depends_on_band_onset(5, &detectors));
-        assert!(Property::Flip.depends_on_band_onset(5, &detectors));
+        assert!(!Property::Flip.depends_on_band_onset(0, &detectors));
+        assert!(Property::Flip.depends_on_band_onset(12, &detectors));
     }
 
     #[test]

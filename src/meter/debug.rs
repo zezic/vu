@@ -4889,9 +4889,15 @@ fn dependency_label(dependency: Dependency, routing: &BandRouting) -> String {
 mod tests {
     use super::*;
 
+    /// Layout tests describe geometry at the reference chrome scale, not the
+    /// factory text-size preference.
+    fn reference_scale() -> VisualizerTextScale {
+        VisualizerTextScale::try_from(1.0).expect("the unit chrome scale is valid")
+    }
+
     fn layout() -> Layout {
         let view = View::fit(Size::new(1280.0, 440.0));
-        Layout::new(&view, VisualizerTextScale::default())
+        Layout::new(&view, reference_scale())
     }
 
     #[test]
@@ -4924,9 +4930,9 @@ mod tests {
     #[test]
     fn computation_tree_sits_left_of_the_analysis_panel() {
         let view = View::fit(Size::new(1280.0, 440.0));
-        let tree = tree_rect(&view, VisualizerTextScale::default());
-        let layout = Layout::new(&view, VisualizerTextScale::default());
-        let (_, inspector) = inspector_panes(&view, VisualizerTextScale::default());
+        let tree = tree_rect(&view, reference_scale());
+        let layout = Layout::new(&view, reference_scale());
+        let (_, inspector) = inspector_panes(&view, reference_scale());
         assert!(tree.x1 <= layout.panel.x0);
         assert_eq!(inspector.x0 - tree.x1, EXTENSION_GAP);
         assert_eq!(tree.y1, layout.extension.y1);
@@ -4940,7 +4946,7 @@ mod tests {
         use crate::visualizer::Gain;
         let mut routing = BandRouting::default();
         let gain = Parameter::Gain(Gain::SpinBand);
-        assert_eq!(parameter_label(gain, &routing), "B04 SPIN GAIN");
+        assert_eq!(parameter_label(gain, &routing), "B02 SPIN GAIN");
         routing[BandComponent::Spin] = 7;
         assert_eq!(parameter_label(gain, &routing), "B07 SPIN GAIN");
     }
@@ -4948,7 +4954,7 @@ mod tests {
     #[test]
     fn detector_controls_live_in_the_tree_parameter_panel() {
         let view = View::fit(Size::new(1280.0, 440.0));
-        let text_scale = VisualizerTextScale::default();
+        let text_scale = reference_scale();
         let tree = tree_layout(
             &view,
             text_scale,
@@ -5064,7 +5070,7 @@ mod tests {
     #[test]
     fn drop_focus_fits_its_graph_cells() {
         let view = View::fit(Size::new(1280.0, 440.0));
-        let text_scale = VisualizerTextScale::default();
+        let text_scale = reference_scale();
         let visualizer = Visualizer::new();
         let (_, extension) = inspector_panes(&view, text_scale);
         let scale = view.ui_scale() * f64::from(text_scale.factor());
@@ -5085,7 +5091,7 @@ mod tests {
     #[test]
     fn kick_and_snare_focus_fits_their_flux_graphs() {
         let view = View::fit(Size::new(1280.0, 440.0));
-        let text_scale = VisualizerTextScale::default();
+        let text_scale = reference_scale();
         let visualizer = Visualizer::new();
         let (_, extension) = inspector_panes(&view, text_scale);
         let scale = view.ui_scale() * f64::from(text_scale.factor());
@@ -5110,7 +5116,7 @@ mod tests {
     #[test]
     fn flux_focus_shows_the_flux_then_the_raw_band_envelope() {
         let view = View::fit(Size::new(1280.0, 440.0));
-        let text_scale = VisualizerTextScale::default();
+        let text_scale = reference_scale();
         let visualizer = Visualizer::new();
         let (_, extension) = inspector_panes(&view, text_scale);
         let scale = view.ui_scale() * f64::from(text_scale.factor());
@@ -5140,7 +5146,7 @@ mod tests {
     #[test]
     fn detector_focus_stacks_suppression_below_the_onset_graph() {
         let view = View::fit(Size::new(1280.0, 440.0));
-        let text_scale = VisualizerTextScale::default();
+        let text_scale = reference_scale();
         let visualizer = Visualizer::new();
         let (_, extension) = inspector_panes(&view, text_scale);
         let scale = view.ui_scale() * f64::from(text_scale.factor());
@@ -5198,7 +5204,7 @@ mod tests {
         let (heading, description, dependencies) = drop_extension_text(&snapshot, &visualizer);
         assert_eq!(heading, "DROP TRIGGER  IDLE");
         assert!(description.contains("LF 0.00"));
-        assert!(description.contains("CONF 0.00/0.15"));
+        assert!(description.contains("CONF 0.00/-0.30"));
         assert!(dependencies.contains("WINDOW 1.00s"));
         assert!(dependencies.contains("ONSET"));
     }
@@ -5206,7 +5212,7 @@ mod tests {
     #[test]
     fn kick_and_snare_expose_temporal_pattern_editors() {
         let view = View::fit(Size::new(1280.0, 440.0));
-        let text_scale = VisualizerTextScale::default();
+        let text_scale = reference_scale();
         for detector in [Detector::Kick, Detector::Snare] {
             let tree = tree_layout(
                 &view,
@@ -5237,7 +5243,7 @@ mod tests {
     #[test]
     fn flux_analyzer_exposes_band_controls() {
         let view = View::fit(Size::new(1280.0, 440.0));
-        let layout = flux_analyzer_layout(&view, VisualizerTextScale::default(), 5);
+        let layout = flux_analyzer_layout(&view, reference_scale(), 5);
         assert_eq!(layout.parameter_title, "ONSET FLOW B05");
         let target = EnvelopeTarget::BandIndex(5);
         let expected = vec![
@@ -5301,10 +5307,12 @@ mod tests {
 
         let low_band = graph_sources(DebugSelection::Band(0), &visualizer);
         assert!(low_band.contains(&GraphSource::Onset(Detector::Kick)));
+        assert!(!low_band.contains(&GraphSource::Onset(Detector::Snare)));
         let snare_band = graph_sources(DebugSelection::Band(5), &visualizer);
         assert!(snare_band.contains(&GraphSource::Onset(Detector::Snare)));
         let high_band = graph_sources(DebugSelection::Band(8), &visualizer);
-        assert!(!high_band.contains(&GraphSource::Onset(Detector::Kick)));
+        assert!(high_band.contains(&GraphSource::Onset(Detector::Kick)));
+        assert!(high_band.contains(&GraphSource::Onset(Detector::Snare)));
     }
 
     #[test]
@@ -5320,7 +5328,7 @@ mod tests {
     #[test]
     fn extra_mix_inputs_have_rows_and_actions() {
         let view = View::fit(Size::new(1280.0, 440.0));
-        let text_scale = VisualizerTextScale::default();
+        let text_scale = reference_scale();
         let point = MixPoint::PulseEnergy;
         let mut mixer = Mixer::default();
         let extra = mixer.add_extra(point);
@@ -5355,7 +5363,7 @@ mod tests {
     #[test]
     fn tight_windows_shrink_the_inspector_before_hiding_the_tree() {
         let view = View::fit(Size::new(900.0, 440.0));
-        let text_scale = VisualizerTextScale::default();
+        let text_scale = reference_scale();
         let layout = Layout::new(&view, text_scale);
         let (tree, inspector) = inspector_panes(&view, text_scale);
         assert!(tree.width() > 250.0);
@@ -5375,19 +5383,19 @@ mod tests {
         assert_eq!(band_route(Property::Crossfade, 0, &visualizer), "D");
         assert_eq!(band_route(Property::Crossfade, 4, &visualizer), "D");
         assert_eq!(band_route(Property::Flip, 5, &visualizer), "S");
-        assert_eq!(band_route(Property::Spin, 4, &visualizer), "V");
+        assert_eq!(band_route(Property::Spin, 2, &visualizer), "V");
         assert_eq!(band_route(Property::Spin, 5, &visualizer), "");
-        assert!(Property::Kick.depends_on_band(3, routing, &detectors));
-        assert!(!Property::Kick.depends_on_band(5, routing, &detectors));
+        assert!(Property::Kick.depends_on_band(5, routing, &detectors));
+        assert!(!Property::Flip.depends_on_band(3, routing, &detectors));
     }
 
     #[test]
     fn band_dependency_text_follows_rerouting() {
         let mut visualizer = Visualizer::new();
-        assert!(band_route(Property::Spin, 4, &visualizer) == "V");
+        assert!(band_route(Property::Spin, 2, &visualizer) == "V");
         assert!(band_route(Property::Spin, 7, &visualizer).is_empty());
         visualizer.set_parameter(Parameter::BandSource(BandComponent::Spin), 7.0);
-        assert!(band_route(Property::Spin, 4, &visualizer).is_empty());
+        assert!(band_route(Property::Spin, 2, &visualizer).is_empty());
         assert_eq!(band_route(Property::Spin, 7, &visualizer), "V");
         assert!(band_dependency_line(7, &visualizer).contains("V:SPIN"));
     }
@@ -5447,7 +5455,7 @@ mod tests {
         let view = View::fit(Size::new(1280.0, 440.0));
         let visualizer = Visualizer::new();
         let selection = DebugSelection::Property(Property::Zoom);
-        let text_scale = VisualizerTextScale::default();
+        let text_scale = reference_scale();
         assert!(
             graph_max_button_center(&view, text_scale, selection, &visualizer, GraphMax::One)
                 .is_none()

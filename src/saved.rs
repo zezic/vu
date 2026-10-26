@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(missing.peak_movement, crate::meter::PeakMovement::VintageFr);
         assert_eq!(
             missing.presentation,
-            crate::visualizer::Presentation::Gauges
+            crate::visualizer::Presentation::Visualizer
         );
         assert_eq!(
             missing.shutter_frames,

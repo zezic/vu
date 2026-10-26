@@ -105,9 +105,34 @@ pub struct DropKernels {
 impl Default for DropKernels {
     fn default() -> Self {
         Self {
-            low: std::array::from_fn(|band| if band < 4 { 1.0 } else { 0.0 }),
-            high: std::array::from_fn(|band| if band >= 4 { 1.0 } else { 0.0 }),
-            onset: std::array::from_fn(|band| if band < 4 { 1.0 } else { 0.0 }),
+            low: [
+                0.9628592, 0.9961292, 0.9961292, 0.90740925, 0.80759937, 0.6745195, 0.5303496,
+                0.37508973, 0.24200983, 0.15328991, 0.08674996, 0.05347999, 0.02021002, 0.0, 0.0,
+                0.5303496,
+            ],
+            high: [
+                0.018625464,
+                0.018625464,
+                0.06298543,
+                0.10734539,
+                0.2293353,
+                0.39568514,
+                0.584215,
+                0.76165485,
+                0.8725547,
+                0.93909466,
+                0.9945446,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                0.49549505,
+            ],
+            onset: [
+                0.44955054, 0.6159004, 0.7489803, 0.8598802, 0.89315015, 0.8709702, 0.77116024,
+                0.6269904, 0.5050005, 0.4051906, 0.31647065, 0.28320068, 0.2721107, 0.28320068,
+                0.3608306, 0.67135036,
+            ],
         }
     }
 }
@@ -248,21 +273,89 @@ impl Default for TemporalPattern {
 impl TemporalPattern {
     pub fn kick_initial() -> Self {
         Self {
-            inner: rectangle(0.8, 1.0, 0.0, 0.28),
-            outer: rectangle(0.8, 1.0, 0.0, 5.0 / BAND_COUNT as f32),
-            suppression_inner: rectangle(0.0, 1.0, 6.0 / BAND_COUNT as f32, 0.95),
-            suppression_outer: rectangle(0.0, 1.0, 5.0 / BAND_COUNT as f32, 1.0),
-            effective: 1.0,
+            inner: vec![
+                [0.0, 0.33803162],
+                [0.032534927, 0.15787412],
+                [0.10334638, 0.04483413],
+                [0.16458872, 0.0],
+                [0.3042978, 0.0],
+                [0.26984897, 0.10135413],
+                [0.16267489, 0.16140662],
+                [0.07655285, 0.34862912],
+                [0.02296581, 0.5782416],
+                [0.0038275793, 0.7619316],
+                [0.034291036, 0.878736],
+                [0.038276393, 1.0],
+                [0.0, 1.0],
+            ],
+            outer: vec![
+                [0.0, 0.23205662],
+                [0.028707279, 0.08369163],
+                [0.12248461, 0.0],
+                [0.33491898, 0.0],
+                [0.27559045, 0.16140662],
+                [0.16458872, 0.19673163],
+                [0.09760491, 0.42987663],
+                [0.049759332, 0.5853066],
+                [0.049759332, 0.7407366],
+                [0.06124227, 1.0],
+                [0.0, 1.0],
+            ],
+            suppression_inner: vec![
+                [0.0, 0.0],
+                [0.075829335, 0.0],
+                [0.019845905, 0.08775653],
+                [0.0, 0.26498532],
+            ],
+            suppression_outer: vec![
+                [0.0, 0.0],
+                [0.1090047, 0.0],
+                [0.040580507, 0.102450065],
+                [0.0021032926, 0.31054506],
+            ],
+            effective: 0.22,
         }
     }
 
     pub fn snare_initial() -> Self {
         Self {
-            inner: rectangle(0.90, 1.0, 0.34, 0.78),
-            outer: rectangle(0.90, 1.0, 5.0 / BAND_COUNT as f32, 13.0 / BAND_COUNT as f32),
-            suppression_inner: rectangle(0.0, 1.0, 0.0, 4.0 / BAND_COUNT as f32),
-            suppression_outer: rectangle(0.0, 1.0, 0.0, 5.0 / BAND_COUNT as f32),
-            effective: 1.0,
+            inner: vec![
+                [0.019887151, 0.28172547],
+                [0.144943, 0.29345784],
+                [0.15471299, 0.43893924],
+                [0.007405143, 0.48870692],
+                [0.071682416, 0.5504716],
+                [0.113679044, 0.7862174],
+                [0.064829096, 0.8730369],
+                [0.011552064, 0.9736742],
+                [0.0, 0.98968726],
+                [0.0, 0.43838012],
+            ],
+            outer: vec![
+                [0.0, 0.4132167],
+                [0.0003471733, 0.24652837],
+                [0.15862098, 0.24652837],
+                [0.2270109, 0.43893924],
+                [0.17328197, 0.5024324],
+                [0.16706158, 0.7609291],
+                [0.0687371, 0.93169874],
+                [0.019845905, 1.0],
+                [0.0, 1.0],
+                [0.0, 0.89132124],
+            ],
+            suppression_inner: vec![
+                [0.0, 0.0],
+                [0.08619663, 0.0],
+                [0.09023107, 0.20898479],
+                [0.008163164, 0.21367773],
+            ],
+            suppression_outer: vec![
+                [0.0, 0.0],
+                [0.16706158, 0.0],
+                [0.13321902, 0.27468607],
+                [0.0, 0.29111138],
+            ],
+            effective: 0.14,
         }
     }
 
@@ -585,48 +678,48 @@ impl Default for DetectorSettings {
             band_onset: [BandOnsetSettings::default(); BAND_COUNT],
             excess: RelativeExcessSettings::default(),
             kick_pattern: TemporalPattern::kick_initial(),
-            kick_onset_pre_gain: 1.0,
-            kick_onset_attack: 0.005,
-            kick_onset_release: 0.05,
-            kick_onset_average: 0.2,
-            kick_onset_sensitivity: 1.5,
-            kick_onset_min_threshold: 0.01,
-            kick_onset_min_interval: 0.14,
+            kick_onset_pre_gain: 0.49823883,
+            kick_onset_attack: 0.001,
+            kick_onset_release: 0.010084573,
+            kick_onset_average: 0.05,
+            kick_onset_sensitivity: 0.5,
+            kick_onset_min_threshold: 0.125,
+            kick_onset_min_interval: 0.09514833,
             kick_onset_suppression: 0.5,
-            kick_snare_choke: 0.12,
-            kick_drop_choke: 0.2,
-            kick_quake_factor: 2.0,
+            kick_snare_choke: 0.099999994,
+            kick_drop_choke: 0.099999994,
+            kick_quake_factor: 40.0,
             kick_sequence_every: 1,
             snare_pattern: TemporalPattern::snare_initial(),
-            snare_onset_pre_gain: 1.0,
-            snare_onset_attack: 0.005,
-            snare_onset_release: 0.05,
-            snare_onset_average: 0.2,
-            snare_onset_sensitivity: 1.5,
-            snare_onset_min_threshold: 0.01,
-            snare_onset_min_interval: 0.14,
-            snare_onset_suppression: 0.5,
-            snare_flip_every: 4,
-            snare_choke: 0.12,
-            flip_stiffness: 70.0,
-            flip_damping: 7.0,
+            snare_onset_pre_gain: 1.0054638,
+            snare_onset_attack: 0.001,
+            snare_onset_release: 0.005,
+            snare_onset_average: 0.05,
+            snare_onset_sensitivity: 0.5,
+            snare_onset_min_threshold: 0.125,
+            snare_onset_min_interval: 0.100148335,
+            snare_onset_suppression: 0.32999998,
+            snare_flip_every: 1,
+            snare_choke: 0.099999994,
+            flip_stiffness: 349.5,
+            flip_damping: 18.5,
             drop_kernels: DropKernels::default(),
             drop_gap_window: 1.0,
-            drop_gap_threshold: 0.15,
+            drop_gap_threshold: -0.3,
             drop_gap_gain: 1.0,
-            drop_low_lp: 0.0,
-            drop_high_lp: 0.0,
-            drop_onset_pre_gain: 1.0,
-            drop_onset_attack: 0.005,
+            drop_low_lp: 0.25,
+            drop_high_lp: 0.5,
+            drop_onset_pre_gain: 1.0054638,
+            drop_onset_attack: 0.024582442,
             drop_onset_release: 0.05,
             drop_onset_average: 0.2,
             drop_onset_sensitivity: 1.5,
-            drop_onset_min_threshold: 0.01,
+            drop_onset_min_threshold: 0.125,
             drop_onset_min_interval: 0.14,
             drop_onset_suppression: 0.5,
-            drop_quake_factor: 1.0,
-            quake_stiffness: 140.0,
-            quake_damping: 9.0,
+            drop_quake_factor: 20.0,
+            quake_stiffness: 200.0,
+            quake_damping: 2.5,
         }
     }
 }
@@ -2177,11 +2270,10 @@ mod tests {
     fn the_default_kernels_select_their_bands() {
         let settings = defaults();
         assert!(settings.kick_contains(0));
-        assert!(settings.kick_contains(4));
-        assert!(!settings.kick_contains(5));
-        assert!(settings.snare_contains(5));
-        assert!(settings.snare_contains(12));
-        assert!(!settings.snare_contains(4));
+        assert!(settings.kick_contains(15));
+        assert!(settings.snare_contains(4));
+        assert!(settings.snare_contains(15));
+        assert!(!settings.snare_contains(1));
     }
 
     #[test]
@@ -2223,8 +2315,10 @@ mod tests {
             band_excess: [1.0; BAND_COUNT],
             ..Spectrum::default()
         };
-        let events = bank.observe(&pulse, &abdr, &abl, &settings, dt);
-        assert!(events.snare.is_none());
+        for _ in 0..4 {
+            let events = bank.observe(&pulse, &abdr, &abl, &settings, dt);
+            assert!(events.snare.is_none());
+        }
         let events = bank.observe(&quiet, &abdr, &abl, &settings, dt);
         assert!(events.snare.is_some(), "snare onset");
         assert!(events.kick.is_none(), "the snare chokes the kick");
@@ -2233,26 +2327,26 @@ mod tests {
 
     #[test]
     fn the_suppression_kernel_is_independent_of_the_main_kernel() {
-        let mut settings = defaults();
-        settings.kick_onset_suppression = 1.0;
-        let mut high = [0.0; BAND_COUNT];
-        high[8..].fill(1.0);
-        let projection = settings
-            .kick_pattern
-            .project(&VecDeque::from([high]), 1.0, 1.0, 1);
+        let settings = defaults();
+        let low_band = 0.5 / BAND_COUNT as f32;
+        let high_band = 12.5 / BAND_COUNT as f32;
         assert!(
-            projection.inhibition > 0.5,
-            "the kick suppressor listens above the kick bands"
+            settings
+                .kick_pattern
+                .suppression_field_value(0.05, low_band)
+                > 0.0,
+            "the kick suppressor covers the low bands"
         );
-
-        let mut low = [0.0; BAND_COUNT];
-        low[..5].fill(1.0);
-        let projection = settings
-            .kick_pattern
-            .project(&VecDeque::from([low]), 1.0, 1.0, 1);
         assert_eq!(
-            projection.inhibition, 0.0,
-            "a kick-band hit is not its own suppressor"
+            settings
+                .kick_pattern
+                .suppression_field_value(0.05, high_band),
+            0.0,
+            "the suppressor ignores the high bands"
+        );
+        assert!(
+            settings.kick_pattern.field_value(0.05, high_band) > 0.0,
+            "the main kernel still covers the high bands"
         );
     }
 
@@ -2297,19 +2391,12 @@ mod tests {
     }
 
     #[test]
-    fn initial_patterns_have_four_points_in_both_kernels() {
+    fn initial_patterns_stay_inside_the_normalized_grid() {
         for pattern in [
             TemporalPattern::kick_initial(),
             TemporalPattern::snare_initial(),
         ] {
-            for polygon in [
-                &pattern.inner,
-                &pattern.outer,
-                &pattern.suppression_inner,
-                &pattern.suppression_outer,
-            ] {
-                assert_eq!(polygon.len(), 4);
-            }
+            pattern.validate().expect("initial patterns stay valid");
         }
     }
 
@@ -2394,8 +2481,15 @@ mod tests {
 
     fn gap_settings() -> DetectorSettings {
         DetectorSettings {
+            drop_kernels: DropKernels {
+                low: std::array::from_fn(|band| if band < 4 { 1.0 } else { 0.0 }),
+                high: std::array::from_fn(|band| if band >= 4 { 1.0 } else { 0.0 }),
+                onset: std::array::from_fn(|band| if band < 4 { 1.0 } else { 0.0 }),
+            },
             drop_gap_window: 0.1,
             drop_gap_threshold: 0.1,
+            drop_low_lp: 0.0,
+            drop_high_lp: 0.0,
             ..DetectorSettings::default()
         }
     }

@@ -74,8 +74,9 @@ Double-click to reset both values to the default range (53.4 dB) and bend
 
 ![Abstract wireframe visualizer](./assets/visualizer.png)
 
-Press `F` to replace the gauges with a pseudo-3D wireframe scene. The scene starts
-as a simple cube and evolves through an octahedron, icosahedron, tesseract, and
+VU opens with a pseudo-3D wireframe scene; press `F` to switch to the physical
+gauges. The scene starts as a simple cube and evolves through an octahedron,
+icosahedron, tesseract, and
 torus as energy hits arrive. Each figure is projected in perspective and drawn as
 vector lines with uniform weight. Edge opacity follows vertex depth: nearest
 vertices use the adjustable near-opacity floor (60% by default, brightened by
@@ -109,23 +110,25 @@ editable suppression kernel supplies the inhibition projection, scaled by the
 detector's `ONS SUPPRESS` control (0.5 by default). The residual flow runs
 through the detector's own attack/release envelope, slow adaptive average, and local-peak
 detector; only the composite detectors emit boolean onsets. Their local-peak
-threshold and minimum gap are the `ONS THRESH` and `ONS GAP` controls, with a
-140 ms gap by default. Each detector also has an `ONS PRE` trim on the matched
+threshold and minimum gap are the `ONS THRESH` and `ONS GAP` controls, with
+factory gaps of 95 ms for kick, 100 ms for snare, and 140 ms for drop. Each
+detector also has an `ONS PRE` trim on the matched
 projection before tracking, so a loud projection can be brought into the
 tracker's range. `KERNEL AREA` limits the template from its start up to the
 chosen fraction, so the leftmost part of the kernel is always kept; the end of
-that effective area is faded out over 10% of its length. The initial templates place a short band mask at the right edge
-of the half-second canvas: bands 00-04 for kick and the snare region around
-bands 05-12. Their default suppression kernels cover the opposite band region
-over the full canvas.
+that effective area is faded out over 10% of its length. The factory templates
+are hand-tuned polygons over the half-second canvas: the kick template spans the
+whole band range, the snare template covers bands 04-15, and both suppression
+kernels concentrate on the low bands.
 The drop detector projects the 16 unfitted linear band magnitudes through two
 drawable kernels: a low kernel and a high kernel. Each projection is normalized
 by its kernel weight sum. The low and high outputs pass through independent
 configurable one-pole low-pass filters (`LF LP` and `HF LP`, in milliseconds;
-0 ms bypasses the filter), and the high-minus-low difference is averaged over a rolling window
+the factory preset uses 250 ms and 500 ms, and 0 ms bypasses the filter), and the
+high-minus-low difference is averaged over a rolling window
 (1.0 s by default). The mean is multiplied by a confidence gain (1.0 by
 default), which scales it around zero before the threshold comparison. When the
-scaled mean reaches the confidence threshold (0.15 by default), eligibility
+scaled mean reaches the confidence threshold (-0.3 by default), eligibility
 latches high and stays high even if the confidence later falls; only a composite
 onset from a third, independent onset kernel can clear it and confirm the drop.
 A short deep gap and a long medium gap therefore contribute to the same

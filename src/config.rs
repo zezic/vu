@@ -21,7 +21,7 @@ pub enum PreampStep {
 
 impl Default for PreampDb {
     fn default() -> Self {
-        Self(18.0)
+        Self(6.0)
     }
 }
 
@@ -123,7 +123,7 @@ pub struct VisualizerTextScale(f32);
 
 impl Default for VisualizerTextScale {
     fn default() -> Self {
-        Self(1.0)
+        Self(1.5000001)
     }
 }
 
@@ -194,9 +194,9 @@ mod tests {
     #[test]
     fn visualizer_text_scale_steps_between_sane_bounds() {
         let normal = VisualizerTextScale::default();
-        assert_eq!(normal.percent(), 100);
-        assert_eq!(normal.adjusted(Adjustment::Increase).percent(), 110);
-        assert_eq!(normal.adjusted(Adjustment::Decrease).percent(), 90);
+        assert_eq!(normal.percent(), 150);
+        assert_eq!(normal.adjusted(Adjustment::Increase).percent(), 160);
+        assert_eq!(normal.adjusted(Adjustment::Decrease).percent(), 140);
 
         let mut smallest = normal;
         for _ in 0..20 {

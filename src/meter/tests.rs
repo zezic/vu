@@ -254,6 +254,7 @@ fn profiles_moving_needles_at_240_fps() -> anyhow::Result<()> {
 fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Result<()> {
     let mut clock = TestClock::new();
     let mut meter = Meter::new(&crate::config::Config {
+        presentation: crate::visualizer::Presentation::Gauges,
         preamp_db: PreampDb::try_from(0.0)?,
         mode: crate::measurement::Mode::Rms,
         ..Default::default()
@@ -708,7 +709,7 @@ fn text_scale_changes_the_visualizer_chrome_size() -> anyhow::Result<()> {
     meter.set_text_scale(smaller);
     assert_eq!(meter.text_scale, smaller);
     assert!(meter.face_settings.is_none());
-    assert!(meter.text_scale.percent() < 100);
+    assert!(meter.text_scale.percent() < crate::config::VisualizerTextScale::default().percent());
     Ok(())
 }
 
@@ -737,14 +738,16 @@ fn debug_refresh_cycles_from_fft_hop_to_slow_rates() {
 fn debug_panel_selects_bands_and_properties_by_pointer() -> anyhow::Result<()> {
     use crate::config::VisualizerTextScale;
     use crate::visualizer::{DebugSelection, Presentation, Property};
+    let text_scale = VisualizerTextScale::try_from(1.0)?;
     let mut meter = Meter::new(&crate::config::Config {
         presentation: Presentation::Visualizer,
+        visualizer_text_scale: text_scale,
         ..Default::default()
     })?;
     meter.set_debug(true);
     meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
     let view = View::fit(Size::new(1280.0, 440.0));
-    let layout = super::debug::Layout::new(&view, VisualizerTextScale::default());
+    let layout = super::debug::Layout::new(&view, text_scale);
 
     assert!(meter.click_debug(&view, layout.band_center(2)));
     assert_eq!(meter.debug_selection, Some(DebugSelection::Band(2)));
@@ -756,7 +759,7 @@ fn debug_panel_selects_bands_and_properties_by_pointer() -> anyhow::Result<()> {
         meter.debug_selection,
         Some(DebugSelection::Property(Property::Crossfade))
     );
-    let tree = super::debug::tree_rect(&view, VisualizerTextScale::default());
+    let tree = super::debug::tree_rect(&view, text_scale);
     assert!(meter.click_debug(&view, tree.center()));
     assert_eq!(
         meter.debug_selection,
@@ -780,14 +783,15 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
         BandComponent, Contribution, DebugSelection, Detector, EnvelopeTarget, Gain, Input,
         MixPoint, Parameter, Presentation, Property, StyleInput, TreeTarget, BAND_COUNT,
     };
+    let text_scale = VisualizerTextScale::try_from(1.0)?;
     let mut meter = Meter::new(&crate::config::Config {
         presentation: Presentation::Visualizer,
+        visualizer_text_scale: text_scale,
         ..Default::default()
     })?;
     meter.set_debug(true);
     meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
     let view = View::fit(Size::new(1280.0, 440.0));
-    let text_scale = VisualizerTextScale::default();
     meter.debug_selection = Some(DebugSelection::Property(Property::Pulse));
 
     let power_contribution = Contribution::Fixed(MixPoint::PulseEnergy, 0);
@@ -1009,8 +1013,10 @@ fn flux_analyzer_bank_selects_the_band_for_its_controls() -> anyhow::Result<()> 
 fn kick_temporal_polygon_editor_drags_vertices_and_toggles_views() -> anyhow::Result<()> {
     use crate::config::VisualizerTextScale;
     use crate::visualizer::{DebugSelection, Detector, Presentation, Property, TreeTarget};
+    let text_scale = VisualizerTextScale::try_from(1.0)?;
     let mut meter = Meter::new(&crate::config::Config {
         presentation: Presentation::Visualizer,
+        visualizer_text_scale: text_scale,
         ..Default::default()
     })?;
     meter.set_debug(true);
@@ -1018,7 +1024,6 @@ fn kick_temporal_polygon_editor_drags_vertices_and_toggles_views() -> anyhow::Re
     meter.debug_selection = Some(DebugSelection::Property(Property::Crossfade));
     meter.tree_target = Some(TreeTarget::Detector(Detector::Kick));
     let view = View::fit(Size::new(1280.0, 440.0));
-    let text_scale = VisualizerTextScale::default();
     let tree = super::debug::tree_layout(
         &view,
         text_scale,
@@ -1118,8 +1123,10 @@ fn kick_temporal_polygon_editor_drags_vertices_and_toggles_views() -> anyhow::Re
 fn temporal_polygon_double_click_deletes_and_adds_points() -> anyhow::Result<()> {
     use crate::config::VisualizerTextScale;
     use crate::visualizer::{DebugSelection, Detector, Presentation, Property, TreeTarget};
+    let text_scale = VisualizerTextScale::try_from(1.0)?;
     let mut meter = Meter::new(&crate::config::Config {
         presentation: Presentation::Visualizer,
+        visualizer_text_scale: text_scale,
         ..Default::default()
     })?;
     meter.set_debug(true);
@@ -1127,7 +1134,6 @@ fn temporal_polygon_double_click_deletes_and_adds_points() -> anyhow::Result<()>
     meter.debug_selection = Some(DebugSelection::Property(Property::Crossfade));
     meter.tree_target = Some(TreeTarget::Detector(Detector::Kick));
     let view = View::fit(Size::new(1280.0, 440.0));
-    let text_scale = VisualizerTextScale::default();
     let tree = super::debug::tree_layout(
         &view,
         text_scale,
@@ -1149,13 +1155,30 @@ fn temporal_polygon_double_click_deletes_and_adds_points() -> anyhow::Result<()>
         before - 1
     );
 
-    let points = meter.detector_settings().kick_pattern.inner;
-    let edge = Point::new(
-        temporal.canvas.x0
-            + temporal.canvas.width() * (f64::from(points[2][0]) + f64::from(points[0][0])) * 0.5,
-        temporal.canvas.y0
-            + temporal.canvas.height() * (f64::from(points[2][1]) + f64::from(points[0][1])) * 0.5,
-    );
+    let pattern = meter.detector_settings().kick_pattern;
+    let canvas = temporal.canvas;
+    let screen = |point: [f32; 2]| {
+        Point::new(
+            canvas.x0 + canvas.width() * f64::from(point[0]),
+            canvas.y0 + canvas.height() * f64::from(point[1]),
+        )
+    };
+    let mut vertices: Vec<Point> = pattern.inner.iter().map(|point| screen(*point)).collect();
+    vertices.extend(pattern.outer.iter().map(|point| screen(*point)));
+    let edge = (0..pattern.inner.len())
+        .map(|index| {
+            let from = screen(pattern.inner[index]);
+            let to = screen(pattern.inner[(index + 1) % pattern.inner.len()]);
+            let midpoint = Point::new((from.x + to.x) * 0.5, (from.y + to.y) * 0.5);
+            let clearance = vertices
+                .iter()
+                .map(|vertex| vertex.distance(midpoint))
+                .fold(f64::INFINITY, f64::min);
+            (clearance, midpoint)
+        })
+        .max_by(|(left, _), (right, _)| left.total_cmp(right))
+        .map(|(_, midpoint)| midpoint)
+        .expect("the pattern has an edge");
     assert!(meter.click_debug(&view, edge));
     assert!(meter.click_debug(&view, edge));
     assert_eq!(meter.detector_settings().kick_pattern.inner.len(), before);
@@ -1395,15 +1418,16 @@ fn property_output_graph_max_buttons_override_and_clear() -> anyhow::Result<()> 
     use super::debug::GraphMax;
     use crate::config::VisualizerTextScale;
     use crate::visualizer::{DebugSelection, Presentation, Property};
+    let text_scale = VisualizerTextScale::try_from(1.0)?;
     let mut meter = Meter::new(&crate::config::Config {
         presentation: Presentation::Visualizer,
+        visualizer_text_scale: text_scale,
         ..Default::default()
     })?;
     meter.set_debug(true);
     meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
     meter.debug_selection = Some(DebugSelection::Property(Property::Spin));
     let view = View::fit(Size::new(1280.0, 440.0));
-    let text_scale = VisualizerTextScale::default();
     let selection = DebugSelection::Property(Property::Spin);
     let button = super::debug::graph_max_button_center(
         &view,
@@ -1429,6 +1453,7 @@ fn switching_presentation_swaps_overlays_and_keeps_audio_running() -> anyhow::Re
     use crate::visualizer::Presentation;
     let mut clock = TestClock::new();
     let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Gauges,
         preamp_db: PreampDb::try_from(0.0)?,
         ..Default::default()
     })?;
@@ -2232,6 +2257,7 @@ fn startup_and_delayed_delivery_do_not_change_confirmed_measurements() -> anyhow
 fn first_shutter_excludes_startup_history_and_mode_changes_keep_sample_time() -> anyhow::Result<()>
 {
     let mut meter = Meter::new(&crate::config::Config {
+        presentation: crate::visualizer::Presentation::Gauges,
         preamp_db: PreampDb::try_from(0.0)?,
         ..Default::default()
     })?;
@@ -2316,6 +2342,7 @@ fn profiles_audio_and_drawing() -> anyhow::Result<()> {
 fn steady_vu_tone_stays_smooth_across_capture_buffer_arrivals() -> anyhow::Result<()> {
     use crate::measurement::Mode;
     let config = crate::config::Config {
+        presentation: crate::visualizer::Presentation::Gauges,
         mode: Mode::Vu,
         preamp_db: PreampDb::try_from(0.0)?,
         ..Default::default()
@@ -2395,6 +2422,7 @@ fn playback_lookahead_is_sampled_at_frame_time_for_needles_and_lamps() -> anyhow
     use crate::{config::ShutterFrames, measurement::Mode};
     let shutter = ShutterFrames::try_from(1.0)?;
     let mut meter = Meter::new(&crate::config::Config {
+        presentation: crate::visualizer::Presentation::Gauges,
         mode: Mode::Vu,
         shutter_frames: shutter,
         preamp_db: PreampDb::try_from(0.0)?,
@@ -2441,6 +2469,7 @@ fn changing_vu_levels_keep_continuous_motion_and_full_shutter_between_buffers() 
 {
     use crate::measurement::Mode;
     let config = crate::config::Config {
+        presentation: crate::visualizer::Presentation::Gauges,
         mode: Mode::Vu,
         preamp_db: PreampDb::try_from(0.0)?,
         ..Default::default()
