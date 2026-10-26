@@ -59,6 +59,8 @@ pub const DROP_GAP_THRESHOLD_MIN: f32 = -1.0;
 pub const DROP_GAP_THRESHOLD_MAX: f32 = 1.0;
 pub const DROP_GAP_GAIN_MIN: f32 = 0.1;
 pub const DROP_GAP_GAIN_MAX: f32 = 10.0;
+pub const DROP_LP_MIN: f32 = 0.0;
+pub const DROP_LP_MAX: f32 = 0.5;
 pub const DROP_KERNEL_MIN: f32 = 0.0;
 pub const DROP_KERNEL_MAX: f32 = 1.0;
 pub const SPRING_STIFFNESS_MIN: f32 = 1.0;
@@ -558,6 +560,10 @@ pub struct DetectorSettings {
     pub drop_gap_threshold: f32,
     /// Multiplies the window mean around zero before the threshold comparison.
     pub drop_gap_gain: f32,
+    /// Low-pass time constant applied to the low-kernel output, in seconds.
+    pub drop_low_lp: f32,
+    /// Low-pass time constant applied to the high-kernel output, in seconds.
+    pub drop_high_lp: f32,
     /// Dedicated onset tracker settings for the composite onset kernel.
     pub drop_onset_pre_gain: f32,
     pub drop_onset_attack: f32,
@@ -608,6 +614,8 @@ impl Default for DetectorSettings {
             drop_gap_window: 1.0,
             drop_gap_threshold: 0.15,
             drop_gap_gain: 1.0,
+            drop_low_lp: 0.0,
+            drop_high_lp: 0.0,
             drop_onset_pre_gain: 1.0,
             drop_onset_attack: 0.005,
             drop_onset_release: 0.05,
@@ -876,6 +884,15 @@ impl DetectorSettings {
             "the drop gap gain must be finite and between \
              {DROP_GAP_GAIN_MIN} and {DROP_GAP_GAIN_MAX}"
         );
+        for (name, value) in [
+            ("drop_low_lp", self.drop_low_lp),
+            ("drop_high_lp", self.drop_high_lp),
+        ] {
+            anyhow::ensure!(
+                value.is_finite() && (DROP_LP_MIN..=DROP_LP_MAX).contains(&value),
+                "{name} must be finite and between {DROP_LP_MIN} and {DROP_LP_MAX}"
+            );
+        }
         for (name, stiffness) in [
             ("flip_stiffness", self.flip_stiffness),
             ("quake_stiffness", self.quake_stiffness),
@@ -1113,6 +1130,8 @@ struct DetectorSettingsRaw {
     drop_gap_window: f32,
     drop_gap_threshold: f32,
     drop_gap_gain: f32,
+    drop_low_lp: f32,
+    drop_high_lp: f32,
     drop_onset_pre_gain: f32,
     drop_onset_attack: f32,
     drop_onset_release: f32,
@@ -1250,6 +1269,8 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
             drop_gap_window: raw.drop_gap_window,
             drop_gap_threshold: raw.drop_gap_threshold,
             drop_gap_gain: raw.drop_gap_gain,
+            drop_low_lp: raw.drop_low_lp,
+            drop_high_lp: raw.drop_high_lp,
             drop_onset_pre_gain: raw.drop_onset_pre_gain,
             drop_onset_attack: raw.drop_onset_attack,
             drop_onset_release: raw.drop_onset_release,
@@ -1315,6 +1336,8 @@ impl From<DetectorSettings> for DetectorSettingsRaw {
             drop_gap_window: settings.drop_gap_window,
             drop_gap_threshold: settings.drop_gap_threshold,
             drop_gap_gain: settings.drop_gap_gain,
+            drop_low_lp: settings.drop_low_lp,
+            drop_high_lp: settings.drop_high_lp,
             drop_onset_pre_gain: settings.drop_onset_pre_gain,
             drop_onset_attack: settings.drop_onset_attack,
             drop_onset_release: settings.drop_onset_release,
@@ -1590,12 +1613,23 @@ impl GapWindow {
     }
 }
 
+fn lp_alpha(tau: f32, dt: f32) -> f32 {
+    if tau <= f32::EPSILON {
+        0.0
+    } else {
+        (-dt / tau).exp()
+    }
+}
+
 #[derive(Debug)]
 struct DropTracker {
     window: GapWindow,
     onset: FluxTracker,
     low: f32,
     high: f32,
+    low_lp: f32,
+    high_lp: f32,
+    lp_ready: bool,
     diff: f32,
     confidence: f32,
     /// Latches high when the window is confident; an onset resets it.
@@ -1617,6 +1651,9 @@ impl DropTracker {
             onset: FluxTracker::default(),
             low: 0.0,
             high: 0.0,
+            low_lp: 0.0,
+            high_lp: 0.0,
+            lp_ready: false,
             diff: 0.0,
             confidence: 0.0,
             eligible: false,
@@ -1634,12 +1671,24 @@ impl DropTracker {
         dt: f32,
     ) -> Option<f32> {
         self.flash *= (-dt * FLASH_DECAY).exp();
-        self.low = settings
+        let low = settings
             .drop_kernels
-            .projection(DropKernel::Low, &spectrum.bands);
-        self.high = settings
+            .projection(DropKernel::Low, &spectrum.raw_bands);
+        let high = settings
             .drop_kernels
-            .projection(DropKernel::High, &spectrum.bands);
+            .projection(DropKernel::High, &spectrum.raw_bands);
+        if !self.lp_ready {
+            self.low_lp = low;
+            self.high_lp = high;
+            self.lp_ready = true;
+        } else {
+            let low_alpha = lp_alpha(settings.drop_low_lp, dt);
+            let high_alpha = lp_alpha(settings.drop_high_lp, dt);
+            self.low_lp = low_alpha * self.low_lp + (1.0 - low_alpha) * low;
+            self.high_lp = high_alpha * self.high_lp + (1.0 - high_alpha) * high;
+        }
+        self.low = self.low_lp;
+        self.high = self.high_lp;
         self.diff = self.high - self.low;
         self.window.push(now, self.diff, settings.drop_gap_window);
         self.confidence = self.window.mean() * settings.drop_gap_gain;
@@ -1666,6 +1715,9 @@ impl DropTracker {
         self.onset.reset();
         self.low = 0.0;
         self.high = 0.0;
+        self.low_lp = 0.0;
+        self.high_lp = 0.0;
+        self.lp_ready = false;
         self.diff = 0.0;
         self.confidence = 0.0;
         self.eligible = false;
@@ -2349,10 +2401,43 @@ mod tests {
     }
 
     fn drop_spectrum(low: f32, high: f32) -> Spectrum {
+        let bands = std::array::from_fn(|band| if band < 4 { low } else { high });
         Spectrum {
-            bands: std::array::from_fn(|band| if band < 4 { low } else { high }),
+            bands,
+            raw_bands: bands,
             ..Spectrum::default()
         }
+    }
+
+    #[test]
+    fn drop_low_and_high_use_raw_band_levels() {
+        let settings = gap_settings();
+        let mut drop = DropTracker::default();
+        let spectrum = Spectrum {
+            bands: [0.0; BAND_COUNT],
+            raw_bands: std::array::from_fn(|band| if band < 4 { 0.2 } else { 0.8 }),
+            ..Spectrum::default()
+        };
+        drop.observe(1.0 / 86.0, &spectrum, 0.0, &settings, 1.0 / 86.0);
+        assert!((drop.low - 0.2).abs() < 1e-6);
+        assert!((drop.high - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn drop_low_and_high_outputs_are_low_passed() {
+        let mut settings = gap_settings();
+        settings.drop_low_lp = 0.1;
+        settings.drop_high_lp = 0.1;
+        let mut drop = DropTracker::default();
+        let dt = 1.0 / 86.0;
+        drop.observe(dt, &drop_spectrum(0.2, 0.8), 0.0, &settings, dt);
+        assert!((drop.low - 0.2).abs() < 1e-6);
+        assert!((drop.high - 0.8).abs() < 1e-6);
+
+        drop.observe(2.0 * dt, &drop_spectrum(0.4, 0.6), 0.0, &settings, dt);
+        assert!(drop.low > 0.2 && drop.low < 0.4);
+        assert!(drop.high > 0.6 && drop.high < 0.8);
+        assert!((drop.diff - (drop.high - drop.low)).abs() < 1e-6);
     }
 
     #[test]

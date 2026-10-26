@@ -18,14 +18,14 @@ pub use detection::{
     OnsetFluxStatus, PatternKernel, PatternLayer, QuakeDirection, TemporalPattern, TriggerStatus,
     ABL_AMOUNT_MIN, ABL_GAIN_MAX, ABL_GAIN_MIN, CHOKE_MAX, CHOKE_MIN, DROP_GAP_GAIN_MAX,
     DROP_GAP_GAIN_MIN, DROP_GAP_THRESHOLD_MAX, DROP_GAP_THRESHOLD_MIN, DROP_GAP_WINDOW_MAX,
-    DROP_GAP_WINDOW_MIN, EXCESS_ATTACK_MAX, EXCESS_ATTACK_MIN, EXCESS_CAP_MAX, EXCESS_CAP_MIN,
-    EXCESS_FLOOR_MAX, EXCESS_FLOOR_MIN, EXCESS_RELEASE_MAX, EXCESS_RELEASE_MIN, FLUX_ATTACK_MAX,
-    FLUX_ATTACK_MIN, FLUX_AVERAGE_MAX, FLUX_AVERAGE_MIN, FLUX_INTERVAL_MAX, FLUX_INTERVAL_MIN,
-    FLUX_PRE_GAIN_MAX, FLUX_PRE_GAIN_MIN, FLUX_RELEASE_MAX, FLUX_RELEASE_MIN, FLUX_SENSITIVITY_MAX,
-    FLUX_SENSITIVITY_MIN, FLUX_SUPPRESSION_MAX, FLUX_SUPPRESSION_MIN, FLUX_THRESHOLD_MIN,
-    ONSET_THRESHOLD_MAX, QUAKE_FACTOR_MAX, QUAKE_FACTOR_MIN, SEQUENCE_EVERY_MAX,
-    SEQUENCE_EVERY_MIN, SPRING_DAMPING_MAX, SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX,
-    SPRING_STIFFNESS_MIN,
+    DROP_GAP_WINDOW_MIN, DROP_LP_MAX, DROP_LP_MIN, EXCESS_ATTACK_MAX, EXCESS_ATTACK_MIN,
+    EXCESS_CAP_MAX, EXCESS_CAP_MIN, EXCESS_FLOOR_MAX, EXCESS_FLOOR_MIN, EXCESS_RELEASE_MAX,
+    EXCESS_RELEASE_MIN, FLUX_ATTACK_MAX, FLUX_ATTACK_MIN, FLUX_AVERAGE_MAX, FLUX_AVERAGE_MIN,
+    FLUX_INTERVAL_MAX, FLUX_INTERVAL_MIN, FLUX_PRE_GAIN_MAX, FLUX_PRE_GAIN_MIN, FLUX_RELEASE_MAX,
+    FLUX_RELEASE_MIN, FLUX_SENSITIVITY_MAX, FLUX_SENSITIVITY_MIN, FLUX_SUPPRESSION_MAX,
+    FLUX_SUPPRESSION_MIN, FLUX_THRESHOLD_MIN, ONSET_THRESHOLD_MAX, QUAKE_FACTOR_MAX,
+    QUAKE_FACTOR_MIN, SEQUENCE_EVERY_MAX, SEQUENCE_EVERY_MIN, SPRING_DAMPING_MAX,
+    SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX, SPRING_STIFFNESS_MIN,
 };
 use detection::{OnsetBank, QuakeSequence, Spring};
 
@@ -1815,6 +1815,8 @@ impl Visualizer {
             Parameter::DropGapWindow => self.detectors.drop_gap_window,
             Parameter::DropGapGain => self.detectors.drop_gap_gain,
             Parameter::DropGapThreshold => self.detectors.drop_gap_threshold,
+            Parameter::DropLowLp => self.detectors.drop_low_lp,
+            Parameter::DropHighLp => self.detectors.drop_high_lp,
             Parameter::DropQuakeFactor => self.detectors.drop_quake_factor,
             Parameter::QuakeStiffness => self.detectors.quake_stiffness,
             Parameter::QuakeDamping => self.detectors.quake_damping,
@@ -1897,6 +1899,8 @@ impl Visualizer {
             Parameter::DropGapWindow => self.detectors.drop_gap_window = value,
             Parameter::DropGapGain => self.detectors.drop_gap_gain = value,
             Parameter::DropGapThreshold => self.detectors.drop_gap_threshold = value,
+            Parameter::DropLowLp => self.detectors.drop_low_lp = value,
+            Parameter::DropHighLp => self.detectors.drop_high_lp = value,
             Parameter::DropQuakeFactor => self.detectors.drop_quake_factor = value,
             Parameter::QuakeStiffness => self.detectors.quake_stiffness = value,
             Parameter::QuakeDamping => self.detectors.quake_damping = value,
@@ -3662,6 +3666,19 @@ mod tests {
     }
 
     #[test]
+    fn drop_lp_sliders_control_the_kernel_outputs() {
+        let mut visualizer = Visualizer::new();
+        let low = Parameter::DropLowLp;
+        let high = Parameter::DropHighLp;
+        assert_eq!(low.range(), (DROP_LP_MIN, DROP_LP_MAX));
+        assert_eq!(low.format(0.05), "50ms");
+        visualizer.set_parameter(low, 0.05);
+        visualizer.set_parameter(high, 0.2);
+        assert!((visualizer.parameter_value(low) - 0.05).abs() < 1e-6);
+        assert!((visualizer.parameter_value(high) - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
     fn kernel_area_slider_limits_the_temporal_template() {
         let mut visualizer = Visualizer::new();
         let area = Parameter::PatternArea(Detector::Kick);
@@ -3879,8 +3896,10 @@ mod tests {
         };
         visualizer.set_detector_settings(settings.clone());
         let hop = 1.0 / 86.0;
+        let quiet_bands = std::array::from_fn(|band| if band < 4 { 0.0 } else { 0.8 });
         let quiet = Spectrum {
-            bands: std::array::from_fn(|band| if band < 4 { 0.0 } else { 0.8 }),
+            bands: quiet_bands,
+            raw_bands: quiet_bands,
             ..Spectrum::default()
         };
         for _ in 0..12 {
@@ -3896,6 +3915,7 @@ mod tests {
         burst.band_excess = [1.0; BAND_COUNT];
         for band in 0..4 {
             burst.bands[band] = 1.0;
+            burst.raw_bands[band] = 1.0;
         }
         visualizer.observe(burst, hop);
         assert_eq!(visualizer.debug_snapshot().drop_hits, 0);

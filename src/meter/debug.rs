@@ -4956,11 +4956,15 @@ mod tests {
             Some(TreeTarget::Detector(Detector::Drop)),
             &Mixer::default(),
         );
-        assert_eq!(tree.sliders.len(), 12);
+        assert_eq!(tree.sliders.len(), 14);
         assert!(tree
             .sliders
             .iter()
             .any(|slider| slider.parameter == Parameter::DropGapWindow));
+        assert!(tree
+            .sliders
+            .iter()
+            .any(|slider| slider.parameter == Parameter::DropLowLp));
         assert_eq!(tree.kernels.len(), 3);
         let bank = tree.kernels[0];
         let band = 8;

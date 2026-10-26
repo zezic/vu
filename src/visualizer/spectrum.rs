@@ -38,10 +38,13 @@ impl Default for RelativeExcessSettings {
     }
 }
 
-/// One analysis hop, normalized to 0..1 for the visible scene parameters.
+/// One analysis hop. `bands` is normalized for the visible scene parameters;
+/// `raw_bands` keeps the unfitted linear band magnitude for the drop detector.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Spectrum {
     pub bands: [f32; BAND_COUNT],
+    /// Unfitted band magnitude before the dB normalization.
+    pub raw_bands: [f32; BAND_COUNT],
     /// Broadband level of the analysis window.
     pub power: f32,
     pub bass: f32,
@@ -188,6 +191,7 @@ impl SpectrumAnalyzer {
         let attack_alpha = (-hop / self.excess.background_attack).exp();
         let release_alpha = (-hop / self.excess.background_release).exp();
         let mut bands = [0.0; BAND_COUNT];
+        let mut raw_bands = [0.0; BAND_COUNT];
         let mut band_excess = [0.0; BAND_COUNT];
         for (band, &(start, end)) in self.band_bins.iter().enumerate() {
             let mut power = 0.0;
@@ -207,7 +211,8 @@ impl SpectrumAnalyzer {
                 };
                 self.bin_background[bin] = alpha * background + (1.0 - alpha) * magnitude;
             }
-            bands[band] = normalize_db(power.sqrt(), -72.0, 24.0);
+            raw_bands[band] = power.sqrt();
+            bands[band] = normalize_db(raw_bands[band], -72.0, 24.0);
             band_excess[band] = excess / (end - start) as f32;
         }
         let rms = (energy / FFT_SIZE as f32).sqrt();
@@ -216,6 +221,7 @@ impl SpectrumAnalyzer {
         let treble = bands[BAND_COUNT - TREBLE_BANDS..].iter().sum::<f32>() / TREBLE_BANDS as f32;
         Spectrum {
             bands,
+            raw_bands,
             power,
             bass,
             treble,

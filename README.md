@@ -118,9 +118,11 @@ that effective area is faded out over 10% of its length. The initial templates p
 of the half-second canvas: bands 00-04 for kick and the snare region around
 bands 05-12. Their default suppression kernels cover the opposite band region
 over the full canvas.
-The drop detector projects the 16 band levels through two drawable kernels: a
-low kernel and a high kernel. Each projection is normalized by its kernel weight
-sum, and the high-minus-low difference is averaged over a rolling window
+The drop detector projects the 16 unfitted linear band magnitudes through two
+drawable kernels: a low kernel and a high kernel. Each projection is normalized
+by its kernel weight sum. The low and high outputs pass through independent
+configurable one-pole low-pass filters (`LF LP` and `HF LP`, in milliseconds;
+0 ms bypasses the filter), and the high-minus-low difference is averaged over a rolling window
 (1.0 s by default). The mean is multiplied by a confidence gain (1.0 by
 default), which scales it around zero before the threshold comparison. When the
 scaled mean reaches the confidence threshold (0.15 by default), eligibility

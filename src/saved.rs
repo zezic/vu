@@ -185,6 +185,8 @@ mod tests {
             "(detectors: (drop_gap_threshold: -1.5))",
             "(detectors: (drop_gap_gain: 0.0))",
             "(detectors: (drop_gap_gain: 20.0))",
+            "(detectors: (drop_low_lp: 0.6))",
+            "(detectors: (drop_high_lp: NaN))",
             "(detectors: (drop_onset_attack: 0.0))",
             "(detectors: (drop_onset_min_threshold: 0.3))",
             "(detectors: (drop_onset_min_interval: 0.0))",

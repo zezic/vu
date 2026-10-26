@@ -92,6 +92,8 @@ impl Detector {
                 Parameter::DropGapWindow,
                 Parameter::DropGapGain,
                 Parameter::DropGapThreshold,
+                Parameter::DropLowLp,
+                Parameter::DropHighLp,
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::PreGain),
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::Attack),
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::Release),
@@ -793,6 +795,8 @@ pub enum Parameter {
     DropGapWindow,
     DropGapGain,
     DropGapThreshold,
+    DropLowLp,
+    DropHighLp,
     DropQuakeFactor,
     QuakeStiffness,
     QuakeDamping,
@@ -836,6 +840,8 @@ impl Parameter {
             Self::DropGapWindow => "GAP WIN s",
             Self::DropGapGain => "GAP GAIN",
             Self::DropGapThreshold => "GAP CONF",
+            Self::DropLowLp => "LF LP",
+            Self::DropHighLp => "HF LP",
             Self::DropQuakeFactor => "QUAKE x",
             Self::QuakeStiffness => "QUAKE K",
             Self::QuakeDamping => "QUAKE D",
@@ -897,6 +903,7 @@ impl Parameter {
             Self::DropGapThreshold => {
                 (super::DROP_GAP_THRESHOLD_MIN, super::DROP_GAP_THRESHOLD_MAX)
             }
+            Self::DropLowLp | Self::DropHighLp => (super::DROP_LP_MIN, super::DROP_LP_MAX),
             Self::DropQuakeFactor => (super::QUAKE_FACTOR_MIN, super::QUAKE_FACTOR_MAX),
             Self::Attack(_) => (0.1, 50.0),
             Self::Release(_) => (0.1, 20.0),
@@ -932,6 +939,8 @@ impl Parameter {
             Self::DropGapWindow
             | Self::DropGapGain
             | Self::DropGapThreshold
+            | Self::DropLowLp
+            | Self::DropHighLp
             | Self::KickSnareChoke
             | Self::KickDropChoke
             | Self::SnareChoke
@@ -958,7 +967,9 @@ impl Parameter {
                 format!("{value:.2}")
             }
             Self::BandAblCurve(_) => Curve::from_index(value.round() as usize).name().to_owned(),
-            Self::ExcessAttack | Self::ExcessRelease => format!("{:.0}ms", value * 1000.0),
+            Self::ExcessAttack | Self::ExcessRelease | Self::DropLowLp | Self::DropHighLp => {
+                format!("{:.0}ms", value * 1000.0)
+            }
             Self::ExcessFloor => format!("{value:.3}"),
             Self::OnsetFlux(_, setting) => setting.format(value),
             Self::FlipStiffness | Self::QuakeStiffness => format!("{value:.1}"),

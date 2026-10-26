@@ -907,7 +907,7 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
         meter.tree_target,
         meter.visualizer.mixer(),
     );
-    assert_eq!(tree.sliders.len(), 12);
+    assert_eq!(tree.sliders.len(), 14);
     let threshold = tree
         .sliders
         .iter()
