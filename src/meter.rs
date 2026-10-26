@@ -702,6 +702,13 @@ struct SliderDrag {
     track: Rect,
 }
 
+#[derive(Clone, Copy)]
+struct KernelDrag {
+    kernel: visualizer::DetectorKernel,
+    rect: Rect,
+    last: Point,
+}
+
 pub struct Meter {
     gauge_style: GaugeStyle,
     presentation: Presentation,
@@ -720,16 +727,17 @@ pub struct Meter {
     graph_max: [Option<debug::GraphMax>; visualizer::Property::COUNT],
     debug_pointer: Option<Point>,
     slider_drag: Option<SliderDrag>,
+    kernel_drag: Option<KernelDrag>,
     debug_clock: f32,
     debug_analysis_revision: u64,
     text_scale: VisualizerTextScale,
     text_scale_readout: Readout,
     text_scale_value: Text,
-    onset_thresholds: visualizer::OnsetThresholds,
-    bass_threshold_readout: Readout,
-    bass_threshold_value: Text,
-    broadband_threshold_readout: Readout,
-    broadband_threshold_value: Text,
+    detectors: visualizer::DetectorSettings,
+    kick_gap_readout: Readout,
+    kick_gap_value: Text,
+    drop_gap_readout: Readout,
+    drop_gap_value: Text,
     depth_fade: visualizer::DepthFade,
     depth_fade_readout: Readout,
     depth_fade_value: Text,
@@ -797,17 +805,17 @@ impl Meter {
         let text_scale_readout = Readout::inline(&mut fonts, ["[-]", "[+]"]);
         let text_scale_value =
             Readout::value(&mut fonts, &format!("Text {:>3}%", text_scale.percent()));
-        let onset_thresholds = config.onset_thresholds;
+        let detectors = config.detectors;
         let mut visualizer = Visualizer::new();
-        visualizer.set_onset_thresholds(onset_thresholds);
-        let bass_threshold_readout = Readout::new(&mut fonts, "Bass THR", ["[G]", "[H]"]);
-        let bass_threshold_value =
-            Readout::value(&mut fonts, &format!("{:.2}", onset_thresholds.bass.value()));
-        let broadband_threshold_readout = Readout::new(&mut fonts, "Wide THR", ["[J]", "[K]"]);
-        let broadband_threshold_value = Readout::value(
+        visualizer.set_detector_settings(detectors);
+        let kick_gap_readout = Readout::new(&mut fonts, "Kick Gap", ["[G]", "[H]"]);
+        let kick_gap_value = Readout::value(
             &mut fonts,
-            &format!("{:.2}", onset_thresholds.broadband.value()),
+            &format!("{:.0}ms", detectors.kick_onset_min_interval * 1000.0),
         );
+        let drop_gap_readout = Readout::new(&mut fonts, "Drop Gap", ["[J]", "[K]"]);
+        let drop_gap_value =
+            Readout::value(&mut fonts, &format!("{:.2}", detectors.drop_gap_threshold));
         let depth_fade = config.depth_fade;
         visualizer.set_depth_fade(depth_fade);
         let depth_fade_readout = Readout::new(&mut fonts, "Depth Fade", ["[O]", "[P]"]);
@@ -879,16 +887,17 @@ impl Meter {
             graph_max: [None; visualizer::Property::COUNT],
             debug_pointer: None,
             slider_drag: None,
+            kernel_drag: None,
             debug_clock: 0.0,
             debug_analysis_revision: 0,
             text_scale,
             text_scale_readout,
             text_scale_value,
-            onset_thresholds,
-            bass_threshold_readout,
-            bass_threshold_value,
-            broadband_threshold_readout,
-            broadband_threshold_value,
+            detectors,
+            kick_gap_readout,
+            kick_gap_value,
+            drop_gap_readout,
+            drop_gap_value,
             depth_fade,
             depth_fade_readout,
             depth_fade_value,
@@ -992,7 +1001,7 @@ impl Meter {
         self.debug_selection = None;
         self.tree_target = None;
         self.graph_max = [None; visualizer::Property::COUNT];
-        self.slider_drag = None;
+        self.clear_drag();
         self.debug_clock = 0.0;
         self.face_settings = None;
     }
@@ -1005,6 +1014,7 @@ impl Meter {
         }
         self.debug_pointer = pointer;
         self.update_sliders(pointer);
+        self.update_kernels(pointer);
         if self.debug && self.presentation == Presentation::Visualizer {
             self.face_settings = None;
         }
@@ -1044,6 +1054,10 @@ impl Meter {
                     self.begin_slider(slider.parameter, slider.track, position);
                     return true;
                 }
+                if let Some((kernel, rect, _)) = tree.kernel_at(position) {
+                    self.begin_kernel(kernel, rect, position);
+                    return true;
+                }
                 if let Some(row) = tree.row_at(position) {
                     if let Some(contribution) = row.contribution() {
                         let badge = Rect::new(
@@ -1054,31 +1068,36 @@ impl Meter {
                         );
                         if badge.contains(position) {
                             self.visualizer.toggle_contribution_mix(contribution);
-                            self.slider_drag = None;
+                            self.clear_drag();
                             self.face_settings = None;
                             return true;
                         }
                     }
                     self.tree_target = row.target();
-                    self.slider_drag = None;
+                    self.clear_drag();
                     self.face_settings = None;
                 }
                 return true;
             }
         }
-        if let Some(selection) = self.debug_selection {
-            if let Some((property, max)) = debug::graph_max_button_at(
-                view,
-                self.text_scale,
-                selection,
-                &self.visualizer,
-                position,
-            ) {
-                let slot = &mut self.graph_max[property.index()];
-                *slot = if *slot == Some(max) { None } else { Some(max) };
-                self.slider_drag = None;
-                self.face_settings = None;
-                return true;
+        let detector_focused = self
+            .debug_selection
+            .is_some_and(|selection| debug::detector_focused(selection, self.tree_target));
+        if !detector_focused {
+            if let Some(selection) = self.debug_selection {
+                if let Some((property, max)) = debug::graph_max_button_at(
+                    view,
+                    self.text_scale,
+                    selection,
+                    &self.visualizer,
+                    position,
+                ) {
+                    let slot = &mut self.graph_max[property.index()];
+                    *slot = if *slot == Some(max) { None } else { Some(max) };
+                    self.clear_drag();
+                    self.face_settings = None;
+                    return true;
+                }
             }
         }
         let layout = debug::Layout::new(view, self.text_scale);
@@ -1090,7 +1109,7 @@ impl Meter {
                 debug::PropertyButton::Mute => self.visualizer.toggle_property_mute(property),
                 debug::PropertyButton::Solo => self.visualizer.toggle_property_solo(property),
             }
-            self.slider_drag = None;
+            self.clear_drag();
             self.face_settings = None;
             return true;
         }
@@ -1101,7 +1120,7 @@ impl Meter {
         };
         if selection != self.debug_selection {
             self.tree_target = None;
-            self.slider_drag = None;
+            self.clear_drag();
         }
         self.debug_selection = selection;
         self.face_settings = None;
@@ -1129,7 +1148,7 @@ impl Meter {
             }
             debug::TreeAction::ToggleAdaptive(target) => self.visualizer.toggle_adaptive(target),
         }
-        self.slider_drag = None;
+        self.clear_drag();
         self.face_settings = None;
     }
 
@@ -1139,38 +1158,91 @@ impl Meter {
         self.set_parameter(parameter, value);
     }
 
+    fn begin_kernel(&mut self, kernel: visualizer::DetectorKernel, rect: Rect, position: Point) {
+        self.slider_drag = None;
+        self.kernel_drag = Some(KernelDrag {
+            kernel,
+            rect,
+            last: position,
+        });
+        self.paint_kernel(kernel, rect, position, position);
+        self.face_settings = None;
+    }
+
+    fn update_kernels(&mut self, pointer: Option<Point>) {
+        let (Some(pointer), Some(drag)) = (pointer, self.kernel_drag) else {
+            return;
+        };
+        self.paint_kernel(drag.kernel, drag.rect, drag.last, pointer);
+        self.kernel_drag = Some(KernelDrag {
+            last: pointer,
+            ..drag
+        });
+    }
+
+    fn paint_kernel(
+        &mut self,
+        kernel: visualizer::DetectorKernel,
+        rect: Rect,
+        from: Point,
+        to: Point,
+    ) {
+        let band_at = |x: f64| {
+            (((x - rect.x0) / rect.width()).clamp(0.0, 0.999_999) * visualizer::BAND_COUNT as f64)
+                as usize
+        };
+        let value_at = |y: f64| ((rect.y1 - y) / rect.height()).clamp(0.0, 1.0) as f32;
+        let from_band = band_at(from.x);
+        let to_band = band_at(to.x);
+        let from_value = value_at(from.y);
+        let to_value = value_at(to.y);
+        let (low, high) = if from_band <= to_band {
+            (from_band, to_band)
+        } else {
+            (to_band, from_band)
+        };
+        for band in low..=high {
+            let value = if from_band == to_band {
+                to_value
+            } else {
+                let position =
+                    (band as f64 - from_band as f64) / (to_band as f64 - from_band as f64);
+                (f64::from(from_value) + (f64::from(to_value) - f64::from(from_value)) * position)
+                    as f32
+            };
+            self.visualizer.set_kernel_band(kernel, band, value);
+        }
+        self.detectors = self.visualizer.detector_settings();
+        self.face_settings = None;
+    }
+
+    fn clear_drag(&mut self) {
+        self.slider_drag = None;
+        self.kernel_drag = None;
+    }
+
     /// Clears the inspector selection without changing the debug panel toggle.
     pub fn clear_debug_selection(&mut self) {
         if self.debug_selection.take().is_some() {
             self.tree_target = None;
-            self.slider_drag = None;
+            self.clear_drag();
             self.face_settings = None;
         }
     }
 
-    /// Live thresholds, including slider edits, for config synchronization.
-    pub fn onset_thresholds(&self) -> visualizer::OnsetThresholds {
-        self.onset_thresholds
+    /// Live detector settings, including slider edits, for config sync.
+    pub fn detector_settings(&self) -> visualizer::DetectorSettings {
+        self.detectors
     }
 
     fn set_parameter(&mut self, parameter: visualizer::Parameter, value: f32) {
-        if let visualizer::Parameter::OnsetThreshold(detector) = parameter {
-            let threshold = visualizer::OnsetThreshold::try_from(value)
-                .expect("slider thresholds stay normalized");
-            let mut thresholds = self.onset_thresholds;
-            match detector {
-                visualizer::Detector::Bass => thresholds.bass = threshold,
-                visualizer::Detector::Wide => thresholds.broadband = threshold,
-            }
-            self.set_onset_thresholds(thresholds);
-        } else {
-            self.visualizer.set_parameter(parameter, value);
-        }
+        self.visualizer.set_parameter(parameter, value);
+        self.set_detector_settings(self.visualizer.detector_settings());
         self.face_settings = None;
     }
 
     pub fn end_slider_drag(&mut self) {
-        self.slider_drag = None;
+        self.clear_drag();
     }
 
     fn slider_value(parameter: visualizer::Parameter, track: Rect, x: f64) -> f32 {
@@ -1289,17 +1361,19 @@ impl Meter {
         self.face_settings = None;
     }
 
-    pub fn set_onset_thresholds(&mut self, thresholds: visualizer::OnsetThresholds) {
-        if self.onset_thresholds == thresholds {
+    pub fn set_detector_settings(&mut self, settings: visualizer::DetectorSettings) {
+        if self.detectors == settings {
             return;
         }
-        self.onset_thresholds = thresholds;
-        self.visualizer.set_onset_thresholds(thresholds);
-        self.bass_threshold_value =
-            Readout::value(&mut self.fonts, &format!("{:.2}", thresholds.bass.value()));
-        self.broadband_threshold_value = Readout::value(
+        self.detectors = settings;
+        self.visualizer.set_detector_settings(settings);
+        self.kick_gap_value = Readout::value(
             &mut self.fonts,
-            &format!("{:.2}", thresholds.broadband.value()),
+            &format!("{:.0}ms", settings.kick_onset_min_interval * 1000.0),
+        );
+        self.drop_gap_value = Readout::value(
+            &mut self.fonts,
+            &format!("{:.2}", settings.drop_gap_threshold),
         );
         self.face_settings = None;
     }
@@ -1523,16 +1597,16 @@ impl Meter {
                     frame_value,
                     &hud_colors,
                 );
-                self.bass_threshold_readout.draw_left_aligned(
+                self.kick_gap_readout.draw_left_aligned(
                     scene,
                     top_left * Affine::translate((0.0, 88.0)),
-                    &self.bass_threshold_value,
+                    &self.kick_gap_value,
                     &hud_colors,
                 );
-                self.broadband_threshold_readout.draw_left_aligned(
+                self.drop_gap_readout.draw_left_aligned(
                     scene,
                     top_left * Affine::translate((0.0, 132.0)),
-                    &self.broadband_threshold_value,
+                    &self.drop_gap_value,
                     &hud_colors,
                 );
                 self.depth_fade_readout.draw_left_aligned(

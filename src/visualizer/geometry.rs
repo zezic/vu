@@ -436,6 +436,8 @@ pub struct Pose {
     pub roll: f32,
     pub scale: f32,
     pub distance: f32,
+    /// Screen-space offset applied after projection for the quake action.
+    pub shake: Vec2,
 }
 
 impl Default for Pose {
@@ -446,6 +448,19 @@ impl Default for Pose {
             roll: 0.0,
             scale: 1.0,
             distance: 4.2,
+            shake: Vec2::new(0.0, 0.0),
+        }
+    }
+}
+
+impl Pose {
+    /// Adds the flip pitch offset and the quake screen offset on top of the
+    /// base pose, leaving yaw and roll to their own animation.
+    pub fn with_action(self, pitch_offset: f32, shake: Vec2) -> Self {
+        Self {
+            pitch: self.pitch + pitch_offset,
+            shake,
+            ..self
         }
     }
 }
@@ -474,8 +489,8 @@ impl Camera {
         let depth = (rotated.z + pose.distance).max(0.4);
         let perspective = self.focal / depth;
         let screen = Vec2::new(
-            self.center.x + rotated.x * perspective,
-            self.center.y + rotated.y * perspective,
+            self.center.x + rotated.x * perspective + pose.shake.x,
+            self.center.y + rotated.y * perspective + pose.shake.y,
         );
         Projected { screen, depth }
     }
@@ -612,6 +627,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn action_pose_offsets_pitch_and_leaves_yaw_alone() {
+        let pose = Pose::default();
+        let action = pose.with_action(1.2, Vec2::new(3.0, -4.0));
+        assert_eq!(action.yaw, pose.yaw);
+        assert!((action.pitch - pose.pitch - 1.2).abs() < 1e-6);
+        assert_eq!(action.shake, Vec2::new(3.0, -4.0));
     }
 
     #[test]

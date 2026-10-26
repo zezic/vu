@@ -21,26 +21,131 @@ pub enum StyleInput {
 /// Onset detector that can be selected in a computation tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Detector {
-    Bass,
-    Wide,
+    Flux,
+    Kick,
+    Snare,
+    Drop,
 }
 
 impl Detector {
     pub fn name(self) -> &'static str {
         match self {
-            Self::Bass => "BASS ONSET",
-            Self::Wide => "WIDE ONSET",
+            Self::Flux => "FLUX ONSET",
+            Self::Kick => "KICK",
+            Self::Snare => "SNARE",
+            Self::Drop => "DROP",
         }
     }
 
-    pub fn parameters(self) -> [Parameter; 5] {
-        [
-            Parameter::OnsetThreshold(self),
-            Parameter::OnsetMinFlux(self),
-            Parameter::OnsetFluxGain(self),
-            Parameter::OnsetBaselineRatio(self),
-            Parameter::OnsetCooldown(self),
-        ]
+    pub fn parameters(self) -> Vec<Parameter> {
+        match self {
+            Self::Flux => vec![
+                Parameter::FluxAttack,
+                Parameter::FluxRelease,
+                Parameter::FluxAverage,
+                Parameter::FluxSensitivity,
+                Parameter::FluxMinThreshold,
+                Parameter::FluxMinInterval,
+            ],
+            Self::Kick => vec![
+                Parameter::OnsetFlux(Detector::Kick, FluxSetting::Attack),
+                Parameter::OnsetFlux(Detector::Kick, FluxSetting::Release),
+                Parameter::OnsetFlux(Detector::Kick, FluxSetting::Average),
+                Parameter::OnsetFlux(Detector::Kick, FluxSetting::Sensitivity),
+                Parameter::OnsetFlux(Detector::Kick, FluxSetting::MinThreshold),
+                Parameter::OnsetFlux(Detector::Kick, FluxSetting::MinInterval),
+                Parameter::KickSnareChoke,
+                Parameter::KickDropChoke,
+                Parameter::KickQuakeFactor,
+                Parameter::KickSequenceEvery,
+                Parameter::QuakeStiffness,
+                Parameter::QuakeDamping,
+            ],
+            Self::Snare => vec![
+                Parameter::OnsetFlux(Detector::Snare, FluxSetting::Attack),
+                Parameter::OnsetFlux(Detector::Snare, FluxSetting::Release),
+                Parameter::OnsetFlux(Detector::Snare, FluxSetting::Average),
+                Parameter::OnsetFlux(Detector::Snare, FluxSetting::Sensitivity),
+                Parameter::OnsetFlux(Detector::Snare, FluxSetting::MinThreshold),
+                Parameter::OnsetFlux(Detector::Snare, FluxSetting::MinInterval),
+                Parameter::SnareFlipEvery,
+                Parameter::SnareChoke,
+                Parameter::FlipStiffness,
+                Parameter::FlipDamping,
+            ],
+            Self::Drop => vec![
+                Parameter::DropGapWindow,
+                Parameter::DropGapGain,
+                Parameter::DropGapThreshold,
+                Parameter::OnsetFlux(Detector::Drop, FluxSetting::Attack),
+                Parameter::OnsetFlux(Detector::Drop, FluxSetting::Release),
+                Parameter::OnsetFlux(Detector::Drop, FluxSetting::Average),
+                Parameter::OnsetFlux(Detector::Drop, FluxSetting::Sensitivity),
+                Parameter::OnsetFlux(Detector::Drop, FluxSetting::MinThreshold),
+                Parameter::OnsetFlux(Detector::Drop, FluxSetting::MinInterval),
+                Parameter::DropQuakeFactor,
+            ],
+        }
+    }
+}
+
+/// One setting of a detector's dedicated spectral-flux tracker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FluxSetting {
+    Attack,
+    Release,
+    Average,
+    Sensitivity,
+    MinThreshold,
+    MinInterval,
+}
+
+impl FluxSetting {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Attack => "ONS ATTACK",
+            Self::Release => "ONS RELEASE",
+            Self::Average => "ONS AVERAGE",
+            Self::Sensitivity => "ONS SENS",
+            Self::MinThreshold => "ONS THRESH",
+            Self::MinInterval => "ONS GAP",
+        }
+    }
+
+    pub fn range(self) -> (f32, f32) {
+        match self {
+            Self::Attack => (super::FLUX_ATTACK_MIN, super::FLUX_ATTACK_MAX),
+            Self::Release => (super::FLUX_RELEASE_MIN, super::FLUX_RELEASE_MAX),
+            Self::Average => (super::FLUX_AVERAGE_MIN, super::FLUX_AVERAGE_MAX),
+            Self::Sensitivity => (super::FLUX_SENSITIVITY_MIN, super::FLUX_SENSITIVITY_MAX),
+            Self::MinThreshold => (super::FLUX_THRESHOLD_MIN, super::ONSET_THRESHOLD_MAX),
+            Self::MinInterval => (super::FLUX_INTERVAL_MIN, super::FLUX_INTERVAL_MAX),
+        }
+    }
+
+    pub fn step(self) -> f32 {
+        match self {
+            Self::Attack | Self::MinThreshold => 0.001,
+            Self::Release | Self::Average | Self::MinInterval => 0.005,
+            Self::Sensitivity => 0.05,
+        }
+    }
+
+    pub fn format(self, value: f32) -> String {
+        match self {
+            Self::Attack | Self::Release | Self::Average | Self::MinInterval => {
+                format!("{:.0}ms", value * 1000.0)
+            }
+            Self::Sensitivity => format!("{value:.2}"),
+            Self::MinThreshold => format!("{value:.3}"),
+        }
+    }
+
+    pub fn is_time(self) -> bool {
+        matches!(
+            self,
+            Self::Attack | Self::Release | Self::Average | Self::MinInterval
+        )
     }
 }
 
@@ -161,7 +266,6 @@ pub enum Gain {
     JitterBand,
     PhasePower,
     PhaseBand,
-    KickFlux,
     XfadePower,
     XfadeKick,
     MorphPower,
@@ -191,7 +295,6 @@ impl Gain {
             Self::JitterBand => 0.055,
             Self::PhasePower => 2.6,
             Self::PhaseBand => 0.7,
-            Self::KickFlux => 2.0,
             Self::XfadePower => 2.8,
             Self::XfadeKick => 1.7,
             Self::MorphPower => 3.0,
@@ -218,7 +321,6 @@ impl Gain {
             Self::LineEnergy => "LINE BAND GAIN",
             Self::JitterBand => "JITTER BAND GAIN",
             Self::PhaseBand => "PHASE BAND GAIN",
-            Self::KickFlux => "FLUX GAIN",
             Self::MorphPower | Self::EntrancePower => "PWR GAIN",
         }
     }
@@ -407,6 +509,17 @@ impl Default for InputShape {
 }
 
 impl InputShape {
+    /// An input whose references follow the incoming level. Every FFT band
+    /// starts this way so quiet and loud material share the same onset scale.
+    pub fn adaptive() -> Self {
+        Self {
+            tracking: ReferenceTracking::Adaptive,
+            ..Self::default()
+        }
+    }
+}
+
+impl InputShape {
     /// The high reference is bumped up quickly by peaks but falls slowly.
     const HIGH_RISE: f32 = 8.0;
     const HIGH_FALL: f32 = 0.35;
@@ -465,11 +578,28 @@ impl InputShape {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Parameter {
-    OnsetThreshold(Detector),
-    OnsetMinFlux(Detector),
-    OnsetFluxGain(Detector),
-    OnsetBaselineRatio(Detector),
-    OnsetCooldown(Detector),
+    FluxAttack,
+    FluxRelease,
+    FluxAverage,
+    FluxSensitivity,
+    FluxMinThreshold,
+    FluxMinInterval,
+    /// One setting of a detector's dedicated onset-flux tracker.
+    OnsetFlux(Detector, FluxSetting),
+    KickSnareChoke,
+    KickDropChoke,
+    KickQuakeFactor,
+    KickSequenceEvery,
+    SnareFlipEvery,
+    SnareChoke,
+    FlipStiffness,
+    FlipDamping,
+    DropGapWindow,
+    DropGapGain,
+    DropGapThreshold,
+    DropQuakeFactor,
+    QuakeStiffness,
+    QuakeDamping,
     Attack(EnvelopeTarget),
     Release(EnvelopeTarget),
     KickDecay,
@@ -489,11 +619,27 @@ pub enum Parameter {
 impl Parameter {
     pub fn label(self) -> &'static str {
         match self {
-            Self::OnsetThreshold(_) => "THRESHOLD",
-            Self::OnsetMinFlux(_) => "MIN FLUX",
-            Self::OnsetFluxGain(_) => "FLUX GAIN",
-            Self::OnsetBaselineRatio(_) => "BASELINE x",
-            Self::OnsetCooldown(_) => "COOLDOWN s",
+            Self::FluxAttack => "ATTACK",
+            Self::FluxRelease => "RELEASE",
+            Self::FluxAverage => "AVERAGE",
+            Self::FluxSensitivity => "SENSITIVITY",
+            Self::FluxMinThreshold => "MIN THRESH",
+            Self::FluxMinInterval => "MIN GAP",
+            Self::OnsetFlux(_, setting) => setting.label(),
+            Self::KickSnareChoke => "SNARE CHOKE",
+            Self::KickDropChoke => "DROP CHOKE",
+            Self::KickQuakeFactor => "QUAKE x",
+            Self::KickSequenceEvery => "SEQUENCE N",
+            Self::SnareFlipEvery => "FLIP EVERY",
+            Self::SnareChoke => "CHOKE s",
+            Self::FlipStiffness => "FLIP K",
+            Self::FlipDamping => "FLIP D",
+            Self::DropGapWindow => "GAP WIN s",
+            Self::DropGapGain => "GAP GAIN",
+            Self::DropGapThreshold => "GAP CONF",
+            Self::DropQuakeFactor => "QUAKE x",
+            Self::QuakeStiffness => "QUAKE K",
+            Self::QuakeDamping => "QUAKE D",
             Self::Attack(_) => "ATTACK",
             Self::Release(_) => "RELEASE",
             Self::KickDecay => "DECAY",
@@ -520,11 +666,36 @@ impl Parameter {
 
     pub fn range(self) -> (f32, f32) {
         match self {
-            Self::OnsetThreshold(_) => (0.0, 1.0),
-            Self::OnsetMinFlux(_) => (0.0, 0.2),
-            Self::OnsetFluxGain(_) => (0.0, 5.0),
-            Self::OnsetBaselineRatio(_) => (1.0, 2.0),
-            Self::OnsetCooldown(_) => (0.0, 1.0),
+            Self::FluxAttack => (super::FLUX_ATTACK_MIN, super::FLUX_ATTACK_MAX),
+            Self::FluxRelease => (super::FLUX_RELEASE_MIN, super::FLUX_RELEASE_MAX),
+            Self::FluxAverage => (super::FLUX_AVERAGE_MIN, super::FLUX_AVERAGE_MAX),
+            Self::FluxSensitivity => (super::FLUX_SENSITIVITY_MIN, super::FLUX_SENSITIVITY_MAX),
+            Self::FluxMinThreshold => (super::FLUX_THRESHOLD_MIN, super::FLUX_THRESHOLD_MAX),
+            Self::FluxMinInterval => (super::FLUX_INTERVAL_MIN, super::FLUX_INTERVAL_MAX),
+            Self::OnsetFlux(_, setting) => setting.range(),
+            Self::KickSnareChoke | Self::KickDropChoke => (super::CHOKE_MIN, super::CHOKE_MAX),
+            Self::KickQuakeFactor => (super::QUAKE_FACTOR_MIN, super::QUAKE_FACTOR_MAX),
+            Self::KickSequenceEvery => (
+                super::SEQUENCE_EVERY_MIN as f32,
+                super::SEQUENCE_EVERY_MAX as f32,
+            ),
+            Self::SnareFlipEvery => (
+                super::SEQUENCE_EVERY_MIN as f32,
+                super::SEQUENCE_EVERY_MAX as f32,
+            ),
+            Self::SnareChoke => (super::CHOKE_MIN, super::CHOKE_MAX),
+            Self::FlipStiffness | Self::QuakeStiffness => {
+                (super::SPRING_STIFFNESS_MIN, super::SPRING_STIFFNESS_MAX)
+            }
+            Self::FlipDamping | Self::QuakeDamping => {
+                (super::SPRING_DAMPING_MIN, super::SPRING_DAMPING_MAX)
+            }
+            Self::DropGapWindow => (super::DROP_GAP_WINDOW_MIN, super::DROP_GAP_WINDOW_MAX),
+            Self::DropGapGain => (super::DROP_GAP_GAIN_MIN, super::DROP_GAP_GAIN_MAX),
+            Self::DropGapThreshold => {
+                (super::DROP_GAP_THRESHOLD_MIN, super::DROP_GAP_THRESHOLD_MAX)
+            }
+            Self::DropQuakeFactor => (super::QUAKE_FACTOR_MIN, super::QUAKE_FACTOR_MAX),
             Self::Attack(_) => (0.1, 50.0),
             Self::Release(_) => (0.1, 20.0),
             Self::KickDecay => (0.0, 20.0),
@@ -535,7 +706,7 @@ impl Parameter {
             Self::Style(StyleInput::ZoomBias) => (0.5, 1.5),
             Self::Style(StyleInput::JitterBias) => (0.0, 2.0),
             Self::Gain(gain) => gain.range(),
-            Self::BandSource(_) => (0.0, (super::BAND_COUNT - 1) as f32),
+            Self::BandSource(_) => (0.0, (BAND_COUNT - 1) as f32),
             Self::InputLow(_) => (0.0, 0.99),
             Self::InputHigh(_) => (0.01, 1.0),
             Self::InputCurve(_) => (0.0, 3.0),
@@ -548,9 +719,23 @@ impl Parameter {
 
     pub fn step(self) -> f32 {
         match self {
-            Self::OnsetThreshold(_) | Self::OnsetBaselineRatio(_) | Self::OnsetCooldown(_) => 0.01,
-            Self::OnsetMinFlux(_) => 0.001,
-            Self::OnsetFluxGain(_) => 0.01,
+            Self::FluxAttack => 0.001,
+            Self::FluxRelease | Self::FluxAverage | Self::FluxMinInterval => 0.005,
+            Self::FluxSensitivity => 0.05,
+            Self::FluxMinThreshold => 0.001,
+            Self::OnsetFlux(_, setting) => setting.step(),
+            Self::KickSequenceEvery | Self::SnareFlipEvery => 1.0,
+            Self::DropGapWindow
+            | Self::DropGapGain
+            | Self::DropGapThreshold
+            | Self::KickSnareChoke
+            | Self::KickDropChoke
+            | Self::SnareChoke
+            | Self::KickQuakeFactor
+            | Self::DropQuakeFactor => 0.01,
+            Self::FlipStiffness | Self::FlipDamping | Self::QuakeStiffness | Self::QuakeDamping => {
+                0.5
+            }
             Self::Attack(_) | Self::Release(_) => 0.5,
             Self::KickDecay => 0.1,
             Self::Style(_) => 0.01,
@@ -564,9 +749,16 @@ impl Parameter {
 
     pub fn format(self, value: f32) -> String {
         match self {
-            Self::OnsetMinFlux(_) | Self::Gain(Gain::JitterBand) => format!("{value:.3}"),
-            Self::Attack(_) | Self::Release(_) => format!("{value:.1}"),
+            Self::FluxAttack | Self::FluxRelease | Self::FluxAverage | Self::FluxMinInterval => {
+                format!("{:.0}ms", value * 1000.0)
+            }
+            Self::FluxSensitivity => format!("{value:.2}"),
+            Self::FluxMinThreshold => format!("{value:.3}"),
+            Self::OnsetFlux(_, setting) => setting.format(value),
+            Self::FlipStiffness | Self::QuakeStiffness => format!("{value:.1}"),
             Self::BandSource(_) => format!("B{:02}", value.round() as usize),
+            Self::KickSequenceEvery | Self::SnareFlipEvery => format!("{value:.0}"),
+            Self::Attack(_) | Self::Release(_) => format!("{value:.1}"),
             Self::InputCurve(_) => Curve::from_index(value.round() as usize).name().to_owned(),
             Self::ExtraSource(_) => Input::from_selectable(value.round() as usize)
                 .title()
@@ -581,8 +773,16 @@ impl Parameter {
         let (minimum, maximum) = self.range();
         let value = value.clamp(minimum, maximum);
         match self {
-            Self::Attack(_) | Self::Release(_) => (value / minimum).ln() / (maximum / minimum).ln(),
-            Self::BandSource(_) => (value - minimum) / (maximum - minimum),
+            Self::FluxAttack
+            | Self::FluxRelease
+            | Self::FluxAverage
+            | Self::FluxMinInterval
+            | Self::DropGapGain
+            | Self::Attack(_)
+            | Self::Release(_) => (value / minimum).ln() / (maximum / minimum).ln(),
+            Self::OnsetFlux(_, setting) if setting.is_time() => {
+                (value / minimum).ln() / (maximum / minimum).ln()
+            }
             _ => (value - minimum) / (maximum - minimum),
         }
     }
@@ -591,7 +791,17 @@ impl Parameter {
         let (minimum, maximum) = self.range();
         let fraction = fraction.clamp(0.0, 1.0);
         match self {
-            Self::Attack(_) | Self::Release(_) => {
+            Self::FluxAttack
+            | Self::FluxRelease
+            | Self::FluxAverage
+            | Self::FluxMinInterval
+            | Self::DropGapGain
+            | Self::Attack(_)
+            | Self::Release(_) => {
+                let fraction = (fraction * 256.0).round() / 256.0;
+                minimum * (maximum / minimum).powf(fraction)
+            }
+            Self::OnsetFlux(_, setting) if setting.is_time() => {
                 let fraction = (fraction * 256.0).round() / 256.0;
                 minimum * (maximum / minimum).powf(fraction)
             }
@@ -623,16 +833,15 @@ pub enum Input {
     /// The low four bands before the bass envelope smoothing.
     BassBands,
     Power,
-    /// Raw broadband level before envelope smoothing, used by the wide onset.
+    /// Raw broadband level before envelope smoothing.
     PowerLevel,
     Bass,
-    /// Raw bass level before envelope smoothing, used by the bass onset.
+    /// Raw bass level before envelope smoothing.
     BassLevel,
-    BassFlux,
-    Flux,
     Kick,
-    BassOnset,
-    WideOnset,
+    KickOnset,
+    SnareOnset,
+    DropOnset,
     /// The unwrapped shared animation clock used by the pitch oscillator.
     PhaseClock,
     Style(StyleInput),
@@ -667,13 +876,12 @@ impl Input {
             Self::Kick => vec![Parameter::KickDecay],
             Self::PhaseClock => vec![Parameter::Style(StyleInput::PhaseRate)],
             Self::Style(style) => vec![Parameter::Style(style)],
-            Self::BassOnset
-            | Self::WideOnset
+            Self::KickOnset
+            | Self::SnareOnset
+            | Self::DropOnset
             | Self::BassBands
             | Self::PowerLevel
             | Self::BassLevel
-            | Self::BassFlux
-            | Self::Flux
             | Self::Property(_)
             | Self::Constant(_) => Vec::new(),
         }
@@ -690,8 +898,9 @@ impl Input {
 
     pub fn detector(self) -> Option<Detector> {
         match self {
-            Self::BassOnset => Some(Detector::Bass),
-            Self::WideOnset => Some(Detector::Wide),
+            Self::KickOnset => Some(Detector::Kick),
+            Self::SnareOnset => Some(Detector::Snare),
+            Self::DropOnset => Some(Detector::Drop),
             _ => None,
         }
     }
@@ -704,11 +913,10 @@ impl Input {
             Self::PowerLevel => "PWR RAW LEVEL".to_owned(),
             Self::Bass => "BASS ENVELOPE".to_owned(),
             Self::BassLevel => "BASS RAW LEVEL".to_owned(),
-            Self::BassFlux => "BASS FLUX".to_owned(),
-            Self::Flux => "SPECTRAL FLUX".to_owned(),
             Self::Kick => "KICK ENVELOPE".to_owned(),
-            Self::BassOnset => "BASS ONSET".to_owned(),
-            Self::WideOnset => "WIDE ONSET".to_owned(),
+            Self::KickOnset => "KICK ONSET".to_owned(),
+            Self::SnareOnset => "SNARE ONSET".to_owned(),
+            Self::DropOnset => "DROP ONSET".to_owned(),
             Self::PhaseClock => "PHASE CLOCK".to_owned(),
             Self::Style(style) => Parameter::Style(style).label().to_owned(),
             Self::Property(property) => property.name().to_owned(),
@@ -730,7 +938,7 @@ impl Input {
 /// Inputs that can be appended to a mix point. Constants and other properties
 /// stay out of the picker: a constant is already a default term, and a property
 /// input would introduce evaluation order and cycles.
-pub const SELECTABLE_INPUTS: [Input; 32] = [
+pub const SELECTABLE_INPUTS: [Input; 31] = [
     Input::Band(BandComponent::Spin),
     Input::Band(BandComponent::Pitch),
     Input::Band(BandComponent::Roll),
@@ -748,11 +956,10 @@ pub const SELECTABLE_INPUTS: [Input; 32] = [
     Input::PowerLevel,
     Input::Bass,
     Input::BassLevel,
-    Input::BassFlux,
-    Input::Flux,
     Input::Kick,
-    Input::BassOnset,
-    Input::WideOnset,
+    Input::KickOnset,
+    Input::SnareOnset,
+    Input::DropOnset,
     Input::PhaseClock,
     Input::Style(StyleInput::AxisX),
     Input::Style(StyleInput::AxisY),
@@ -813,7 +1020,6 @@ pub enum MixPoint {
     Accent,
     Line,
     PhaseSpeed,
-    KickStrength,
     CrossfadeRate,
     MorphRate,
     EntranceRate,
@@ -1101,17 +1307,16 @@ pub(super) struct MixContext {
     pub power_level: f32,
     pub bass: f32,
     pub bass_level: f32,
-    pub bass_flux: f32,
-    pub flux: f32,
     pub kick: f32,
+    pub kick_onset: f32,
+    pub snare_onset: f32,
+    pub drop_onset: f32,
     pub gains: Gains,
     pub routing: BandRouting,
     pub style: Style,
     pub entrance: f32,
     pub phase: f32,
     pub time: f32,
-    pub bass_onset_ready: bool,
-    pub wide_onset_ready: bool,
 }
 
 impl MixContext {
@@ -1123,11 +1328,10 @@ impl MixContext {
             Input::PowerLevel => self.power_level,
             Input::Bass => self.bass,
             Input::BassLevel => self.bass_level,
-            Input::BassFlux => self.bass_flux,
-            Input::Flux => self.flux,
             Input::Kick => self.kick,
-            Input::BassOnset => f32::from(self.bass_onset_ready),
-            Input::WideOnset => f32::from(self.wide_onset_ready),
+            Input::KickOnset => self.kick_onset,
+            Input::SnareOnset => self.snare_onset,
+            Input::DropOnset => self.drop_onset,
             Input::PhaseClock => self.phase,
             Input::Style(style) => style_value(&self.style, style),
             Input::Property(Property::Entrance) => self.entrance,
@@ -1444,17 +1648,6 @@ static PHASE_SPEED_TERMS: [ContributionSpec; 4] = [
     ),
 ];
 
-static KICK_STRENGTH_TERMS: [ContributionSpec; 2] = [
-    input_term(Input::BassLevel, "BASS level", "add", None, Mix::Add),
-    input_term(
-        Input::BassFlux,
-        "BASS flux",
-        "×gain",
-        Some(Gain::KickFlux),
-        Mix::Add,
-    ),
-];
-
 static CROSSFADE_RATE_TERMS: [ContributionSpec; 3] = [
     input_term(
         Input::Power,
@@ -1515,7 +1708,6 @@ impl MixPoint {
             Self::Accent => "ACCENT",
             Self::Line => "LINE ENERGY",
             Self::PhaseSpeed => "PHASE SPEED",
-            Self::KickStrength => "KICK STRENGTH",
             Self::CrossfadeRate => "XFADE RATE",
             Self::MorphRate => "MORPH RATE",
             Self::EntranceRate => "ENTRANCE RATE",
@@ -1549,7 +1741,6 @@ impl MixPoint {
             Self::Accent => &ACCENT_TERMS,
             Self::Line => &LINE_TERMS,
             Self::PhaseSpeed => &PHASE_SPEED_TERMS,
-            Self::KickStrength => &KICK_STRENGTH_TERMS,
             Self::CrossfadeRate => &CROSSFADE_RATE_TERMS,
             Self::MorphRate => &MORPH_RATE_TERMS,
             Self::EntranceRate => &ENTRANCE_RATE_TERMS,
@@ -1631,7 +1822,7 @@ impl Property {
     /// edge that feeds it into the parent operation. Mix point branches expand
     /// to their default contributions and the user's extra inputs in the
     /// inspector. Formulas and constants mirror `FigureRuntime::update`,
-    /// `Scene::update`, and `Onset::observe`.
+    /// `Scene::update`, and the detector bank.
     pub fn computation(self) -> &'static ComputeNode {
         match self {
             Self::Pulse => &PULSE,
@@ -1648,6 +1839,8 @@ impl Property {
             Self::Jitter => &JITTER,
             Self::Phase => &PHASE,
             Self::Kick => &KICK,
+            Self::Flip => &FLIP,
+            Self::Quake => &QUAKE,
             Self::Crossfade => &CROSSFADE,
             Self::Morph => &MORPH,
             Self::Entrance => &ENTRANCE,
@@ -1673,7 +1866,9 @@ impl Property {
             Self::Line => &[MixPoint::Line],
             Self::Jitter => &[MixPoint::Jitter],
             Self::Phase => &[MixPoint::PhaseSpeed],
-            Self::Kick => &[MixPoint::KickStrength],
+            Self::Kick => &[],
+            Self::Flip => &[],
+            Self::Quake => &[],
             Self::Crossfade => &[MixPoint::CrossfadeRate],
             Self::Morph => &[MixPoint::MorphRate],
             Self::Entrance => &[MixPoint::EntranceRate],
@@ -1795,34 +1990,63 @@ static KICK: ComputeNode = branch(
     "",
     &[
         branch(
-            "ON HIT: max(kick, strength)",
+            "ON KICK: max(kick, onset power)",
+            "state",
+            &[detector_branch(
+                "KICK ONSET",
+                "kernel flux peak over adaptive threshold",
+                Detector::Kick,
+                &[leaf(Input::KickOnset, "DETECTOR", "TRIGGER")],
+            )],
+        ),
+        branch("DECAY when idle", "kick ×= exp(-decay×dt)", &[]),
+    ],
+);
+
+static FLIP: ComputeNode = branch(
+    "FLIP pitch offset",
+    "",
+    &[
+        branch(
+            "every Nth snare: target += PI",
+            "state",
+            &[detector_branch(
+                "SNARE ONSET",
+                "kernel flux peak over adaptive threshold",
+                Detector::Snare,
+                &[
+                    leaf(Input::SnareOnset, "DETECTOR", "TRIGGER"),
+                    leaf(Input::Constant("N"), "FLIP EVERY", "snare count"),
+                ],
+            )],
+        ),
+        branch("damped spring", "oscillates, then settles", &[]),
+    ],
+);
+
+static QUAKE: ComputeNode = branch(
+    "QUAKE offset",
+    "",
+    &[
+        branch(
+            "velocity impulse",
             "state",
             &[
                 detector_branch(
-                    "BASS ONSET SWITCH",
-                    "if all true",
-                    Detector::Bass,
-                    &[
-                        leaf(Input::BassOnset, "DETECTOR", "ARMED / IDLE"),
-                        branch(
-                            "BASS level",
-                            "≥ THR; ≥ baseline×ratio+.015",
-                            &[
-                                leaf(Input::BassLevel, "RAW", "level test"),
-                                leaf(Input::BassBands, "BANDS 00-03 RAW", "max"),
-                            ],
-                        ),
-                        leaf(Input::BassFlux, "BASS flux", "× FLUX GAIN; ≥ min flux"),
-                        leaf(Input::Constant("== 0"), "ONSET COOLDOWN", "must hold"),
-                    ],
+                    "KICK TRIGGER",
+                    "sequenced H/V, L/R/T/B",
+                    Detector::Kick,
+                    &[leaf(Input::KickOnset, "DETECTOR", "TRIGGER")],
                 ),
-                mix_branch(
-                    "STRENGTH clamp(level+gain×flux,.25,1.5)",
-                    MixPoint::KickStrength,
+                detector_branch(
+                    "DROP TRIGGER",
+                    "always vertical",
+                    Detector::Drop,
+                    &[leaf(Input::DropOnset, "DETECTOR", "TRIGGER")],
                 ),
             ],
         ),
-        branch("DECAY when idle", "kick ×= exp(-decay×dt)", &[]),
+        branch("damped spring", "oscillates around center", &[]),
     ],
 );
 
@@ -1830,44 +2054,11 @@ static CROSSFADE: ComputeNode = branch(
     "XFADE progress",
     "",
     &[
-        branch(
-            "HIT TRIGGER",
-            "retarget scene / params",
-            &[
-                detector_branch(
-                    "BASS ONSET SWITCH",
-                    "55% scene, else 85% param",
-                    Detector::Bass,
-                    &[
-                        leaf(Input::BassOnset, "DETECTOR", "ARMED / IDLE"),
-                        leaf(
-                            Input::BassLevel,
-                            "BASS level",
-                            "≥ THR; ≥ baseline×ratio+.015",
-                        ),
-                        leaf(Input::BassFlux, "BASS flux", "× FLUX GAIN; ≥ min flux"),
-                    ],
-                ),
-                detector_branch(
-                    "WIDE ONSET SWITCH",
-                    "18% scene, else 45% param",
-                    Detector::Wide,
-                    &[
-                        leaf(Input::WideOnset, "DETECTOR", "ARMED / IDLE"),
-                        leaf(
-                            Input::PowerLevel,
-                            "PWR level",
-                            "≥ THR; ≥ baseline×ratio+.015",
-                        ),
-                        leaf(Input::Flux, "FLUX", "× FLUX GAIN; ≥ min flux"),
-                    ],
-                ),
-                leaf(
-                    Input::Constant("transition cooldown == 0"),
-                    "HIT GATE",
-                    "must hold",
-                ),
-            ],
+        detector_branch(
+            "DROP TRIGGER",
+            "N low onsets during a bass gap; always changes the scene",
+            Detector::Drop,
+            &[leaf(Input::DropOnset, "DETECTOR", "TRIGGER")],
         ),
         mix_branch("RATE = 1.2 + gain×PWR + gain×KICK", MixPoint::CrossfadeRate),
     ],
@@ -2008,12 +2199,17 @@ mod tests {
         assert!(inputs.contains(&Input::Property(Property::Entrance)));
 
         let inputs = property_inputs(Property::Kick);
-        assert!(inputs.contains(&Input::BassOnset));
-        assert!(inputs.contains(&Input::BassFlux));
+        assert!(inputs.contains(&Input::KickOnset));
+
+        let inputs = property_inputs(Property::Flip);
+        assert!(inputs.contains(&Input::SnareOnset));
+
+        let inputs = property_inputs(Property::Quake);
+        assert!(inputs.contains(&Input::KickOnset));
+        assert!(inputs.contains(&Input::DropOnset));
 
         let inputs = property_inputs(Property::Crossfade);
-        assert!(inputs.contains(&Input::BassOnset));
-        assert!(inputs.contains(&Input::WideOnset));
+        assert!(inputs.contains(&Input::DropOnset));
         assert!(inputs.contains(&Input::Kick));
     }
 
@@ -2055,10 +2251,6 @@ mod tests {
             Property::Pitch.component_gains(Input::Style(StyleInput::AxisY)),
             vec![Gain::PitchBand]
         );
-        assert_eq!(
-            Property::Kick.component_gains(Input::BassFlux),
-            vec![Gain::KickFlux]
-        );
         assert!(Property::Line
             .component_gains(Input::Band(BandComponent::Line))
             .contains(&Gain::LineEnergy));
@@ -2088,12 +2280,11 @@ mod tests {
             // term also depends on the raw bass band area.
             Input::Bass => vec![Dependency::Bass, Dependency::BassBands],
             Input::Kick => vec![Dependency::Kick],
-            Input::BassOnset => vec![Dependency::BassOnset],
-            Input::WideOnset => vec![Dependency::WideOnset],
+            Input::KickOnset => vec![Dependency::KickOnset],
+            Input::SnareOnset => vec![Dependency::SnareOnset],
+            Input::DropOnset => vec![Dependency::DropOnset],
             Input::PowerLevel
             | Input::BassLevel
-            | Input::BassFlux
-            | Input::Flux
             | Input::PhaseClock
             | Input::Style(_)
             | Input::Property(_)
@@ -2109,17 +2300,16 @@ mod tests {
             power_level: power,
             bass,
             bass_level: bass,
-            bass_flux: 0.1,
-            flux: 0.1,
             kick,
+            kick_onset: 0.5,
+            snare_onset: 0.5,
+            drop_onset: 0.5,
             gains: Gains::default(),
             routing: BandRouting::default(),
             style: Style::default(),
             entrance: 1.0,
             phase: 0.0,
             time: 0.0,
-            bass_onset_ready: true,
-            wide_onset_ready: true,
         }
     }
 

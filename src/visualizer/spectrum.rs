@@ -11,6 +11,10 @@ const MIN_FREQUENCY: f32 = 32.0;
 const MAX_FREQUENCY: f32 = 16_000.0;
 const BASS_BANDS: usize = 4;
 const TREBLE_BANDS: usize = 4;
+/// Magnitude gain inside the flux compression. The analyzer already receives
+/// post-preamp samples, so this stays at unity unless the compression needs
+/// rescaling.
+const FLUX_GAIN: f32 = 1.0;
 
 /// One analysis hop, normalized to 0..1 for the visible scene parameters.
 #[derive(Clone, Copy, Debug, Default)]
@@ -20,9 +24,8 @@ pub struct Spectrum {
     pub power: f32,
     pub bass: f32,
     pub treble: f32,
-    /// Positive spectral change since the previous hop.
-    pub flux: f32,
-    pub bass_flux: f32,
+    /// Positive log-magnitude flux summed over each band's FFT bins.
+    pub band_flux: [f32; BAND_COUNT],
 }
 
 pub struct SpectrumAnalyzer {
@@ -37,8 +40,7 @@ pub struct SpectrumAnalyzer {
     fft_buffer: Vec<Complex32>,
     band_bins: [(usize, usize); BAND_COUNT],
     frequency_edges: [f32; BAND_COUNT + 1],
-    previous_bands: [f32; BAND_COUNT],
-    previous_bass: f32,
+    previous_log_magnitude: Vec<f32>,
 }
 
 impl SpectrumAnalyzer {
@@ -65,8 +67,7 @@ impl SpectrumAnalyzer {
             fft_buffer: vec![Complex32::ZERO; FFT_SIZE],
             band_bins,
             frequency_edges,
-            previous_bands: [0.0; BAND_COUNT],
-            previous_bass: 0.0,
+            previous_log_magnitude: vec![0.0; FFT_SIZE / 2],
         }
     }
 
@@ -110,8 +111,7 @@ impl SpectrumAnalyzer {
         self.ring_position = 0;
         self.filled = 0;
         self.since_hop = 0;
-        self.previous_bands = [0.0; BAND_COUNT];
-        self.previous_bass = 0.0;
+        self.previous_log_magnitude.fill(0.0);
     }
 
     pub fn hop_seconds(&self) -> f32 {
@@ -146,34 +146,30 @@ impl SpectrumAnalyzer {
         self.fft.process(&mut self.fft_buffer);
         let norm = 2.0 / self.window_sum;
         let mut bands = [0.0; BAND_COUNT];
+        let mut band_flux = [0.0; BAND_COUNT];
         for (band, &(start, end)) in self.band_bins.iter().enumerate() {
-            let power: f32 = self.fft_buffer[start..end]
-                .iter()
-                .map(|bin| bin.norm_sqr())
-                .sum();
-            let amplitude = power.sqrt() * norm;
-            bands[band] = normalize_db(amplitude, -72.0, 24.0);
+            let mut power = 0.0;
+            let mut flux = 0.0;
+            for bin in start..end {
+                let magnitude = self.fft_buffer[bin].norm() * norm;
+                power += magnitude * magnitude;
+                let compressed = (FLUX_GAIN * magnitude).ln_1p();
+                flux += (compressed - self.previous_log_magnitude[bin]).max(0.0);
+                self.previous_log_magnitude[bin] = compressed;
+            }
+            bands[band] = normalize_db(power.sqrt(), -72.0, 24.0);
+            band_flux[band] = flux;
         }
         let rms = (energy / FFT_SIZE as f32).sqrt();
         let power = normalize_db(rms, -60.0, 12.0);
         let bass = bass_energy(&bands);
         let treble = bands[BAND_COUNT - TREBLE_BANDS..].iter().sum::<f32>() / TREBLE_BANDS as f32;
-        let flux = bands
-            .iter()
-            .zip(&self.previous_bands)
-            .map(|(&current, &previous)| (current - previous).max(0.0))
-            .sum::<f32>()
-            / BAND_COUNT as f32;
-        let bass_flux = (bass - self.previous_bass).max(0.0);
-        self.previous_bands = bands;
-        self.previous_bass = bass;
         Spectrum {
             bands,
             power,
             bass,
             treble,
-            flux,
-            bass_flux,
+            band_flux,
         }
     }
 
@@ -281,25 +277,36 @@ mod tests {
         assert!(silence.bands.iter().all(|&band| band < 0.01));
         assert!(silence.power < 0.01);
         assert_eq!(silence.bass, 0.0);
+        assert!(silence.band_flux.iter().all(|&flux| flux == 0.0));
     }
 
     #[test]
-    fn a_bass_onset_reports_positive_bass_flux() {
+    fn flux_peaks_at_a_tone_onset_and_decays_on_a_sustain() {
         let mut analyzer = SpectrumAnalyzer::new(48_000);
-        let mut max_bass_flux: f32 = 0.0;
-        let mut loudest_bass: f32 = 0.0;
-        let mut max_flux: f32 = 0.0;
-        for sample in 0..24_000 {
-            let phase = std::f32::consts::TAU * 70.0 * sample as f32 / 48_000.0;
-            let amplitude = if sample > 12_000 { 1.0 } else { 0.0 };
-            if let Some(spectrum) = analyzer.push(phase.sin() * amplitude) {
-                max_bass_flux = max_bass_flux.max(spectrum.bass_flux);
-                loudest_bass = loudest_bass.max(spectrum.bass);
-                max_flux = max_flux.max(spectrum.flux);
+        let mut onset = None;
+        let mut steady = Spectrum::default();
+        for sample in 0..60_000 {
+            let value = if sample < 8_000 {
+                0.0
+            } else {
+                (std::f32::consts::TAU * 1_000.0 * (sample - 8_000) as f32 / 48_000.0).sin()
+            };
+            if let Some(spectrum) = analyzer.push(value) {
+                if sample >= 8_000 && onset.is_none() {
+                    onset = Some(spectrum);
+                }
+                steady = spectrum;
             }
         }
-        assert!(loudest_bass > 0.5);
-        assert!(max_bass_flux > 0.1);
-        assert!(max_flux > 0.0);
+        let band = expected_band(&analyzer, 1_000.0);
+        let onset = onset.expect("the tone produced an analyzed hop");
+        assert!(
+            onset.band_flux[band] > 0.0,
+            "the rising tone must produce positive flux in its band"
+        );
+        assert!(
+            steady.band_flux[band] < onset.band_flux[band],
+            "a steady tone must have less flux than its onset"
+        );
     }
 }

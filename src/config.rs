@@ -175,7 +175,7 @@ pub struct Config {
     pub frame_rate_limit: FrameRateLimit,
     pub shutter_frames: ShutterFrames,
     pub visualizer_text_scale: VisualizerTextScale,
-    pub onset_thresholds: crate::visualizer::OnsetThresholds,
+    pub detectors: crate::visualizer::DetectorSettings,
     pub depth_fade: crate::visualizer::DepthFade,
     pub near_opacity: crate::visualizer::NearOpacity,
 }

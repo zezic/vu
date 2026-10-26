@@ -778,7 +778,7 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
     use crate::config::VisualizerTextScale;
     use crate::visualizer::{
         BandComponent, Contribution, DebugSelection, Detector, EnvelopeTarget, Gain, Input,
-        MixPoint, Parameter, Presentation, Property, StyleInput, TreeTarget,
+        MixPoint, Parameter, Presentation, Property, StyleInput, TreeTarget, BAND_COUNT,
     };
     let mut meter = Meter::new(&crate::config::Config {
         presentation: Presentation::Visualizer,
@@ -880,7 +880,8 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
     assert!(meter.click_debug(&view, source.track.center()));
     assert_ne!(meter.visualizer.band_for(BandComponent::Spin), 4);
     let band = meter.visualizer.band_for(BandComponent::Spin);
-    assert!(Property::Spin.depends_on_band(band, meter.visualizer.routing()));
+    let detectors = meter.visualizer.detector_settings();
+    assert!(Property::Spin.depends_on_band(band, meter.visualizer.routing(), &detectors));
     meter.end_slider_drag();
 
     meter.debug_selection = Some(DebugSelection::Property(Property::Crossfade));
@@ -892,12 +893,12 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
         meter.visualizer.mixer(),
     );
     let detector = tree
-        .detector_center(Detector::Wide)
-        .expect("the crossfade tree exposes the wide detector");
+        .detector_center(Detector::Drop)
+        .expect("the crossfade tree exposes the drop detector");
     assert!(meter.click_debug(&view, detector));
     assert_eq!(
         meter.tree_target,
-        Some(TreeTarget::Detector(Detector::Wide))
+        Some(TreeTarget::Detector(Detector::Drop))
     );
     let tree = super::debug::tree_layout(
         &view,
@@ -906,11 +907,100 @@ fn tree_components_and_detectors_expose_live_sliders() -> anyhow::Result<()> {
         meter.tree_target,
         meter.visualizer.mixer(),
     );
-    assert_eq!(tree.sliders.len(), 5);
-    let before = meter.onset_thresholds().broadband;
-    assert!(meter.click_debug(&view, tree.sliders[0].track.center()));
-    assert_ne!(meter.onset_thresholds().broadband, before);
+    assert_eq!(tree.sliders.len(), 10);
+    let threshold = tree
+        .sliders
+        .iter()
+        .find(|slider| slider.parameter == Parameter::DropGapThreshold)
+        .expect("drop gap threshold slider");
+    let before = meter.detector_settings().drop_gap_threshold;
+    assert!(meter.click_debug(&view, threshold.track.center()));
+    assert_ne!(meter.detector_settings().drop_gap_threshold, before);
     meter.end_slider_drag();
+
+    let bank = tree.kernels[0];
+    let band = 8;
+    let point = Point::new(
+        bank.rect.x0 + (band as f64 + 0.5) * bank.rect.width() / BAND_COUNT as f64,
+        bank.rect.y1 - bank.rect.height() * 0.75,
+    );
+    assert!(meter.click_debug(&view, point));
+    let value = meter.detector_settings().drop_kernels.low[band];
+    assert!(
+        (value - 0.75).abs() < 0.02,
+        "kernel paint value was {value}"
+    );
+    let next_band = 10;
+    let next = Point::new(
+        bank.rect.x0 + (next_band as f64 + 0.5) * bank.rect.width() / BAND_COUNT as f64,
+        bank.rect.y1 - bank.rect.height() * 0.2,
+    );
+    meter.set_pointer(Some(next));
+    let value = meter.detector_settings().drop_kernels.low[next_band];
+    assert!((value - 0.2).abs() < 0.02, "kernel drag value was {value}");
+    meter.end_slider_drag();
+    assert!(meter.kernel_drag.is_none());
+    Ok(())
+}
+
+#[test]
+fn kick_kernel_bank_paints_the_kick_kernel() -> anyhow::Result<()> {
+    use crate::config::VisualizerTextScale;
+    use crate::visualizer::{DebugSelection, Detector, Presentation, Property, TreeTarget};
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Visualizer,
+        ..Default::default()
+    })?;
+    meter.set_debug(true);
+    meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
+    meter.debug_selection = Some(DebugSelection::Property(Property::Crossfade));
+    meter.tree_target = Some(TreeTarget::Detector(Detector::Kick));
+    let view = View::fit(Size::new(1280.0, 440.0));
+    let text_scale = VisualizerTextScale::default();
+    let tree = super::debug::tree_layout(
+        &view,
+        text_scale,
+        Property::Crossfade,
+        meter.tree_target,
+        meter.visualizer.mixer(),
+    );
+    assert_eq!(tree.kernels.len(), 1);
+    let bank = tree.kernels[0];
+    let band = 2;
+    let point = Point::new(
+        bank.rect.x0
+            + (band as f64 + 0.5) * bank.rect.width() / crate::visualizer::BAND_COUNT as f64,
+        bank.rect.y1 - bank.rect.height() * 0.75,
+    );
+    assert!(meter.click_debug(&view, point));
+    let value = meter.detector_settings().kick_kernel[band];
+    assert!((value - 0.75).abs() < 0.02, "kick kernel value was {value}");
+    meter.end_slider_drag();
+    Ok(())
+}
+
+#[test]
+fn band_inspection_draws_flux_graphs() -> anyhow::Result<()> {
+    use crate::visualizer::{DebugSelection, Presentation};
+
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Visualizer,
+        ..Default::default()
+    })?;
+    meter.set_debug(true);
+    meter.debug_snapshot = Some(meter.visualizer.debug_snapshot());
+    let view = View::fit(Size::new(1280.0, 440.0));
+    meter.debug_selection = Some(DebugSelection::Band(5));
+
+    let mut scene = Scene::new();
+    let mut clock = TestClock::new();
+    meter.draw(
+        &mut scene,
+        &view,
+        FrameRateLimit::Fps60,
+        None,
+        clock.frame(1.0 / 60.0),
+    );
     Ok(())
 }
 

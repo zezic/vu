@@ -1,6 +1,7 @@
 //! Spectrum-driven pseudo-3D wireframe presentation.
 
 mod computation;
+mod detection;
 mod geometry;
 mod renderer;
 mod spectrum;
@@ -8,9 +9,20 @@ mod spectrum;
 use computation::MixContext;
 pub use computation::{
     BandComponent, BandRouting, ComputeNode, Contribution, ContributionSpec, Curve, Detector,
-    EnvelopeTarget, Extra, ExtraRef, Gain, Gains, Input, InputShape, Mix, MixPoint, Mixer,
-    Parameter, ReferenceTracking, Source, StyleInput, TreeTarget, SELECTABLE_INPUTS,
+    EnvelopeTarget, Extra, ExtraRef, FluxSetting, Gain, Gains, Input, InputShape, Mix, MixPoint,
+    Mixer, Parameter, ReferenceTracking, Source, StyleInput, TreeTarget, SELECTABLE_INPUTS,
 };
+pub use detection::{
+    DetectorKernel, DetectorSettings, DropKernel, DropKernels, DropStatus, OnsetFluxStatus,
+    QuakeDirection, TriggerStatus, CHOKE_MAX, CHOKE_MIN, DROP_GAP_GAIN_MAX, DROP_GAP_GAIN_MIN,
+    DROP_GAP_THRESHOLD_MAX, DROP_GAP_THRESHOLD_MIN, DROP_GAP_WINDOW_MAX, DROP_GAP_WINDOW_MIN,
+    FLUX_ATTACK_MAX, FLUX_ATTACK_MIN, FLUX_AVERAGE_MAX, FLUX_AVERAGE_MIN, FLUX_INTERVAL_MAX,
+    FLUX_INTERVAL_MIN, FLUX_RELEASE_MAX, FLUX_RELEASE_MIN, FLUX_SENSITIVITY_MAX,
+    FLUX_SENSITIVITY_MIN, FLUX_THRESHOLD_MAX, FLUX_THRESHOLD_MIN, ONSET_THRESHOLD_MAX,
+    QUAKE_FACTOR_MAX, QUAKE_FACTOR_MIN, SEQUENCE_EVERY_MAX, SEQUENCE_EVERY_MIN, SPRING_DAMPING_MAX,
+    SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX, SPRING_STIFFNESS_MIN,
+};
+use detection::{OnsetBank, QuakeSequence, Spring};
 
 use std::{collections::VecDeque, f32::consts::TAU};
 
@@ -37,12 +49,15 @@ pub use renderer::Renderer;
 
 const MAX_LINES: usize = 2048;
 const MAX_RIBBONS: usize = 8192;
-const MAX_PENDING_HITS: usize = 64;
+const MAX_PENDING_ACTIONS: usize = 64;
 const MAX_HISTORY: usize = 17;
 const HISTORY_SECONDS: f64 = 2.0;
 /// Inspector traces are sampled independently of the panel refresh rate.
 const DEBUG_SAMPLE_INTERVAL: f32 = 1.0 / 60.0;
 const DEBUG_HISTORY_SECONDS: f32 = 4.0;
+/// The quake spring works in scene units; one unit is this many screen pixels
+/// at the reference viewport scale.
+const QUAKE_PIXELS: f32 = 24.0;
 /// Keep the animation phase bounded without breaking the many non-integer
 /// sine/cosine frequencies derived from it. All current multipliers are
 /// hundredths, so one hundred turns is a whole period for every one of them.
@@ -69,66 +84,6 @@ impl Presentation {
         match self {
             Self::Gauges => "Gauges",
             Self::Visualizer => "Wireframe",
-        }
-    }
-}
-
-/// One onset detector threshold, normalized to 0..1.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "f32", into = "f32")]
-pub struct OnsetThreshold(f32);
-
-impl OnsetThreshold {
-    const STEP: f32 = 0.01;
-
-    pub fn value(self) -> f32 {
-        self.0
-    }
-
-    #[must_use]
-    pub fn adjusted(self, adjustment: Adjustment) -> Self {
-        let delta = match adjustment {
-            Adjustment::Decrease => -Self::STEP,
-            Adjustment::Increase => Self::STEP,
-        };
-        Self((self.0 + delta).clamp(0.0, 1.0))
-    }
-}
-
-impl TryFrom<f32> for OnsetThreshold {
-    type Error = anyhow::Error;
-
-    fn try_from(value: f32) -> Result<Self, Self::Error> {
-        anyhow::ensure!(
-            value.is_finite() && (0.0..=1.0).contains(&value),
-            "onset thresholds must be finite and between 0 and 1"
-        );
-        Ok(Self(value))
-    }
-}
-
-impl From<OnsetThreshold> for f32 {
-    fn from(value: OnsetThreshold) -> Self {
-        value.0
-    }
-}
-
-const BASS_THRESHOLD_DEFAULT: f32 = 0.17;
-const BROADBAND_THRESHOLD_DEFAULT: f32 = 0.22;
-
-/// The bass and broadband onset thresholds used for visualizer hit detection.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct OnsetThresholds {
-    pub bass: OnsetThreshold,
-    pub broadband: OnsetThreshold,
-}
-
-impl Default for OnsetThresholds {
-    fn default() -> Self {
-        Self {
-            bass: OnsetThreshold(BASS_THRESHOLD_DEFAULT),
-            broadband: OnsetThreshold(BROADBAND_THRESHOLD_DEFAULT),
         }
     }
 }
@@ -405,15 +360,16 @@ pub enum Property {
     Jitter,
     Phase,
     Kick,
+    Flip,
+    Quake,
     Crossfade,
     Morph,
     Entrance,
 }
 
 /// One analysis value that a [`Property`] reads. `BassBands` is the low four
-/// bands that form the bass envelope. `BassOnset` and `WideOnset` mark the
-/// detectors whose baselines and thresholds the inspector overlays on the
-/// corresponding level graph.
+/// bands that form the bass envelope. `KickOnset`, `SnareOnset` and `DropOnset`
+/// mark the confirmed detectors whose history the inspector overlays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Dependency {
     Band(BandComponent),
@@ -421,8 +377,9 @@ pub enum Dependency {
     Power,
     Bass,
     Kick,
-    BassOnset,
-    WideOnset,
+    KickOnset,
+    SnareOnset,
+    DropOnset,
 }
 
 impl Property {
@@ -448,6 +405,8 @@ impl Property {
             Self::Jitter => "JITTER",
             Self::Phase => "PHASE",
             Self::Kick => "KICK",
+            Self::Flip => "FLIP",
+            Self::Quake => "QUAKE",
             Self::Crossfade => "CROSSFADE",
             Self::Morph => "MORPH",
             Self::Entrance => "ENTRANCE",
@@ -477,9 +436,15 @@ impl Property {
             Self::Phase => {
                 "Band 15 speeds the phase clock behind ripple, jitter and tesseract rotation."
             }
-            Self::Kick => "The bass onset detector latches a decaying kick that swells the figure.",
+            Self::Kick => "A kick-kernel flux peak latches a decaying kick that swells the figure.",
+            Self::Flip => {
+                "Every Nth snare adds 180 degrees to the pitch baseline through a damped spring."
+            }
+            Self::Quake => {
+                "Kick and drop triggers inject a velocity impulse into a damped spring shake."
+            }
             Self::Crossfade => {
-                "Bass and wide onsets retarget the scene; power and kick set the fade rate."
+                "A drop always retargets the scene; power and kick set the fade rate."
             }
             Self::Morph => {
                 "Power sets how quickly style parameters ease toward a hit's new target."
@@ -506,6 +471,8 @@ impl Property {
             Self::Jitter => (0.0, 0.08),
             Self::Phase => (0.0, 6.0),
             Self::Kick => (0.0, 1.5),
+            Self::Flip => (-TAU, TAU),
+            Self::Quake => (-1.5, 1.5),
             Self::Morph => (1.0, 4.2),
         }
     }
@@ -541,13 +508,10 @@ impl Property {
             Self::Line => &[Dependency::Band(BandComponent::Line)],
             Self::Jitter => &[Dependency::Band(BandComponent::Jitter)],
             Self::Phase => &[Dependency::Band(BandComponent::Phase), Dependency::Power],
-            Self::Kick => &[Dependency::BassBands, Dependency::BassOnset],
-            Self::Crossfade => &[
-                Dependency::Power,
-                Dependency::BassOnset,
-                Dependency::WideOnset,
-                Dependency::Kick,
-            ],
+            Self::Kick => &[Dependency::KickOnset],
+            Self::Flip => &[Dependency::SnareOnset],
+            Self::Quake => &[Dependency::KickOnset, Dependency::DropOnset],
+            Self::Crossfade => &[Dependency::Power, Dependency::DropOnset, Dependency::Kick],
             Self::Morph => &[Dependency::Power],
             Self::Entrance => &[Dependency::Power],
         }
@@ -565,18 +529,25 @@ impl Property {
             })
     }
 
-    pub fn depends_on_bass_onset(self, band: usize) -> bool {
-        band < 4 && self.dependencies().contains(&Dependency::BassOnset)
+    pub fn depends_on_band_onset(self, band: usize, detectors: &DetectorSettings) -> bool {
+        self.dependencies()
+            .iter()
+            .any(|dependency| match dependency {
+                Dependency::KickOnset => detectors.kick_contains(band),
+                Dependency::SnareOnset => detectors.snare_contains(band),
+                // A drop listens to onsets from every band.
+                Dependency::DropOnset => true,
+                _ => false,
+            })
     }
 
-    pub fn depends_on_wide_onset(self) -> bool {
-        self.dependencies().contains(&Dependency::WideOnset)
-    }
-
-    pub fn depends_on_band(self, band: usize, routing: &BandRouting) -> bool {
-        self.depends_on_band_value(band, routing)
-            || self.depends_on_bass_onset(band)
-            || self.depends_on_wide_onset()
+    pub fn depends_on_band(
+        self,
+        band: usize,
+        routing: &BandRouting,
+        detectors: &DetectorSettings,
+    ) -> bool {
+        self.depends_on_band_value(band, routing) || self.depends_on_band_onset(band, detectors)
     }
 
     /// Multipliers attached to one component in this property's tree. The mix
@@ -655,12 +626,11 @@ fn input_dependencies(input: Input) -> Vec<Dependency> {
         // The bass envelope is read from the low bands.
         Input::Bass => vec![Dependency::Bass, Dependency::BassBands],
         Input::Kick => vec![Dependency::Kick],
-        Input::BassOnset => vec![Dependency::BassOnset],
-        Input::WideOnset => vec![Dependency::WideOnset],
+        Input::KickOnset => vec![Dependency::KickOnset],
+        Input::SnareOnset => vec![Dependency::SnareOnset],
+        Input::DropOnset => vec![Dependency::DropOnset],
         Input::PowerLevel
         | Input::BassLevel
-        | Input::BassFlux
-        | Input::Flux
         | Input::PhaseClock
         | Input::Style(_)
         | Input::Property(_)
@@ -692,13 +662,23 @@ pub struct DebugSample {
     pub at: f32,
     pub bands: [f32; BAND_COUNT],
     pub raw_bands: [f32; BAND_COUNT],
+    /// Raw spectral flux, smoothed flux, and adaptive threshold per band.
+    pub band_flux: [f32; BAND_COUNT],
+    pub band_smoothed_flux: [f32; BAND_COUNT],
+    pub band_threshold: [f32; BAND_COUNT],
+    /// Confirmed flux peaks per band, used to mark trigger blocks.
+    pub band_onset_count: [u32; BAND_COUNT],
     pub power: f32,
     pub raw_power: f32,
     pub bass: f32,
     pub raw_bass: f32,
     pub kick: f32,
-    pub bass_onset: OnsetDebug,
-    pub wide_onset: OnsetDebug,
+    pub kick_onset: TriggerStatus,
+    pub snare_onset: TriggerStatus,
+    pub drop_onset: TriggerStatus,
+    pub drop_status: DropStatus,
+    pub kick_flux: OnsetFluxStatus,
+    pub snare_flux: OnsetFluxStatus,
     pub properties: [f32; Property::COUNT],
 }
 
@@ -736,6 +716,9 @@ impl DebugHistory {
 pub struct BandDebug {
     pub value: f32,
     pub raw: f32,
+    pub raw_flux: f32,
+    pub smoothed_flux: f32,
+    pub threshold: f32,
     pub low_hz: f32,
     pub high_hz: f32,
     pub role: BandRole,
@@ -745,35 +728,6 @@ pub struct BandDebug {
 pub struct EnvelopeDebug {
     pub smooth: f32,
     pub raw: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct OnsetDebug {
-    pub level: f32,
-    pub flux: f32,
-    pub baseline: f32,
-    pub threshold: f32,
-    pub minimum_flux: f32,
-    pub flux_gain: f32,
-    pub baseline_ratio: f32,
-    pub cooldown: f32,
-    pub cooldown_time: f32,
-    pub flash: f32,
-}
-
-impl OnsetDebug {
-    pub const ZERO: Self = Self {
-        level: 0.0,
-        flux: 0.0,
-        baseline: 0.0,
-        threshold: 0.0,
-        minimum_flux: 0.0,
-        flux_gain: 1.0,
-        baseline_ratio: 0.0,
-        cooldown: 0.0,
-        cooldown_time: 0.0,
-        flash: 0.0,
-    };
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -788,28 +742,22 @@ pub struct StyleDebug {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct HitDebug {
-    pub kind: &'static str,
-    pub strength: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
 pub struct DebugSnapshot {
     pub bands: [BandDebug; BAND_COUNT],
     pub properties: [f32; Property::COUNT],
     pub power: EnvelopeDebug,
     pub bass: EnvelopeDebug,
     pub treble: EnvelopeDebug,
-    pub flux: f32,
-    pub bass_flux: f32,
-    pub bass_onset: OnsetDebug,
-    pub broadband_onset: OnsetDebug,
     pub kick: f32,
-    pub transition_cooldown: f32,
-    pub hits_last_frame: u32,
-    pub bass_hits: u32,
-    pub broadband_hits: u32,
-    pub last_hit: Option<HitDebug>,
+    pub kick_onset: TriggerStatus,
+    pub snare_onset: TriggerStatus,
+    pub drop_onset: TriggerStatus,
+    pub drop_status: DropStatus,
+    pub kick_flux: OnsetFluxStatus,
+    pub snare_flux: OnsetFluxStatus,
+    pub kick_hits: u32,
+    pub snare_hits: u32,
+    pub drop_hits: u32,
     pub scene: &'static str,
     pub outgoing: Option<&'static str>,
     pub transition: f32,
@@ -980,14 +928,20 @@ pub struct Visualizer {
     power: Envelope,
     bass: Envelope,
     treble: Envelope,
-    bass_onset: Onset,
-    broadband_onset: Onset,
-    pending_hits: VecDeque<Hit>,
+    detectors: DetectorSettings,
+    onsets: OnsetBank,
+    pending_actions: VecDeque<Action>,
     rng: Rng,
     scene: Scene,
     frames: ShutterWindow,
     kick: f32,
     kick_decay: f32,
+    flip: Spring,
+    flip_target: f32,
+    flip_count: u32,
+    quake_x: Spring,
+    quake_y: Spring,
+    kick_sequence: QuakeSequence,
     gains: Gains,
     routing: BandRouting,
     mixer: Mixer,
@@ -997,18 +951,14 @@ pub struct Visualizer {
     bass_shape: InputShape,
     treble_shape: InputShape,
     time: f32,
-    transition_cooldown: f32,
     palette: Palette,
     depth_fade: DepthFade,
     near_opacity: NearOpacity,
     last_spectrum: Spectrum,
-    bass_hit_flash: f32,
-    broadband_hit_flash: f32,
-    last_hit: Option<Hit>,
     analysis_revision: u64,
-    hits_last_frame: u32,
-    bass_hits: u32,
-    broadband_hits: u32,
+    kick_hits: u32,
+    snare_hits: u32,
+    drop_hits: u32,
     diagnosis: Diagnosis,
     debug_history: DebugHistory,
     lines: Vec<LineInstance>,
@@ -1019,7 +969,6 @@ impl Visualizer {
     pub fn new() -> Self {
         let bands =
             std::array::from_fn(|index| Envelope::new(14.0, 5.0 + 5.0 * index as f32 / 15.0));
-        let thresholds = OnsetThresholds::default();
         let mut rng = Rng::new(0x005e_ed0f_7e5e_1e55u64);
         let scene = Scene::new(&mut rng);
         Self {
@@ -1028,35 +977,37 @@ impl Visualizer {
             power: Envelope::new(18.0, 4.5),
             bass: Envelope::new(20.0, 7.0),
             treble: Envelope::new(16.0, 3.5),
-            bass_onset: Onset::bass(thresholds.bass),
-            broadband_onset: Onset::broadband(thresholds.broadband),
-            pending_hits: VecDeque::with_capacity(MAX_PENDING_HITS),
+            detectors: DetectorSettings::default(),
+            onsets: OnsetBank::new(),
+            pending_actions: VecDeque::with_capacity(MAX_PENDING_ACTIONS),
             rng,
             scene,
             frames: ShutterWindow::default(),
             kick: 0.0,
             kick_decay: 3.2,
+            flip: Spring::default(),
+            flip_target: 0.0,
+            flip_count: 0,
+            quake_x: Spring::default(),
+            quake_y: Spring::default(),
+            kick_sequence: QuakeSequence::default(),
             gains: Gains::default(),
             routing: BandRouting::default(),
             mixer: Mixer::default(),
             property_gates: PropertyGates::default(),
-            band_shapes: [InputShape::default(); BAND_COUNT],
+            band_shapes: std::array::from_fn(|_| InputShape::adaptive()),
             power_shape: InputShape::default(),
             bass_shape: InputShape::default(),
             treble_shape: InputShape::default(),
             time: 0.0,
-            transition_cooldown: 0.0,
             palette: Palette::from_theme(ThemeId::default()),
             depth_fade: DepthFade::default(),
             near_opacity: NearOpacity::default(),
             last_spectrum: Spectrum::default(),
-            bass_hit_flash: 0.0,
-            broadband_hit_flash: 0.0,
-            last_hit: None,
             analysis_revision: 0,
-            hits_last_frame: 0,
-            bass_hits: 0,
-            broadband_hits: 0,
+            kick_hits: 0,
+            snare_hits: 0,
+            drop_hits: 0,
             diagnosis: Diagnosis::new(),
             debug_history: DebugHistory::default(),
             lines: Vec::with_capacity(MAX_LINES),
@@ -1073,19 +1024,21 @@ impl Visualizer {
     pub fn reset_audio(&mut self) {
         self.analyzer.reset();
         self.reset_analysis();
-        self.pending_hits.clear();
+        self.pending_actions.clear();
         self.scene.reset_temporal();
         self.frames.clear();
         self.kick = 0.0;
-        self.transition_cooldown = 0.0;
+        self.flip.reset(0.0);
+        self.flip_target = 0.0;
+        self.flip_count = 0;
+        self.quake_x.reset(0.0);
+        self.quake_y.reset(0.0);
+        self.kick_sequence.reset();
         self.last_spectrum = Spectrum::default();
-        self.bass_hit_flash = 0.0;
-        self.broadband_hit_flash = 0.0;
-        self.last_hit = None;
         self.analysis_revision = 0;
-        self.hits_last_frame = 0;
-        self.bass_hits = 0;
-        self.broadband_hits = 0;
+        self.kick_hits = 0;
+        self.snare_hits = 0;
+        self.drop_hits = 0;
         self.diagnosis.reset();
         self.debug_history.clear();
     }
@@ -1097,8 +1050,7 @@ impl Visualizer {
         self.power.reset();
         self.bass.reset();
         self.treble.reset();
-        self.bass_onset.reset();
-        self.broadband_onset.reset();
+        self.onsets.reset();
     }
 
     /// Raw stereo frames feed the mono spectrum analyzer at the sample rate.
@@ -1115,12 +1067,9 @@ impl Visualizer {
     fn observe(&mut self, spectrum: Spectrum, hop: f32) {
         self.analysis_revision = self.analysis_revision.wrapping_add(1);
         self.last_spectrum = spectrum;
-        self.bass_hit_flash *= (-hop * 7.0).exp();
-        self.broadband_hit_flash *= (-hop * 7.0).exp();
-        let band_shapes = &mut self.band_shapes;
         for (index, band) in self.bands.iter_mut().enumerate() {
-            let target = band_shapes[index].observe(spectrum.bands[index], hop);
-            band.advance(target, hop);
+            let shaped = self.band_shapes[index].observe(spectrum.bands[index], hop);
+            band.advance(shaped, hop);
         }
         let power = self.power_shape.observe(spectrum.power, hop);
         self.power.advance(power, hop);
@@ -1128,84 +1077,56 @@ impl Visualizer {
         self.bass.advance(bass, hop);
         let treble = self.treble_shape.observe(spectrum.treble, hop);
         self.treble.advance(treble, hop);
-        let bass_hit = self
-            .bass_onset
-            .observe(spectrum.bass, spectrum.bass_flux, hop);
-        let broadband_hit = self
-            .broadband_onset
-            .observe(spectrum.power, spectrum.flux, hop);
-        if bass_hit {
-            let strength = self.hit_strength(spectrum, spectrum.bass, spectrum.bass_flux);
-            self.bass_hits = self.bass_hits.saturating_add(1);
-            self.bass_hit_flash = 1.0;
-            self.last_hit = Some(Hit {
-                kind: HitKind::Bass,
-                strength,
-            });
-            self.push_hit(HitKind::Bass, strength);
-        } else if broadband_hit {
-            let strength = self.hit_strength(spectrum, spectrum.power, spectrum.flux);
-            self.broadband_hits = self.broadband_hits.saturating_add(1);
-            self.broadband_hit_flash = 1.0;
-            self.last_hit = Some(Hit {
-                kind: HitKind::Broadband,
-                strength,
-            });
-            self.push_hit(HitKind::Broadband, strength);
+        let events = self.onsets.observe(&spectrum, &self.detectors, hop);
+        if let Some(power) = events.drop {
+            self.drop_hits = self.drop_hits.saturating_add(1);
+            self.push_action(Action::Drop(power));
+        }
+        if events.snare.is_some() {
+            self.snare_hits = self.snare_hits.saturating_add(1);
+            self.push_action(Action::Snare);
+        }
+        if let Some(power) = events.kick {
+            self.kick_hits = self.kick_hits.saturating_add(1);
+            self.push_action(Action::Kick(power));
         }
     }
 
-    fn hit_strength(&self, spectrum: Spectrum, level: f32, flux: f32) -> f32 {
-        let context = self.mix_context(spectrum, level, flux);
-        self.mixer
-            .value(MixPoint::KickStrength, &context)
-            .clamp(0.25, 1.5)
-    }
-
-    fn mix_context(&self, spectrum: Spectrum, level: f32, flux: f32) -> MixContext {
+    fn mix_context(&self) -> MixContext {
+        let status = self.onsets.status();
         MixContext {
             bands: self.bands.map(|band| band.value),
-            raw_bands: spectrum.bands,
+            raw_bands: self.last_spectrum.bands,
             power: self.power.value,
-            power_level: spectrum.power,
-            bass: self.bass.value.max(self.bass_onset.previous),
-            bass_level: level,
-            bass_flux: flux,
-            flux: spectrum.flux,
+            power_level: self.last_spectrum.power,
+            bass: self.bass.value,
+            bass_level: self.last_spectrum.bass,
             kick: self.kick,
+            kick_onset: status.kick.flash,
+            snare_onset: status.snare.flash,
+            drop_onset: status.drop.flash,
             gains: self.gains,
             routing: self.routing,
             style: self.scene.current.style,
             entrance: self.scene.current.entrance,
             phase: self.scene.current.phase,
             time: self.time,
-            bass_onset_ready: self.bass_onset.ready(spectrum.bass, spectrum.bass_flux),
-            wide_onset_ready: self.broadband_onset.ready(spectrum.power, spectrum.flux),
         }
-    }
-
-    fn current_mix_context(&self) -> MixContext {
-        self.mix_context(
-            self.last_spectrum,
-            self.last_spectrum.bass,
-            self.last_spectrum.bass_flux,
-        )
     }
 
     fn accent(&self) -> f32 {
         if self.property_gates.plays(Property::Accent) {
-            self.mixer
-                .value(MixPoint::Accent, &self.current_mix_context())
+            self.mixer.value(MixPoint::Accent, &self.mix_context())
         } else {
             Property::Accent.neutral()
         }
     }
 
-    fn push_hit(&mut self, kind: HitKind, strength: f32) {
-        if self.pending_hits.len() == MAX_PENDING_HITS {
-            self.pending_hits.pop_front();
+    fn push_action(&mut self, action: Action) {
+        if self.pending_actions.len() == MAX_PENDING_ACTIONS {
+            self.pending_actions.pop_front();
         }
-        self.pending_hits.push_back(Hit { kind, strength });
+        self.pending_actions.push_back(action);
     }
 
     pub fn frame(&self) -> Frame<'_> {
@@ -1227,16 +1148,18 @@ impl Visualizer {
         self.palette
     }
 
-    pub fn onset_thresholds(&self) -> OnsetThresholds {
-        OnsetThresholds {
-            bass: OnsetThreshold(self.bass_onset.threshold),
-            broadband: OnsetThreshold(self.broadband_onset.threshold),
-        }
+    pub fn detector_settings(&self) -> DetectorSettings {
+        self.detectors
     }
 
-    pub fn set_onset_thresholds(&mut self, thresholds: OnsetThresholds) {
-        self.bass_onset.threshold = thresholds.bass.value();
-        self.broadband_onset.threshold = thresholds.broadband.value();
+    pub fn set_detector_settings(&mut self, settings: DetectorSettings) {
+        self.detectors = settings
+            .validate()
+            .expect("detector settings are validated before they reach the visualizer");
+    }
+
+    pub fn set_kernel_band(&mut self, kernel: DetectorKernel, band: usize, value: f32) {
+        self.detectors.set_kernel_band(kernel, band, value);
     }
 
     pub fn routing(&self) -> &BandRouting {
@@ -1320,14 +1243,97 @@ impl Visualizer {
         self.property_gates.plays(property)
     }
 
+    fn onset_flux_value(&self, detector: Detector, setting: FluxSetting) -> f32 {
+        let detectors = &self.detectors;
+        match detector {
+            Detector::Kick => match setting {
+                FluxSetting::Attack => detectors.kick_onset_attack,
+                FluxSetting::Release => detectors.kick_onset_release,
+                FluxSetting::Average => detectors.kick_onset_average,
+                FluxSetting::Sensitivity => detectors.kick_onset_sensitivity,
+                FluxSetting::MinThreshold => detectors.kick_onset_min_threshold,
+                FluxSetting::MinInterval => detectors.kick_onset_min_interval,
+            },
+            Detector::Snare => match setting {
+                FluxSetting::Attack => detectors.snare_onset_attack,
+                FluxSetting::Release => detectors.snare_onset_release,
+                FluxSetting::Average => detectors.snare_onset_average,
+                FluxSetting::Sensitivity => detectors.snare_onset_sensitivity,
+                FluxSetting::MinThreshold => detectors.snare_onset_min_threshold,
+                FluxSetting::MinInterval => detectors.snare_onset_min_interval,
+            },
+            Detector::Drop => match setting {
+                FluxSetting::Attack => detectors.drop_onset_attack,
+                FluxSetting::Release => detectors.drop_onset_release,
+                FluxSetting::Average => detectors.drop_onset_average,
+                FluxSetting::Sensitivity => detectors.drop_onset_sensitivity,
+                FluxSetting::MinThreshold => detectors.drop_onset_min_threshold,
+                FluxSetting::MinInterval => detectors.drop_onset_min_interval,
+            },
+            Detector::Flux => {
+                unreachable!("the per-band flux detector uses its global parameters")
+            }
+        }
+    }
+
+    fn set_onset_flux_value(&mut self, detector: Detector, setting: FluxSetting, value: f32) {
+        let detectors = &mut self.detectors;
+        let slot = match detector {
+            Detector::Kick => match setting {
+                FluxSetting::Attack => &mut detectors.kick_onset_attack,
+                FluxSetting::Release => &mut detectors.kick_onset_release,
+                FluxSetting::Average => &mut detectors.kick_onset_average,
+                FluxSetting::Sensitivity => &mut detectors.kick_onset_sensitivity,
+                FluxSetting::MinThreshold => &mut detectors.kick_onset_min_threshold,
+                FluxSetting::MinInterval => &mut detectors.kick_onset_min_interval,
+            },
+            Detector::Snare => match setting {
+                FluxSetting::Attack => &mut detectors.snare_onset_attack,
+                FluxSetting::Release => &mut detectors.snare_onset_release,
+                FluxSetting::Average => &mut detectors.snare_onset_average,
+                FluxSetting::Sensitivity => &mut detectors.snare_onset_sensitivity,
+                FluxSetting::MinThreshold => &mut detectors.snare_onset_min_threshold,
+                FluxSetting::MinInterval => &mut detectors.snare_onset_min_interval,
+            },
+            Detector::Drop => match setting {
+                FluxSetting::Attack => &mut detectors.drop_onset_attack,
+                FluxSetting::Release => &mut detectors.drop_onset_release,
+                FluxSetting::Average => &mut detectors.drop_onset_average,
+                FluxSetting::Sensitivity => &mut detectors.drop_onset_sensitivity,
+                FluxSetting::MinThreshold => &mut detectors.drop_onset_min_threshold,
+                FluxSetting::MinInterval => &mut detectors.drop_onset_min_interval,
+            },
+            Detector::Flux => {
+                unreachable!("the per-band flux detector uses its global parameters")
+            }
+        };
+        *slot = value;
+    }
+
     /// Current value of one adjustable computation parameter.
     pub fn parameter_value(&self, parameter: Parameter) -> f32 {
         match parameter {
-            Parameter::OnsetThreshold(detector) => self.onset(detector).threshold,
-            Parameter::OnsetMinFlux(detector) => self.onset(detector).min_flux,
-            Parameter::OnsetFluxGain(detector) => self.onset(detector).flux_gain,
-            Parameter::OnsetBaselineRatio(detector) => self.onset(detector).baseline_ratio,
-            Parameter::OnsetCooldown(detector) => self.onset(detector).cooldown_time,
+            Parameter::FluxAttack => self.detectors.flux_attack,
+            Parameter::FluxRelease => self.detectors.flux_release,
+            Parameter::FluxAverage => self.detectors.flux_average,
+            Parameter::FluxSensitivity => self.detectors.flux_sensitivity,
+            Parameter::FluxMinThreshold => self.detectors.flux_min_threshold,
+            Parameter::FluxMinInterval => self.detectors.flux_min_interval,
+            Parameter::OnsetFlux(detector, setting) => self.onset_flux_value(detector, setting),
+            Parameter::KickSnareChoke => self.detectors.kick_snare_choke,
+            Parameter::KickDropChoke => self.detectors.kick_drop_choke,
+            Parameter::KickQuakeFactor => self.detectors.kick_quake_factor,
+            Parameter::KickSequenceEvery => self.detectors.kick_sequence_every as f32,
+            Parameter::SnareFlipEvery => self.detectors.snare_flip_every as f32,
+            Parameter::SnareChoke => self.detectors.snare_choke,
+            Parameter::FlipStiffness => self.detectors.flip_stiffness,
+            Parameter::FlipDamping => self.detectors.flip_damping,
+            Parameter::DropGapWindow => self.detectors.drop_gap_window,
+            Parameter::DropGapGain => self.detectors.drop_gap_gain,
+            Parameter::DropGapThreshold => self.detectors.drop_gap_threshold,
+            Parameter::DropQuakeFactor => self.detectors.drop_quake_factor,
+            Parameter::QuakeStiffness => self.detectors.quake_stiffness,
+            Parameter::QuakeDamping => self.detectors.quake_damping,
             Parameter::Attack(target) => self.envelope(target).attack,
             Parameter::Release(target) => self.envelope(target).release,
             Parameter::KickDecay => self.kick_decay,
@@ -1358,15 +1364,31 @@ impl Visualizer {
         let (minimum, maximum) = parameter.range();
         let value = value.clamp(minimum, maximum);
         match parameter {
-            Parameter::OnsetThreshold(detector) => self.onset_mut(detector).threshold = value,
-            Parameter::OnsetMinFlux(detector) => self.onset_mut(detector).min_flux = value,
-            Parameter::OnsetFluxGain(detector) => self.onset_mut(detector).flux_gain = value,
-            Parameter::OnsetBaselineRatio(detector) => {
-                self.onset_mut(detector).baseline_ratio = value;
+            Parameter::FluxAttack => self.detectors.flux_attack = value,
+            Parameter::FluxRelease => self.detectors.flux_release = value,
+            Parameter::FluxAverage => self.detectors.flux_average = value,
+            Parameter::FluxSensitivity => self.detectors.flux_sensitivity = value,
+            Parameter::FluxMinThreshold => self.detectors.flux_min_threshold = value,
+            Parameter::FluxMinInterval => self.detectors.flux_min_interval = value,
+            Parameter::OnsetFlux(detector, setting) => {
+                self.set_onset_flux_value(detector, setting, value);
             }
-            Parameter::OnsetCooldown(detector) => {
-                self.onset_mut(detector).cooldown_time = value;
+            Parameter::KickSnareChoke => self.detectors.kick_snare_choke = value,
+            Parameter::KickDropChoke => self.detectors.kick_drop_choke = value,
+            Parameter::KickQuakeFactor => self.detectors.kick_quake_factor = value,
+            Parameter::KickSequenceEvery => {
+                self.detectors.kick_sequence_every = value.round() as u32
             }
+            Parameter::SnareFlipEvery => self.detectors.snare_flip_every = value.round() as u32,
+            Parameter::SnareChoke => self.detectors.snare_choke = value,
+            Parameter::FlipStiffness => self.detectors.flip_stiffness = value,
+            Parameter::FlipDamping => self.detectors.flip_damping = value,
+            Parameter::DropGapWindow => self.detectors.drop_gap_window = value,
+            Parameter::DropGapGain => self.detectors.drop_gap_gain = value,
+            Parameter::DropGapThreshold => self.detectors.drop_gap_threshold = value,
+            Parameter::DropQuakeFactor => self.detectors.drop_quake_factor = value,
+            Parameter::QuakeStiffness => self.detectors.quake_stiffness = value,
+            Parameter::QuakeDamping => self.detectors.quake_damping = value,
             Parameter::Attack(target) => self.envelope_mut(target).attack = value,
             Parameter::Release(target) => self.envelope_mut(target).release = value,
             Parameter::KickDecay => self.kick_decay = value,
@@ -1402,20 +1424,6 @@ impl Visualizer {
             Parameter::ExtraGain(extra) => {
                 self.mixer.set_extra_gain(extra, value);
             }
-        }
-    }
-
-    fn onset(&self, detector: Detector) -> &Onset {
-        match detector {
-            Detector::Bass => &self.bass_onset,
-            Detector::Wide => &self.broadband_onset,
-        }
-    }
-
-    fn onset_mut(&mut self, detector: Detector) -> &mut Onset {
-        match detector {
-            Detector::Bass => &mut self.bass_onset,
-            Detector::Wide => &mut self.broadband_onset,
         }
     }
 
@@ -1507,6 +1515,8 @@ impl Visualizer {
             Property::Jitter => current.deformation.jitter,
             Property::Phase => current.phase_speed,
             Property::Kick => self.kick,
+            Property::Flip => wrap_angle(self.flip.value()),
+            Property::Quake => self.quake_x.value() + self.quake_y.value(),
             Property::Crossfade => {
                 if self.scene.outgoing.is_some() {
                     self.scene.transition
@@ -1519,46 +1529,27 @@ impl Visualizer {
         })
     }
 
-    fn onset_debug(&self, detector: Detector) -> OnsetDebug {
-        let onset = self.onset(detector);
-        let (level, flux, flash) = match detector {
-            Detector::Bass => (
-                self.last_spectrum.bass,
-                self.last_spectrum.bass_flux,
-                self.bass_hit_flash,
-            ),
-            Detector::Wide => (
-                self.last_spectrum.power,
-                self.last_spectrum.flux,
-                self.broadband_hit_flash,
-            ),
-        };
-        OnsetDebug {
-            level,
-            flux,
-            baseline: onset.baseline,
-            threshold: onset.threshold,
-            minimum_flux: onset.min_flux,
-            flux_gain: onset.flux_gain,
-            baseline_ratio: onset.baseline_ratio,
-            cooldown: onset.cooldown,
-            cooldown_time: onset.cooldown_time,
-            flash,
-        }
-    }
-
     fn debug_sample(&self, at: f32) -> DebugSample {
+        let status = self.onsets.status();
         DebugSample {
             at,
             bands: self.bands.map(|band| band.value),
             raw_bands: self.last_spectrum.bands,
+            band_flux: std::array::from_fn(|index| status.bands[index].raw_flux),
+            band_smoothed_flux: std::array::from_fn(|index| status.bands[index].smoothed),
+            band_threshold: std::array::from_fn(|index| status.bands[index].threshold),
+            band_onset_count: std::array::from_fn(|index| status.bands[index].triggers),
             power: self.power.value,
             raw_power: self.last_spectrum.power,
             bass: self.bass.value,
             raw_bass: self.last_spectrum.bass,
             kick: self.kick,
-            bass_onset: self.onset_debug(Detector::Bass),
-            wide_onset: self.onset_debug(Detector::Wide),
+            kick_onset: status.kick,
+            snare_onset: status.snare,
+            drop_onset: status.drop,
+            drop_status: status.drop_status,
+            kick_flux: status.kick_flux,
+            snare_flux: status.snare_flux,
             properties: self.property_values(),
         }
     }
@@ -1584,18 +1575,20 @@ impl Visualizer {
     }
 
     pub fn debug_snapshot(&self) -> DebugSnapshot {
+        let status = self.onsets.status();
         let bands = std::array::from_fn(|index| {
             let (low_hz, high_hz) = self.analyzer.band_range(index);
             BandDebug {
                 value: self.bands[index].value,
                 raw: self.last_spectrum.bands[index],
+                raw_flux: status.bands[index].raw_flux,
+                smoothed_flux: status.bands[index].smoothed,
+                threshold: status.bands[index].threshold,
                 low_hz,
                 high_hz,
                 role: BandRole::for_index(index),
             }
         });
-        let bass_onset = self.onset_debug(Detector::Bass);
-        let broadband_onset = self.onset_debug(Detector::Wide);
         let style = self.scene.current.style;
         DebugSnapshot {
             bands,
@@ -1612,19 +1605,16 @@ impl Visualizer {
                 smooth: self.treble.value,
                 raw: self.last_spectrum.treble,
             },
-            flux: self.last_spectrum.flux,
-            bass_flux: self.last_spectrum.bass_flux,
-            bass_onset,
-            broadband_onset,
             kick: self.kick,
-            transition_cooldown: self.transition_cooldown,
-            hits_last_frame: self.hits_last_frame,
-            bass_hits: self.bass_hits,
-            broadband_hits: self.broadband_hits,
-            last_hit: self.last_hit.map(|hit| HitDebug {
-                kind: hit.kind.name(),
-                strength: hit.strength,
-            }),
+            kick_onset: status.kick,
+            snare_onset: status.snare,
+            drop_onset: status.drop,
+            drop_status: status.drop_status,
+            kick_flux: status.kick_flux,
+            snare_flux: status.snare_flux,
+            kick_hits: self.kick_hits,
+            snare_hits: self.snare_hits,
+            drop_hits: self.drop_hits,
             scene: self.scene.current.kind.name(),
             outgoing: self.scene.outgoing.as_ref().map(|f| f.kind.name()),
             transition: self.scene.transition,
@@ -1664,24 +1654,31 @@ impl Visualizer {
         let dt = dt.clamp(0.0, 0.1);
         self.palette.approach(*palette, dt, 10.0);
         self.time += dt;
-        self.transition_cooldown = (self.transition_cooldown - dt).max(0.0);
-        self.hits_last_frame = self.pending_hits.len() as u32;
-        let mut strongest = None;
-        while let Some(hit) = self.pending_hits.pop_front() {
-            if strongest.is_none_or(|best: Hit| hit.strength > best.strength) {
-                strongest = Some(hit);
-            }
-        }
         let accent = self.accent();
-        if let Some(hit) = strongest {
-            self.handle_hit(hit, accent);
+        while let Some(action) = self.pending_actions.pop_front() {
+            self.handle_action(action, accent);
         }
         self.kick *= (-dt * self.kick_decay).exp();
         if !self.property_gates.plays(Property::Kick) {
             self.kick = 0.0;
         }
-        self.bass_hit_flash *= (-dt * 5.0).exp();
-        self.broadband_hit_flash *= (-dt * 5.0).exp();
+        self.flip.set_target(self.flip_target);
+        self.flip.advance(
+            dt,
+            self.detectors.flip_stiffness,
+            self.detectors.flip_damping,
+        );
+        self.quake_x.advance(
+            dt,
+            self.detectors.quake_stiffness,
+            self.detectors.quake_damping,
+        );
+        self.quake_y.advance(
+            dt,
+            self.detectors.quake_stiffness,
+            self.detectors.quake_damping,
+        );
+        let status = self.onsets.status();
         let exposure = self.frames.interval(frame, shutter);
         let camera = Camera::new(viewport.0, viewport.1, zoom);
         let music = Music {
@@ -1689,19 +1686,28 @@ impl Visualizer {
             raw_bands: self.last_spectrum.bands,
             power: self.power.value,
             power_level: self.last_spectrum.power,
-            bass: self.bass.value.max(self.bass_onset.previous),
+            bass: self.bass.value,
             bass_level: self.last_spectrum.bass,
-            bass_flux: self.last_spectrum.bass_flux,
-            flux: self.last_spectrum.flux,
             kick: self.kick,
-            bass_onset_ready: self
-                .bass_onset
-                .ready(self.last_spectrum.bass, self.last_spectrum.bass_flux),
-            wide_onset_ready: self
-                .broadband_onset
-                .ready(self.last_spectrum.power, self.last_spectrum.flux),
+            kick_onset: status.kick.flash,
+            snare_onset: status.snare.flash,
+            drop_onset: status.drop.flash,
         };
         let width = (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * 1.4;
+        let quake_scale = (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * QUAKE_PIXELS;
+        let flip_pitch = if self.property_gates.plays(Property::Flip) {
+            self.flip.value()
+        } else {
+            0.0
+        };
+        let shake = if self.property_gates.plays(Property::Quake) {
+            Vec2::new(
+                self.quake_x.value() * quake_scale,
+                self.quake_y.value() * quake_scale,
+            )
+        } else {
+            Vec2::new(0.0, 0.0)
+        };
         self.lines.clear();
         self.ribbons.clear();
         self.scene.update(
@@ -1718,6 +1724,8 @@ impl Visualizer {
             self.depth_fade.strength(),
             self.near_opacity.value(),
             width,
+            flip_pitch,
+            shake,
             self.time,
             &mut self.lines,
             &mut self.ribbons,
@@ -1927,22 +1935,39 @@ impl Visualizer {
         );
     }
 
-    fn handle_hit(&mut self, hit: Hit, accent: f32) {
-        self.kick = self.kick.max(hit.strength);
-        if self.transition_cooldown > 0.0 {
-            return;
-        }
-        match roll_transition(hit.kind, &mut self.rng) {
-            Some(Transition::Scene) => {
+    fn handle_action(&mut self, action: Action, accent: f32) {
+        match action {
+            Action::Kick(power) => {
+                self.kick = self.kick.max(power.clamp(0.0, 1.5));
+                if self.property_gates.plays(Property::Quake) {
+                    let direction = self.kick_sequence.next(self.detectors.kick_sequence_every);
+                    self.quake_impulse(direction, power * self.detectors.kick_quake_factor);
+                }
+            }
+            Action::Snare => {
+                self.kick_sequence.reset();
+                self.flip_count += 1;
+                if self.flip_count >= self.detectors.snare_flip_every {
+                    self.flip_count = 0;
+                    if self.property_gates.plays(Property::Flip) {
+                        self.flip_target += TAU * 0.5;
+                    }
+                }
+            }
+            Action::Drop(power) => {
                 self.scene.change(&mut self.rng, accent);
-                self.transition_cooldown = 0.3;
+                if self.property_gates.plays(Property::Quake) {
+                    self.quake_y
+                        .impulse(power * self.detectors.drop_quake_factor);
+                }
             }
-            Some(Transition::Parameter) => {
-                self.scene.mutate(&mut self.rng);
-                self.transition_cooldown = 0.18;
-            }
-            None => {}
         }
+    }
+
+    fn quake_impulse(&mut self, direction: QuakeDirection, velocity: f32) {
+        let (x, y) = direction.unit();
+        self.quake_x.impulse(x * velocity);
+        self.quake_y.impulse(y * velocity);
     }
 
     #[cfg(test)]
@@ -1969,11 +1994,10 @@ struct Music {
     power_level: f32,
     bass: f32,
     bass_level: f32,
-    bass_flux: f32,
-    flux: f32,
     kick: f32,
-    bass_onset_ready: bool,
-    wide_onset_ready: bool,
+    kick_onset: f32,
+    snare_onset: f32,
+    drop_onset: f32,
 }
 
 impl Music {
@@ -1993,61 +2017,30 @@ impl Music {
             power_level: self.power_level,
             bass: self.bass,
             bass_level: self.bass_level,
-            bass_flux: self.bass_flux,
-            flux: self.flux,
             kick: self.kick,
+            kick_onset: self.kick_onset,
+            snare_onset: self.snare_onset,
+            drop_onset: self.drop_onset,
             gains,
             routing,
             style,
             entrance,
             phase,
             time,
-            bass_onset_ready: self.bass_onset_ready,
-            wide_onset_ready: self.wide_onset_ready,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HitKind {
-    Bass,
-    Broadband,
-}
-
-impl HitKind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Bass => "BASS",
-            Self::Broadband => "WIDE",
         }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Hit {
-    kind: HitKind,
-    strength: f32,
+enum Action {
+    Kick(f32),
+    Snare,
+    Drop(f32),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Transition {
-    Scene,
-    Parameter,
-}
-
-fn roll_transition(kind: HitKind, rng: &mut Rng) -> Option<Transition> {
-    // The parameter roll is a fresh draw made only after the scene roll fails.
-    let (scene_chance, parameter_chance) = match kind {
-        HitKind::Bass => (0.55, 0.85),
-        HitKind::Broadband => (0.18, 0.45),
-    };
-    if rng.unit() < scene_chance {
-        Some(Transition::Scene)
-    } else if rng.unit() < parameter_chance {
-        Some(Transition::Parameter)
-    } else {
-        None
-    }
+/// Folds an unbounded angle into the closest representation around zero.
+fn wrap_angle(angle: f32) -> f32 {
+    (angle + TAU * 0.5).rem_euclid(TAU) - TAU * 0.5
 }
 
 #[derive(Clone, Copy)]
@@ -2099,76 +2092,6 @@ impl Smoother {
     }
 }
 
-struct Onset {
-    previous: f32,
-    baseline: f32,
-    cooldown: f32,
-    threshold: f32,
-    min_flux: f32,
-    flux_gain: f32,
-    baseline_ratio: f32,
-    cooldown_time: f32,
-}
-
-impl Onset {
-    fn bass(threshold: OnsetThreshold) -> Self {
-        Self {
-            previous: 0.0,
-            baseline: 0.0,
-            cooldown: 0.0,
-            threshold: threshold.value(),
-            min_flux: 0.035,
-            flux_gain: 1.0,
-            baseline_ratio: 1.08,
-            cooldown_time: 0.11,
-        }
-    }
-
-    fn broadband(threshold: OnsetThreshold) -> Self {
-        Self {
-            previous: 0.0,
-            baseline: 0.0,
-            cooldown: 0.0,
-            threshold: threshold.value(),
-            min_flux: 0.03,
-            flux_gain: 1.0,
-            baseline_ratio: 1.1,
-            cooldown_time: 0.15,
-        }
-    }
-
-    fn observe(&mut self, value: f32, flux: f32, dt: f32) -> bool {
-        self.cooldown = (self.cooldown - dt).max(0.0);
-        let baseline = self.baseline;
-        let blend = 1.0 - (-dt / 0.7).exp();
-        self.baseline += (value - self.baseline) * blend;
-        self.previous = value;
-        if self.cooldown == 0.0
-            && value >= self.threshold
-            && flux * self.flux_gain >= self.min_flux
-            && value >= baseline * self.baseline_ratio + 0.015
-        {
-            self.cooldown = self.cooldown_time;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn ready(&self, value: f32, flux: f32) -> bool {
-        self.cooldown == 0.0
-            && value >= self.threshold
-            && flux * self.flux_gain >= self.min_flux
-            && value >= self.baseline * self.baseline_ratio + 0.015
-    }
-
-    fn reset(&mut self) {
-        self.previous = 0.0;
-        self.baseline = 0.0;
-        self.cooldown = 0.0;
-    }
-}
-
 struct Scene {
     current: FigureRuntime,
     outgoing: Option<FigureRuntime>,
@@ -2201,10 +2124,6 @@ impl Scene {
         self.transition = 0.0;
     }
 
-    fn mutate(&mut self, rng: &mut Rng) {
-        self.current.target_style = Style::random(rng);
-    }
-
     fn reset_temporal(&mut self) {
         self.current.reset_temporal();
         if let Some(outgoing) = &mut self.outgoing {
@@ -2228,6 +2147,8 @@ impl Scene {
         depth_fade: f32,
         near_opacity: f32,
         width: f32,
+        flip_pitch: f32,
+        shake: Vec2,
         time: f32,
         out: &mut Vec<LineInstance>,
         out_ribbons: &mut Vec<RibbonInstance>,
@@ -2270,6 +2191,8 @@ impl Scene {
             depth_fade,
             near_opacity,
             width,
+            flip_pitch,
+            shake,
             time,
             out,
             out_ribbons,
@@ -2289,6 +2212,8 @@ impl Scene {
                 depth_fade,
                 near_opacity,
                 width,
+                flip_pitch,
+                shake,
                 time,
                 out,
                 out_ribbons,
@@ -2405,6 +2330,8 @@ impl FigureRuntime {
         depth_fade: f32,
         near_opacity: f32,
         base_width: f32,
+        flip_pitch: f32,
+        shake: Vec2,
         time: f32,
         out: &mut Vec<LineInstance>,
         out_ribbons: &mut Vec<RibbonInstance>,
@@ -2475,10 +2402,11 @@ impl FigureRuntime {
         self.line_energy = gates.drive(Property::Line, mixer.value(MixPoint::Line, &context));
         self.world_vertices.clear();
         self.vertices.clear();
+        let pose = self.pose.with_action(flip_pitch, shake);
         for index in 0..self.wireframe.vertex_count() {
             let world = deformation.apply(self.wireframe.vertex(index, self.phase));
             self.world_vertices.push(world);
-            self.vertices.push(camera.project(world, self.pose));
+            self.vertices.push(camera.project(world, pose));
         }
         self.update_kinematics(dt);
         let depth_opacity =
@@ -2953,126 +2881,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bass_hits_are_more_likely_to_change_the_scene() {
-        let mut bass = 0;
-        let mut broadband = 0;
-        let mut bass_scenes = 0;
-        let mut broadband_scenes = 0;
-        let mut rng = Rng::new(7);
-        for _ in 0..20_000 {
-            match roll_transition(HitKind::Bass, &mut rng) {
-                Some(Transition::Scene) => {
-                    bass += 1;
-                    bass_scenes += 1;
-                }
-                Some(Transition::Parameter) => bass += 1,
-                None => {}
-            }
-            match roll_transition(HitKind::Broadband, &mut rng) {
-                Some(Transition::Scene) => {
-                    broadband += 1;
-                    broadband_scenes += 1;
-                }
-                Some(Transition::Parameter) => broadband += 1,
-                None => {}
-            }
-        }
-        assert!(
-            bass > broadband + 4_000,
-            "bass {bass} vs broadband {broadband}"
-        );
-        assert!(
-            bass_scenes > broadband_scenes + 2_000,
-            "bass scenes {bass_scenes} vs broadband scenes {broadband_scenes}"
-        );
+    fn detector_defaults_describe_the_flux_onset_bank() {
+        let detectors = DetectorSettings::default();
+        assert_eq!(detectors.flux_attack, 0.005);
+        assert_eq!(detectors.flux_release, 0.05);
+        assert_eq!(detectors.flux_average, 0.2);
+        assert_eq!(detectors.flux_min_interval, 0.03);
+        assert!(detectors.kick_contains(0));
+        assert!(detectors.kick_contains(4));
+        assert!(!detectors.kick_contains(5));
+        assert!(detectors.snare_contains(5));
+        assert!(detectors.snare_contains(12));
+        assert_eq!(detectors.kick_onset_min_interval, 0.03);
+        assert_eq!(detectors.snare_onset_attack, 0.005);
+        assert_eq!(detectors.drop_gap_window, 1.0);
+        assert_eq!(detectors.drop_gap_threshold, 0.15);
+        assert_eq!(detectors.drop_gap_gain, 1.0);
+        assert_eq!(detectors.drop_onset_attack, 0.005);
+        assert_eq!(detectors.drop_onset_min_threshold, 0.01);
+        assert_eq!(detectors.drop_kernels.low[0], 1.0);
+        assert_eq!(detectors.drop_kernels.low[4], 0.0);
+        assert_eq!(detectors.drop_kernels.high[4], 1.0);
+        assert_eq!(detectors.drop_kernels.onset[0], 1.0);
+        assert!(detectors.validate().is_ok());
+
+        let mut broken = detectors;
+        broken.flux_attack = 0.0;
+        assert!(broken.validate().is_err());
     }
 
     #[test]
-    fn the_first_scene_is_a_cube_and_evolution_advances_it() {
-        let visualizer = Visualizer::new();
-        assert_eq!(visualizer.scene.current.kind, FigureKind::Cube);
-        assert_eq!(
-            visualizer.scene.current.wireframe.edges().len(),
-            12,
-            "the first figure is a simple wireframe cube"
-        );
-        assert_eq!(FigureKind::Cube.next(), FigureKind::Octahedron);
-    }
-
-    #[test]
-    fn a_visible_scene_generates_swept_lines_and_ribbons() {
+    fn composite_onset_threshold_slider_stops_at_a_quarter() {
         let mut visualizer = Visualizer::new();
-        visualizer.debug_music([0.5; BAND_COUNT], 0.6);
-        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
-        let palette = Palette::from_theme(crate::theme::ThemeId::default());
-        for _ in 0..6 {
-            visualizer.update(
-                frame,
-                ShutterFrames::try_from(3.0).unwrap(),
-                1.0 / 60.0,
-                &palette,
-                (1280.0, 440.0),
-                1.0,
-                1.0,
-            );
-            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        for detector in [Detector::Kick, Detector::Snare, Detector::Drop] {
+            let threshold = Parameter::OnsetFlux(detector, FluxSetting::MinThreshold);
+            assert_eq!(threshold.range(), (0.0, 0.25));
+            visualizer.set_parameter(threshold, 100.0);
+            assert_eq!(visualizer.parameter_value(threshold), 0.25);
         }
-        let frame = visualizer.frame();
-        assert!(frame.lines.len() + frame.ribbons.len() >= 12);
-        assert!(!frame.ribbons.is_empty());
-        let ramps = frame
-            .ribbons
-            .iter()
-            .filter(|ribbon| {
-                let alphas = [
-                    ribbon.start_color[3],
-                    ribbon.end_color[3],
-                    ribbon.third_color[3],
-                ];
-                alphas.iter().any(|alpha| *alpha > 0.0)
-                    && (alphas[0] != alphas[1] || alphas[1] != alphas[2])
-            })
-            .count();
-        assert!(ramps > 0);
-        assert!(frame
-            .lines
-            .iter()
-            .all(|line| line.start_color[3] > 0.0 && line.end_color[3] > 0.0));
-        assert!(frame
-            .lines
-            .iter()
-            .all(|line| { line.endpoints.iter().all(|value| value.is_finite()) }));
-        assert!(frame.ribbons.iter().any(|ribbon| {
-            let movement = (ribbon.start[0] - ribbon.end[0]).hypot(ribbon.start[1] - ribbon.end[1])
-                + (ribbon.start[2] - ribbon.end[2]).hypot(ribbon.start[3] - ribbon.end[3]);
-            movement > 0.0
-        }));
     }
 
     #[test]
-    fn onset_thresholds_adjust_in_hundredths_and_stay_normalized() {
-        let thresholds = OnsetThresholds::default();
-        assert_eq!(thresholds.bass.value(), 0.17);
-        assert_eq!(thresholds.broadband.value(), 0.22);
+    fn default_kernels_select_their_bands() {
+        let detectors = DetectorSettings::default();
+        assert!(detectors.kick_contains(0));
+        assert!(detectors.kick_contains(4));
+        assert!(!detectors.kick_contains(5));
+        assert!(detectors.snare_contains(5));
+        assert!(detectors.snare_contains(12));
+        assert!(!detectors.snare_contains(4));
+    }
 
-        let higher = thresholds.bass.adjusted(Adjustment::Increase);
-        assert!((higher.value() - 0.18).abs() < 1e-6);
-
-        let mut lowest = thresholds.bass;
-        for _ in 0..200 {
-            lowest = lowest.adjusted(Adjustment::Decrease);
+    #[test]
+    fn all_bands_start_with_adaptive_references() {
+        let visualizer = Visualizer::new();
+        for band in 0..BAND_COUNT {
+            let shape = visualizer.band_shape(band);
+            assert_eq!(shape.tracking, ReferenceTracking::Adaptive, "band {band}");
         }
-        assert_eq!(lowest.value(), 0.0);
-
-        let mut highest = thresholds.broadband;
-        for _ in 0..200 {
-            highest = highest.adjusted(Adjustment::Increase);
-        }
-        assert_eq!(highest.value(), 1.0);
-
-        assert!(OnsetThreshold::try_from(-0.01).is_err());
-        assert!(OnsetThreshold::try_from(1.01).is_err());
-        assert!(OnsetThreshold::try_from(f32::NAN).is_err());
+        assert_eq!(
+            visualizer.input_shape(Input::Power).unwrap().tracking,
+            ReferenceTracking::Manual
+        );
     }
 
     #[test]
@@ -3118,35 +2988,84 @@ mod tests {
     }
 
     #[test]
-    fn setting_onset_thresholds_reaches_the_debug_snapshot() {
+    fn detector_settings_reach_the_debug_snapshot_and_parameters() {
         let mut visualizer = Visualizer::new();
-        let thresholds = OnsetThresholds {
-            bass: OnsetThreshold::try_from(0.61).unwrap(),
-            broadband: OnsetThreshold::try_from(0.72).unwrap(),
+        let settings = DetectorSettings {
+            kick_onset_min_interval: 0.05,
+            snare_onset_attack: 0.01,
+            drop_gap_window: 0.6,
+            drop_gap_gain: 2.0,
+            drop_gap_threshold: -0.1,
+            drop_onset_attack: 0.015,
+            ..DetectorSettings::default()
         };
-        visualizer.set_onset_thresholds(thresholds);
+        visualizer.set_detector_settings(settings);
         let snapshot = visualizer.debug_snapshot();
-        assert!((snapshot.bass_onset.threshold - 0.61).abs() < 1e-6);
-        assert!((snapshot.broadband_onset.threshold - 0.72).abs() < 1e-6);
+        assert!(
+            (visualizer.parameter_value(Parameter::OnsetFlux(
+                Detector::Kick,
+                FluxSetting::MinInterval
+            )) - 0.05)
+                .abs()
+                < 1e-6
+        );
+        assert!(
+            (visualizer
+                .parameter_value(Parameter::OnsetFlux(Detector::Snare, FluxSetting::Attack))
+                - 0.01)
+                .abs()
+                < 1e-6
+        );
+        assert!((visualizer.parameter_value(Parameter::DropGapWindow) - 0.6).abs() < 1e-6);
+        assert!((visualizer.parameter_value(Parameter::DropGapGain) - 2.0).abs() < 1e-6);
+        assert!((visualizer.parameter_value(Parameter::DropGapThreshold) + 0.1).abs() < 1e-6);
+        assert!(
+            (visualizer.parameter_value(Parameter::OnsetFlux(Detector::Drop, FluxSetting::Attack))
+                - 0.015)
+                .abs()
+                < 1e-6
+        );
+        assert!(visualizer.detector_settings().kick_contains(4));
+        assert!(!visualizer.detector_settings().kick_contains(5));
+        assert!(visualizer.detector_settings().snare_contains(5));
+        assert!(!visualizer.detector_settings().snare_contains(4));
+        assert_eq!(snapshot.kick_hits, 0);
+        assert_eq!(snapshot.snare_hits, 0);
+        assert_eq!(snapshot.drop_hits, 0);
+
+        visualizer.set_parameter(
+            Parameter::OnsetFlux(Detector::Kick, FluxSetting::Sensitivity),
+            3.0,
+        );
+        assert_eq!(
+            visualizer.parameter_value(Parameter::OnsetFlux(
+                Detector::Kick,
+                FluxSetting::Sensitivity
+            )),
+            3.0
+        );
     }
 
     #[test]
-    fn onset_flux_gain_scales_the_minimum_flux_gate() {
-        let mut onset = Onset::bass(OnsetThresholds::default().bass);
-        let level = 1.0;
-        let flux = 0.01;
-        assert!(!onset.ready(level, flux), "flux is below the default gate");
-        assert!(!onset.observe(level, flux, 1.0 / 94.0));
-
-        onset.flux_gain = 4.0;
-        assert!(onset.ready(level, flux));
-        assert!(onset.observe(level, flux, 1.0 / 94.0));
-        assert!(!onset.ready(level, flux), "the hit starts the cooldown");
-
-        let mut onset = Onset::broadband(OnsetThresholds::default().broadband);
-        assert!(onset.ready(level, 0.04));
-        onset.flux_gain = 0.5;
-        assert!(!onset.ready(level, 0.04));
+    fn flux_sliders_clamp_and_format_time_constants() {
+        let mut visualizer = Visualizer::new();
+        visualizer.set_parameter(Parameter::FluxAttack, 1.0);
+        assert_eq!(
+            visualizer.parameter_value(Parameter::FluxAttack),
+            FLUX_ATTACK_MAX
+        );
+        visualizer.set_parameter(Parameter::FluxAttack, 0.0);
+        assert_eq!(
+            visualizer.parameter_value(Parameter::FluxAttack),
+            FLUX_ATTACK_MIN
+        );
+        visualizer.set_parameter(Parameter::FluxSensitivity, 100.0);
+        assert_eq!(
+            visualizer.parameter_value(Parameter::FluxSensitivity),
+            FLUX_SENSITIVITY_MAX
+        );
+        assert_eq!(Parameter::FluxAttack.format(0.005), "5ms");
+        assert_eq!(Parameter::FluxMinThreshold.format(0.0123), "0.012");
     }
 
     #[test]
@@ -3198,27 +3117,76 @@ mod tests {
     }
 
     #[test]
-    fn strong_bass_bursts_reach_the_scene_and_trigger_evolution() {
+    fn kick_snare_and_drop_actions_move_the_figure_state() {
         let mut visualizer = Visualizer::new();
+        let settings = DetectorSettings {
+            snare_flip_every: 2,
+            ..DetectorSettings::default()
+        };
+        visualizer.set_detector_settings(settings);
+
+        visualizer.handle_action(Action::Kick(0.5), 0.0);
+        assert!(visualizer.kick >= 0.5);
+        visualizer
+            .quake_x
+            .advance(0.01, settings.quake_stiffness, settings.quake_damping);
+        assert!(
+            visualizer.quake_x.value() < 0.0,
+            "the first kick shakes left"
+        );
+
+        visualizer.handle_action(Action::Snare, 0.0);
+        assert_eq!(visualizer.flip_target, 0.0);
+        visualizer.handle_action(Action::Snare, 0.0);
+        assert!((visualizer.flip_target - TAU * 0.5).abs() < 1e-5);
+
+        let before = visualizer.scene_name();
+        visualizer.handle_action(Action::Drop(1.0), 0.0);
+        assert_ne!(
+            visualizer.scene_name(),
+            before,
+            "a drop always changes figure"
+        );
+        visualizer
+            .quake_y
+            .advance(0.01, settings.quake_stiffness, settings.quake_damping);
+        assert!(visualizer.quake_y.value() > 0.0, "the drop shakes downward");
+    }
+
+    #[test]
+    fn low_band_bursts_trigger_the_kick_and_quake() {
+        let mut visualizer = Visualizer::new();
+        // Isolate the kick kernel so a broadband click cannot choke it
+        // through the snare detector.
+        visualizer.set_detector_settings(DetectorSettings {
+            snare_kernel: [0.0; BAND_COUNT],
+            ..DetectorSettings::default()
+        });
         visualizer.set_samplerate(48_000);
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut at = AudioTime::ZERO;
-        let mut last_name = visualizer.scene_name();
-        let mut scene_changes = 0;
         let mut kick_seen = false;
+        let mut quake_seen = false;
         for frame in 0..360 {
             let input: Vec<[f32; 2]> = (0..800)
                 .map(|index| {
                     let sample = frame * 800 + index;
                     let time = sample as f32 / 48_000.0;
                     let block = sample % 9_600;
-                    let bass = if block < 3_000 {
-                        (1.0 - block as f32 / 3_000.0) * (std::f32::consts::TAU * 55.0 * time).sin()
+                    let envelope = if block < 3_000 {
+                        1.0 - block as f32 / 3_000.0
                     } else {
                         0.0
                     };
-                    let tone = 0.2 * (std::f32::consts::TAU * 1_200.0 * time).sin();
-                    [bass + tone; 2]
+                    // Spread the burst over the five kick bands so the
+                    // composite kick kernel sees a real low transient.
+                    let bass = [40.0, 50.0, 65.0, 85.0, 110.0]
+                        .iter()
+                        .map(|frequency| (std::f32::consts::TAU * frequency * time).sin())
+                        .sum::<f32>()
+                        / 5.0
+                        * envelope;
+                    [bass; 2]
                 })
                 .collect();
             visualizer.consume_buf(&input, 1.0);
@@ -3234,13 +3202,56 @@ mod tests {
             );
             at = end;
             kick_seen |= visualizer.kick > 0.0;
-            if visualizer.scene_name() != last_name {
-                scene_changes += 1;
-                last_name = visualizer.scene_name();
-            }
+            quake_seen |=
+                visualizer.debug_snapshot().properties[Property::Quake.index()].abs() > 0.0;
         }
-        assert!(kick_seen, "bass energy must reach the hit envelope");
-        assert!(scene_changes > 0, "bass hits must evolve the scene");
+        assert!(
+            kick_seen,
+            "the kick kernel onset must reach the kick envelope"
+        );
+        assert!(quake_seen, "a kick must inject a quake impulse");
+        assert!(visualizer.debug_snapshot().kick_hits > 0);
+    }
+
+    #[test]
+    fn a_confident_gap_and_composite_onset_confirm_a_drop() {
+        let mut visualizer = Visualizer::new();
+        let settings = DetectorSettings {
+            drop_gap_window: 0.1,
+            drop_gap_threshold: 0.1,
+            ..DetectorSettings::default()
+        };
+        visualizer.set_detector_settings(settings);
+        let hop = 1.0 / 86.0;
+        let quiet = Spectrum {
+            bands: std::array::from_fn(|band| if band < 4 { 0.0 } else { 0.8 }),
+            ..Spectrum::default()
+        };
+        for _ in 0..12 {
+            visualizer.observe(quiet, hop);
+        }
+        let armed = visualizer.debug_snapshot();
+        assert!(armed.drop_onset.armed, "the missing bass arms the drop");
+        assert!(armed.drop_status.high > armed.drop_status.low);
+        assert!((armed.drop_status.diff - 0.8).abs() < 1e-5);
+        assert!(armed.drop_status.confidence >= settings.drop_gap_threshold);
+
+        let mut burst = quiet;
+        for band in 0..4 {
+            burst.band_flux[band] = 5.0;
+        }
+        visualizer.observe(burst, hop);
+        assert_eq!(visualizer.debug_snapshot().drop_hits, 0);
+        visualizer.observe(quiet, hop);
+        let confirmed = visualizer.debug_snapshot();
+        assert_eq!(
+            confirmed.drop_hits, 1,
+            "the composite onset confirms the confident gap"
+        );
+        assert_eq!(
+            confirmed.drop_status.confidence, 0.0,
+            "confirmation restarts the gap window"
+        );
     }
 
     #[test]
@@ -3576,8 +3587,26 @@ mod tests {
         assert!(snapshot.power.smooth.is_finite());
         assert!(snapshot.bass.smooth.is_finite());
         assert!(snapshot.treble.smooth.is_finite());
-        assert!(snapshot.bass_onset.threshold > 0.0);
-        assert!(snapshot.broadband_onset.cooldown_time > 0.0);
+        assert!(snapshot.kick_onset.flash.is_finite());
+        assert!(snapshot.snare_onset.flash.is_finite());
+        assert!(snapshot.drop_onset.power.is_finite());
+        assert!(snapshot.drop_status.low.is_finite());
+        assert!(snapshot.drop_status.high.is_finite());
+        assert!(snapshot.drop_status.diff.is_finite());
+        assert!(snapshot.drop_status.confidence.is_finite());
+        assert!(snapshot.drop_status.onset_flux.is_finite());
+        assert!(snapshot.drop_status.onset_smoothed.is_finite());
+        assert!(snapshot.drop_status.onset_threshold.is_finite());
+        assert!(snapshot.kick_flux.flux.is_finite());
+        assert!(snapshot.kick_flux.smoothed.is_finite());
+        assert!(snapshot.kick_flux.threshold.is_finite());
+        assert!(snapshot.snare_flux.flux.is_finite());
+        assert!(snapshot.snare_flux.smoothed.is_finite());
+        assert!(snapshot.snare_flux.threshold.is_finite());
+        assert!(snapshot
+            .bands
+            .iter()
+            .all(|band| band.smoothed_flux.is_finite()));
         assert!(!snapshot.scene.is_empty());
         assert!(snapshot.lines + snapshot.ribbons > 0);
         assert!(snapshot.ribbons > 0);
@@ -3648,16 +3677,33 @@ mod tests {
         assert_eq!(attack.fraction(50.0), 1.0);
         assert!(attack.from_fraction(0.5) < 3.0);
 
-        let threshold = Parameter::OnsetThreshold(Detector::Wide);
-        visualizer.set_parameter(threshold, 0.73);
-        assert!((visualizer.parameter_value(threshold) - 0.73).abs() < 1e-6);
-        let ratio = Parameter::OnsetBaselineRatio(Detector::Bass);
-        visualizer.set_parameter(ratio, 100.0);
-        assert_eq!(visualizer.parameter_value(ratio), 2.0);
-        let flux_gain = Parameter::OnsetFluxGain(Detector::Bass);
-        assert_eq!(visualizer.parameter_value(flux_gain), 1.0);
-        visualizer.set_parameter(flux_gain, 3.5);
-        assert_eq!(visualizer.parameter_value(flux_gain), 3.5);
+        let kick_gap = Parameter::OnsetFlux(Detector::Kick, FluxSetting::MinInterval);
+        visualizer.set_parameter(kick_gap, 100.0);
+        assert_eq!(
+            visualizer.parameter_value(kick_gap),
+            crate::visualizer::FLUX_INTERVAL_MAX
+        );
+        let gap_window = Parameter::DropGapWindow;
+        visualizer.set_parameter(gap_window, 100.0);
+        assert_eq!(visualizer.parameter_value(gap_window), 4.0);
+        let gap_gain = Parameter::DropGapGain;
+        visualizer.set_parameter(gap_gain, 100.0);
+        assert_eq!(visualizer.parameter_value(gap_gain), 10.0);
+        visualizer.set_parameter(gap_gain, 0.0);
+        assert_eq!(visualizer.parameter_value(gap_gain), 0.1);
+        let gap_threshold = Parameter::DropGapThreshold;
+        visualizer.set_parameter(gap_threshold, -0.5);
+        assert!((visualizer.parameter_value(gap_threshold) + 0.5).abs() < 1e-6);
+        visualizer.set_parameter(gap_threshold, -100.0);
+        assert_eq!(visualizer.parameter_value(gap_threshold), -1.0);
+        visualizer.set_parameter(gap_threshold, 100.0);
+        assert_eq!(visualizer.parameter_value(gap_threshold), 1.0);
+        let sequence = Parameter::KickSequenceEvery;
+        visualizer.set_parameter(sequence, 100.0);
+        assert_eq!(visualizer.parameter_value(sequence), 32.0);
+        let flux = Parameter::FluxAttack;
+        visualizer.set_parameter(flux, 0.02);
+        assert!((visualizer.parameter_value(flux) - 0.02).abs() < 1e-6);
 
         let style = Parameter::Style(StyleInput::PhaseRate);
         visualizer.set_parameter(style, 2.25);
@@ -3756,11 +3802,12 @@ mod tests {
     #[test]
     fn band_components_can_be_rerouted() {
         let mut visualizer = Visualizer::new();
-        assert!(Property::Spin.depends_on_band(4, visualizer.routing()));
+        let detectors = visualizer.detector_settings();
+        assert!(Property::Spin.depends_on_band(4, visualizer.routing(), &detectors));
         visualizer.set_parameter(Parameter::BandSource(BandComponent::Spin), 7.0);
         assert_eq!(visualizer.band_for(BandComponent::Spin), 7);
-        assert!(!Property::Spin.depends_on_band(4, visualizer.routing()));
-        assert!(Property::Spin.depends_on_band(7, visualizer.routing()));
+        assert!(!Property::Spin.depends_on_band(4, visualizer.routing(), &detectors));
+        assert!(Property::Spin.depends_on_band(7, visualizer.routing(), &detectors));
         assert_eq!(
             Property::Spin.component_gains(Input::Band(BandComponent::Spin)),
             vec![Gain::SpinBand]
@@ -3796,18 +3843,19 @@ mod tests {
             );
         }
         let routing = BandRouting::default();
+        let detectors = DetectorSettings::default();
         for band in 0..BAND_COUNT {
             assert!(
                 Property::VARIANTS
                     .iter()
                     .copied()
-                    .any(|property| property.depends_on_band(band, &routing)),
+                    .any(|property| property.depends_on_band(band, &routing, &detectors)),
                 "band {band} must reach at least one animation property"
             );
         }
-        assert!(Property::Kick.depends_on_bass_onset(0));
-        assert!(!Property::Kick.depends_on_bass_onset(4));
-        assert!(Property::Crossfade.depends_on_wide_onset());
+        assert!(Property::Kick.depends_on_band_onset(0, &detectors));
+        assert!(!Property::Kick.depends_on_band_onset(5, &detectors));
+        assert!(Property::Flip.depends_on_band_onset(5, &detectors));
     }
 
     #[test]

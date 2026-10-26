@@ -117,14 +117,16 @@ mod tests {
         config.edit().visualizer_text_scale = config
             .visualizer_text_scale
             .adjusted(crate::frame_schedule::Adjustment::Increase);
-        config.edit().onset_thresholds.bass = config
-            .onset_thresholds
-            .bass
-            .adjusted(crate::frame_schedule::Adjustment::Increase);
-        config.edit().onset_thresholds.broadband = config
-            .onset_thresholds
-            .broadband
-            .adjusted(crate::frame_schedule::Adjustment::Decrease);
+        config.edit().detectors.kick_onset_min_interval = 0.05;
+        config.edit().detectors.kick_kernel[0] = 0.4;
+        config.edit().detectors.snare_onset_attack = 0.01;
+        config.edit().detectors.drop_gap_window = 0.6;
+        config.edit().detectors.drop_gap_gain = 2.0;
+        config.edit().detectors.drop_gap_threshold = -0.1;
+        config.edit().detectors.drop_onset_attack = 0.01;
+        config.edit().detectors.drop_kernels.low[0] = 0.5;
+        config.edit().detectors.flux_attack = 0.02;
+        config.edit().detectors.flux_sensitivity = 2.0;
         config.edit().depth_fade = config
             .depth_fade
             .adjusted(crate::frame_schedule::Adjustment::Increase);
@@ -159,9 +161,27 @@ mod tests {
             "(visualizer_text_scale: 0.5)",
             "(visualizer_text_scale: 2.5)",
             "(visualizer_text_scale: NaN)",
-            "(onset_thresholds: (bass: -0.1, broadband: 0.22))",
-            "(onset_thresholds: (bass: 0.17, broadband: 1.1))",
-            "(onset_thresholds: (bass: 0.17, broadband: NaN))",
+            "(detectors: (flux_attack: 0.0))",
+            "(detectors: (flux_sensitivity: 9.0))",
+            "(detectors: (flux_average: 2.0))",
+            "(detectors: (kick_sequence_every: 0))",
+            "(detectors: (kick_onset_attack: 0.0))",
+            "(detectors: (kick_onset_min_interval: 0.0))",
+            "(detectors: (kick_kernel: [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))",
+            "(detectors: (snare_onset_sensitivity: 9.0))",
+            "(detectors: (snare_onset_min_threshold: 3.0))",
+            "(detectors: (snare_kernel: [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))",
+            "(detectors: (drop_gap_window: 0.0))",
+            "(detectors: (drop_gap_window: 5.0))",
+            "(detectors: (drop_gap_threshold: 1.5))",
+            "(detectors: (drop_gap_threshold: -1.5))",
+            "(detectors: (drop_gap_gain: 0.0))",
+            "(detectors: (drop_gap_gain: 20.0))",
+            "(detectors: (drop_onset_attack: 0.0))",
+            "(detectors: (drop_onset_min_threshold: 0.3))",
+            "(detectors: (drop_onset_min_interval: 0.0))",
+            "(detectors: (drop_low_kernel: [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))",
+            "(detectors: (flip_stiffness: 0.0))",
             "(depth_fade: -0.1)",
             "(depth_fade: 1.1)",
             "(depth_fade: NaN)",
@@ -194,13 +214,30 @@ mod tests {
             crate::config::VisualizerTextScale::default()
         );
         assert_eq!(
-            missing.onset_thresholds,
-            crate::visualizer::OnsetThresholds::default()
+            missing.detectors,
+            crate::visualizer::DetectorSettings::default()
         );
         assert_eq!(missing.depth_fade, crate::visualizer::DepthFade::default());
         assert_eq!(
             missing.near_opacity,
             crate::visualizer::NearOpacity::default()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_drop_fields_load_with_the_new_defaults() -> anyhow::Result<()> {
+        let legacy: Config = ron::from_str(
+            "(detectors: (drop_quiet_level: 0.6, drop_quiet_time: 0.35, \
+             drop_split: 6, drop_onsets: 9, drop_window: 0.12, \
+             drop_gap_level: 0.2, drop_gap_time: 0.7, \
+             kick_low: 0, kick_high: 4, kick_window: 0.1, \
+             snare_bands: (Some(5), Some(6), Some(10), Some(12), None, None, None, None), \
+             snare_window: 0.06, snare_min_onsets: 3, snare_min_power: 2.0))",
+        )?;
+        assert_eq!(
+            legacy.detectors,
+            crate::visualizer::DetectorSettings::default()
         );
         Ok(())
     }

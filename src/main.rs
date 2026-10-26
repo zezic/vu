@@ -91,8 +91,8 @@ enum Setting {
     Preamp,
     FrameRate,
     Shutter,
-    BassThreshold,
-    BroadbandThreshold,
+    KickOnsetMinInterval,
+    DropGapThreshold,
     DepthFade,
     NearOpacity,
 }
@@ -153,17 +153,29 @@ impl App {
                 settings.frame_rate_limit = settings.frame_rate_limit.adjusted(adjustment);
                 self.frames.limit_changed(Instant::now());
             }
-            Setting::BassThreshold => {
-                let mut thresholds = self.meter.onset_thresholds();
-                thresholds.bass = thresholds.bass.adjusted(adjustment);
-                settings.onset_thresholds = thresholds;
-                self.meter.set_onset_thresholds(thresholds);
+            Setting::KickOnsetMinInterval => {
+                let mut detectors = self.meter.detector_settings();
+                let delta = match adjustment {
+                    Adjustment::Decrease => -0.005,
+                    Adjustment::Increase => 0.005,
+                };
+                detectors.kick_onset_min_interval = (detectors.kick_onset_min_interval + delta)
+                    .clamp(visualizer::FLUX_INTERVAL_MIN, visualizer::FLUX_INTERVAL_MAX);
+                settings.detectors = detectors;
+                self.meter.set_detector_settings(detectors);
             }
-            Setting::BroadbandThreshold => {
-                let mut thresholds = self.meter.onset_thresholds();
-                thresholds.broadband = thresholds.broadband.adjusted(adjustment);
-                settings.onset_thresholds = thresholds;
-                self.meter.set_onset_thresholds(thresholds);
+            Setting::DropGapThreshold => {
+                let mut detectors = self.meter.detector_settings();
+                let delta = match adjustment {
+                    Adjustment::Decrease => -0.05,
+                    Adjustment::Increase => 0.05,
+                };
+                detectors.drop_gap_threshold = (detectors.drop_gap_threshold + delta).clamp(
+                    visualizer::DROP_GAP_THRESHOLD_MIN,
+                    visualizer::DROP_GAP_THRESHOLD_MAX,
+                );
+                settings.detectors = detectors;
+                self.meter.set_detector_settings(detectors);
             }
             Setting::DepthFade => {
                 settings.depth_fade = settings.depth_fade.adjusted(adjustment);
@@ -352,16 +364,16 @@ impl App {
                             self.meter.set_presentation(presentation);
                         }
                         KeyCode::KeyG => {
-                            self.adjust_setting(Setting::BassThreshold, Adjustment::Decrease)
+                            self.adjust_setting(Setting::KickOnsetMinInterval, Adjustment::Decrease)
                         }
                         KeyCode::KeyH => {
-                            self.adjust_setting(Setting::BassThreshold, Adjustment::Increase)
+                            self.adjust_setting(Setting::KickOnsetMinInterval, Adjustment::Increase)
                         }
                         KeyCode::KeyJ => {
-                            self.adjust_setting(Setting::BroadbandThreshold, Adjustment::Decrease)
+                            self.adjust_setting(Setting::DropGapThreshold, Adjustment::Decrease)
                         }
                         KeyCode::KeyK => {
-                            self.adjust_setting(Setting::BroadbandThreshold, Adjustment::Increase)
+                            self.adjust_setting(Setting::DropGapThreshold, Adjustment::Increase)
                         }
                         KeyCode::KeyO => {
                             self.adjust_setting(Setting::DepthFade, Adjustment::Decrease)
@@ -401,9 +413,9 @@ impl App {
                 while let Ok(event) = self.rx.try_recv() {
                     self.meter.audio_event(event);
                 }
-                let thresholds = self.meter.onset_thresholds();
-                if self.settings.onset_thresholds != thresholds {
-                    self.settings.edit().onset_thresholds = thresholds;
+                let detectors = self.meter.detector_settings();
+                if self.settings.detectors != detectors {
+                    self.settings.edit().detectors = detectors;
                 }
                 let now = Instant::now();
                 let frame_time = FrameTime::new(self.previous_frame, now);

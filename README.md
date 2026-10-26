@@ -33,10 +33,10 @@ through the frame rate limits: 30, 48, 55, 60, 72, 90, 120, 180, 240, and VSync.
 to 200%. The setting persists in the config file.
 - `C` / `V` - decrease or increase shutter exposure by half a frame, from 1 to 16
 frame intervals. 
-- `G` / `H` - decrease or increase the bass onset threshold in 0.01 steps, from 0
-to 1.
-- `J` / `K` - decrease or increase the broadband onset threshold in 0.01 steps,
-from 0 to 1. Both onset thresholds persist in the config file.
+- `G` / `H` - decrease or increase the kick onset minimum gap in 5 ms steps,
+from 5 to 200 ms.
+- `J` / `K` - decrease or increase the drop gap confidence threshold in 0.05
+steps, from -1.0 to +1.0. Both detector settings persist in the config file.
 - `O` / `P` - decrease or increase the depth opacity modulation in 5% steps, from
 0% (all vertices opaque) to 100% (the farthest vertices fully transparent). The
 setting persists in the config file.
@@ -87,10 +87,37 @@ A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The band
 drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,
 and the pulse. The accent band shifts which clean vivid theme color each newly
 spawned figure takes.
-Broadband power sets the idle animation and transition speed, while low-frequency
-onset detection drives the kick envelope. Bass hits are more likely than other
-hits to trigger a parameter transition or a full scene change; a short cooldown
-keeps the transitions legible.
+Every band runs a spectral-flux onset detector. Each FFT frame compresses every
+bin to `log1p(magnitude)`, takes the positive difference from the previous frame,
+and sums it over the band's bins. The summed flux is smoothed by an attack/release
+exponential filter (5 ms attack, 50 ms release by default). A slow exponential
+average of the smoothed flux (200 ms by default) forms an adaptive threshold;
+sensitivity and a minimum threshold set how far a peak must rise, local-peak
+detection confirms the turn, and a 30 ms minimum gap prevents chatter. Each onset
+carries the peak's ratio to its adaptive threshold as its power.
+
+The kick and snare detectors each project the 16-band spectral flux through a
+drawable onset kernel and run the same attack/release envelope, slow adaptive
+average, and local-peak detector, with their own dedicated flux settings. The
+kick kernel defaults to bands 00-04 and the snare kernel to bands 05, 06, 10,
+and 12.
+The drop detector projects the 16 band levels through two drawable kernels: a
+low kernel and a high kernel. Each projection is normalized by its kernel weight
+sum, and the high-minus-low difference is averaged over a rolling window
+(1.0 s by default). The mean is multiplied by a confidence gain (1.0 by
+default), which scales it around zero before the threshold comparison. When the
+scaled mean reaches the confidence threshold (0.15 by default), eligibility
+latches high and stays high even if the confidence later falls; only a composite
+onset from a third, independent onset kernel can clear it and confirm the drop.
+A short deep gap and a long medium gap therefore contribute to the same
+confidence budget, and the threshold may be negative. Its onset kernel projects
+the per-band spectral flux and runs through the same attack/release envelope,
+slow adaptive average, and local-peak detector as the per-band onsets, but with
+its own dedicated flux settings. A kick emits a sequenced quake impulse and
+drives the kick envelope; a snare flips the figure's pitch baseline every Nth
+detection and chokes the kick; a drop always changes the scene, emits a vertical
+quake, and chokes the kick. Flip and quake are damped springs, so both actions
+overshoot slightly and settle.
 
 All envelopes are smoothed with fast attack and slower release. Shape changes
 crossfade and parameter changes ease toward their new targets. Every moving edge
@@ -152,15 +179,16 @@ Press `D` to show the live analysis panel. It refreshes once per completed FFT
 hop by default; `B` cycles through FFT-hop, 20, 10, 5, 2, and 1 Hz. The panel
 renders:
 
-- all sixteen smoothed bands with raw values and their scene roles. Each row
-  names what the band drives: `V` marks a dependency on the band value, `B` a
-  dependency through the bass onset detector, and `W` a dependency through the
-  wide onset detector.
+- all sixteen smoothed bands with raw values, their scene roles, and a short
+  onset-history strip left of each level bar. Each row names what the band
+  drives: `V` marks a dependency on the band value, `K` a kick sequence, `S` a
+  snare slot, and `D` the drop detector.
 - the live animation properties in a two-column grid: pulse, spin, pitch, roll,
   twist, bulge, ripple, shear, zoom, accent, line energy, jitter, phase, kick,
-  crossfade, style morph, and entrance
-- broadband, bass, and treble envelopes with raw levels in the footer, plus the
-  last hit, hit totals, scene name, and line and ribbon counts
+  flip, quake, crossfade, style morph, and entrance
+- broadband, bass, and treble envelopes with raw levels in the footer, plus
+  kick, snare, and drop hit totals, their trigger flashes, scene name, and line
+  and ribbon counts
 
 Hover a band or property to highlight it. Hovering a property also shows its
 description in the footer. Click an item to pin the inspector below the panel;
@@ -169,8 +197,10 @@ the selection.
 
 The inspector follows the selection:
 
-- selecting a band draws its smoothed and raw FFT history, any onset detector it
-  feeds, and every animation property whose state depends on that band
+- selecting a band draws its smoothed and raw level history, its raw and
+  smoothed spectral flux with the adaptive threshold, its onset ticks, any
+  confirmed detector it feeds, and every animation property whose state depends
+  on that band.
 - selecting a property draws its own history plus a graph for every band and
   envelope that feeds its computation
 - every property row carries small `M` and `S` buttons. `M` mutes that property
@@ -179,7 +209,7 @@ The inspector follows the selection:
   solo are temporary tuning that resets on restart.
 - every dependency graph carries a short caption naming how its result reaches
   the selected property, for example `×0.18 add to energy`, `rate ×1.8 add`, or
-  `switch: level & flux, gates KICK`
+  `raw + smoothed flux / threshold`
 - four or more dependency graphs wrap into two rows so their traces and captions
   stay legible
 - the property output graph carries small maximum buttons along its bottom
@@ -193,9 +223,10 @@ The inspector follows the selection:
   panes, the graph inspector gives up width first instead of hiding the tree.
   The tree shows the full algebra from inputs to the property value:
   multipliers (`×`), adders (`+`), clamps, smoothing/integration, and onset
-  switches with their thresholds, baselines, flux gates, and cooldown. Analysis
-  leaves show their live values, and onset leaves report `IDLE`, `ARMED`, or
-  `COOLDOWN`. Tree rows use the same line height as the analyzer band list.
+  switches with their kernel onset flux, gap confidence, or confirmation
+  window. Analysis leaves show their live values, and
+  onset leaves report `IDLE`, `ARMED`, `TRIGGER`, or `CHOKED`. Tree rows use the
+  same line height as the analyzer band list.
 - every mix point is editable at runtime. Component rows carry a mix badge at
   their right edge: `+` means the term is added to the mix point and `×` means
   it multiplies the result. Clicking the badge switches the mode in place;
@@ -208,7 +239,7 @@ The inspector follows the selection:
 - selecting a mix point branch instead of a component exposes
   `+ ADD INPUT TO <POINT>`. The new row starts as a `PWR ENVELOPE` term with a
   small gain and additive mixing; selecting it exposes an `INPUT` selector for
-  every band, envelope, flux, onset, kick, phase clock, and style value, plus
+  every band, envelope, raw level, onset, kick, phase clock, and style value, plus
   its own `EXTRA GAIN` slider, `MIX MODE` button, and `REMOVE EXTRA INPUT`
   button. Any number of extra inputs can be added to a point.
 - clicking a component row opens its adjustable parameters at the bottom of the
@@ -235,23 +266,35 @@ The inspector follows the selection:
 - attack uses a logarithmic slider over 0.1 to 50.0; release uses 0.1 to 20.0 so the short
   envelope times get most of the slider travel. Slider tracks and line-shaped
   thumbs are tall enough for comfortable dragging.
-- clicking a detector row or its `DETECTOR` leaf shows threshold, minimum flux,
-  flux gain, baseline ratio, and cooldown in the same bottom parameter section
-  of the tree pane used by ordinary components. No separate pane is created.
-  The flux gain scales the spectral flux before the minimum-flux gate, so it
-  changes how readily the switch fires without moving the threshold.
-- threshold changes made with sliders update the HUD readouts and persist through
+- clicking a detector row or its `DETECTOR` leaf shows that detector's parameters
+  in the same bottom parameter section of the tree pane used by ordinary
+  components. `FLUX ONSET` exposes attack, release, average, sensitivity,
+  minimum threshold, and minimum gap. `KICK` exposes its six dedicated
+  onset-flux settings, a kick kernel bank, snare and drop choke times, quake
+  multiplier, quake sequence length, and quake spring. `SNARE` exposes its six
+  dedicated onset-flux settings, a snare kernel bank, flip count, choke, and
+  flip spring. `DROP` exposes the gap window, confidence gain, confidence
+  threshold, its six dedicated onset-flux settings, and quake multiplier, plus
+  three kernel banks (`LOW`, `HIGH`, `ONSET`). Press and drag across a bank to
+  draw its shape; the brush interpolates across columns and release ends the
+  stroke. No separate pane is created. Selecting `KICK`, `SNARE`, or `DROP`
+  (or its `DETECTOR` leaf) switches the inspector extension to that detector's
+  traces. Kick and snare show the composite kernel onset flux against its
+  adaptive threshold, plus the trigger flash. Drop shows the low and high
+  projections, their difference, window confidence, latched eligibility,
+  composite onset flux and threshold, and trigger flash. The header reports the
+  detector state, flux or gap values against the threshold, hit total, and last
+  power.
+- detector changes made with sliders update the HUD readouts and persist through
   the same config field as the `G` / `H` and `J` / `K` hotkeys. Envelope rates,
   kick decay, style values, component gains, band routing, input shaping, mix
-  modes, extra inputs, base values, property mutes, onset flux gain, and adaptive
-  reference state are runtime tuning and reset on restart.
-- onset graphs carry the detector baseline and threshold, and every graph uses
-  the same four-second display-rate history. A dedicated `BASS ONSET` or
-  `WIDE ONSET` graph plots the three switch gates as ratios against one: the
-  main trace is raw level over threshold, the pale trace is level over the
-  baseline-ratio trigger, and the yellow trace is flux times gain over minimum
-  flux. A red strip along the top marks cooldown, so a blocked switch is visible
-  even when all gates are open.
+  modes, extra inputs, base values, property mutes, and adaptive reference state
+  are runtime tuning and reset on restart.
+- onset graphs show the decaying trigger flash and mark confirmed triggers along
+  the top. The band flux graph shows raw and smoothed flux plus the adaptive
+  threshold, and marks each onset. Every graph uses the same four-second
+  display-rate history, and each band row's onset strip covers the last 0.6
+  seconds, marking only full-opacity trigger blocks at confirmed flux peaks.
 
 ![Wireframe visualizer with analysis debug panel](./assets/visualizer-debug.png)
 
