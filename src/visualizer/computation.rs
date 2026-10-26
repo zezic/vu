@@ -1,11 +1,25 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
 use strum::{EnumCount, VariantArray};
 
 use super::{style_value, Property, Style, BAND_COUNT};
 
+/// Reject values that the inspector could never produce.
+pub(super) fn validate_value(
+    value: f32,
+    (minimum, maximum): (f32, f32),
+    name: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        value.is_finite() && (minimum..=maximum).contains(&value),
+        "{name} must be finite and between {minimum} and {maximum}"
+    );
+    Ok(())
+}
+
 /// One non-analysis value that participates in a property computation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum StyleInput {
     AxisX,
     AxisY,
@@ -150,7 +164,20 @@ impl FluxSetting {
 }
 
 /// A semantic band input. The actual FFT band is routed by `BandRouting`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::EnumCount, strum::VariantArray)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    strum::EnumCount,
+    strum::VariantArray,
+)]
 pub enum BandComponent {
     Spin,
     Pitch,
@@ -210,7 +237,7 @@ impl BandComponent {
 }
 
 /// Maps each semantic band input onto one of the sixteen FFT bands.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BandRouting([usize; BandComponent::COUNT]);
 
 impl Default for BandRouting {
@@ -235,6 +262,57 @@ impl std::ops::IndexMut<BandComponent> for BandRouting {
     }
 }
 
+impl BandRouting {
+    pub fn validate(self) -> anyhow::Result<()> {
+        for &component in BandComponent::VARIANTS {
+            anyhow::ensure!(
+                self[component] < BAND_COUNT,
+                "{} must be routed to a band below {BAND_COUNT}",
+                component.label()
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for BandRouting {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        for &component in BandComponent::VARIANTS {
+            let band = self[component];
+            if band != component.default_band() {
+                map.serialize_entry(&component, &band)?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for BandRouting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let overrides = BTreeMap::<BandComponent, usize>::deserialize(deserializer)?;
+        let mut routing = Self::default();
+        for (component, band) in overrides {
+            if band >= BAND_COUNT {
+                return Err(serde::de::Error::custom(format!(
+                    "{} must be routed to a band below {BAND_COUNT}",
+                    component.label()
+                )));
+            }
+            routing[component] = band;
+        }
+        Ok(routing)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EnvelopeTarget {
     Band(BandComponent),
@@ -244,7 +322,20 @@ pub enum EnvelopeTarget {
 }
 
 /// One multiplier attached to an incoming component.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::EnumCount, strum::VariantArray)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    strum::EnumCount,
+    strum::VariantArray,
+)]
 pub enum Gain {
     PulsePower,
     PulseBass,
@@ -365,7 +456,7 @@ impl Gain {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gains([f32; Gain::COUNT]);
 
 impl Default for Gains {
@@ -390,8 +481,55 @@ impl std::ops::IndexMut<Gain> for Gains {
     }
 }
 
+impl Gains {
+    pub fn validate(self) -> anyhow::Result<()> {
+        for &gain in Gain::VARIANTS {
+            validate_value(self[gain], gain.range(), &format!("{gain:?} gain"))?;
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for Gains {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        for &gain in Gain::VARIANTS {
+            let value = self[gain];
+            if value != gain.default_value() {
+                map.serialize_entry(&gain, &value)?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Gains {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let overrides = BTreeMap::<Gain, f32>::deserialize(deserializer)?;
+        let mut gains = Self::default();
+        for (gain, value) in overrides {
+            let (minimum, maximum) = gain.range();
+            if !value.is_finite() || !(minimum..=maximum).contains(&value) {
+                return Err(serde::de::Error::custom(format!(
+                    "{gain:?} gain must be finite and between {minimum} and {maximum}"
+                )));
+            }
+            gains[gain] = value;
+        }
+        Ok(gains)
+    }
+}
+
 /// Pre-envelope response curve applied to a normalized 0..1 input.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Curve {
     Linear,
     Inflated,
@@ -464,7 +602,7 @@ impl Curve {
 }
 
 /// How an input shape chooses its low/high references.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReferenceTracking {
     #[default]
     Manual,
@@ -483,7 +621,8 @@ impl ReferenceTracking {
 
 /// Rescales a raw analysis value into 0..1 and optionally bends it before the
 /// envelope smoothing stage.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InputShape {
     pub low: f32,
     pub high: f32,
@@ -573,6 +712,36 @@ impl InputShape {
 
     pub fn toggle_adaptive(&mut self) {
         self.tracking = self.tracking.toggled();
+    }
+
+    /// The shape as it belongs in the config. Adaptive references track the
+    /// incoming audio, so their live positions are not settings.
+    pub fn persisted(self) -> Self {
+        if self.is_adaptive() {
+            Self {
+                low: 0.0,
+                high: 1.0,
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+
+    pub fn validate(self) -> anyhow::Result<()> {
+        validate_value(self.low, (0.0, 0.99), "input shape low reference")?;
+        validate_value(self.high, (0.01, 1.0), "input shape high reference")?;
+        anyhow::ensure!(
+            self.high - self.low >= Self::MIN_SPAN,
+            "input shape references must be at least {} apart",
+            Self::MIN_SPAN
+        );
+        validate_value(
+            self.amount,
+            (0.0, Curve::MAX_AMOUNT),
+            "input shape curve amount",
+        )?;
+        Ok(())
     }
 }
 
@@ -712,8 +881,8 @@ impl Parameter {
             Self::InputCurve(_) => (0.0, 3.0),
             Self::InputAmount(_) => (0.0, Curve::MAX_AMOUNT),
             Self::Constant(_) => (-2.0, 2.0),
-            Self::ExtraSource(_) => (0.0, (SELECTABLE_INPUTS.len() - 1) as f32),
-            Self::ExtraGain(_) => (0.0, 5.0),
+            Self::ExtraSource(_) => (0.0, (SelectableInput::ALL.len() - 1) as f32),
+            Self::ExtraGain(_) => (EXTRA_GAIN_MIN, EXTRA_GAIN_MAX),
         }
     }
 
@@ -924,56 +1093,117 @@ impl Input {
         }
     }
 
+    pub fn selectable(self) -> Option<SelectableInput> {
+        Some(match self {
+            Self::Band(component) => SelectableInput::Band(component),
+            Self::BassBands => SelectableInput::BassBands,
+            Self::Power => SelectableInput::Power,
+            Self::PowerLevel => SelectableInput::PowerLevel,
+            Self::Bass => SelectableInput::Bass,
+            Self::BassLevel => SelectableInput::BassLevel,
+            Self::Kick => SelectableInput::Kick,
+            Self::KickOnset => SelectableInput::KickOnset,
+            Self::SnareOnset => SelectableInput::SnareOnset,
+            Self::DropOnset => SelectableInput::DropOnset,
+            Self::PhaseClock => SelectableInput::PhaseClock,
+            Self::Style(style) => SelectableInput::Style(style),
+            Self::Property(_) | Self::Constant(_) => return None,
+        })
+    }
+
     pub fn selectable_index(self) -> Option<usize> {
-        SELECTABLE_INPUTS
-            .iter()
-            .position(|selectable| *selectable == self)
+        self.selectable().map(SelectableInput::index)
     }
 
     pub fn from_selectable(index: usize) -> Self {
-        SELECTABLE_INPUTS[index.min(SELECTABLE_INPUTS.len() - 1)]
+        SelectableInput::from_index(index).input()
     }
 }
 
-/// Inputs that can be appended to a mix point. Constants and other properties
-/// stay out of the picker: a constant is already a default term, and a property
-/// input would introduce evaluation order and cycles.
-pub const SELECTABLE_INPUTS: [Input; 31] = [
-    Input::Band(BandComponent::Spin),
-    Input::Band(BandComponent::Pitch),
-    Input::Band(BandComponent::Roll),
-    Input::Band(BandComponent::Twist),
-    Input::Band(BandComponent::Bulge),
-    Input::Band(BandComponent::Ripple),
-    Input::Band(BandComponent::Shear),
-    Input::Band(BandComponent::Zoom),
-    Input::Band(BandComponent::Accent),
-    Input::Band(BandComponent::Line),
-    Input::Band(BandComponent::Jitter),
-    Input::Band(BandComponent::Phase),
-    Input::BassBands,
-    Input::Power,
-    Input::PowerLevel,
-    Input::Bass,
-    Input::BassLevel,
-    Input::Kick,
-    Input::KickOnset,
-    Input::SnareOnset,
-    Input::DropOnset,
-    Input::PhaseClock,
-    Input::Style(StyleInput::AxisX),
-    Input::Style(StyleInput::AxisY),
-    Input::Style(StyleInput::AxisZ),
-    Input::Style(StyleInput::PhaseRate),
-    Input::Style(StyleInput::TwistSign),
-    Input::Style(StyleInput::ShearSign),
-    Input::Style(StyleInput::DeformBias),
-    Input::Style(StyleInput::ZoomBias),
-    Input::Style(StyleInput::JitterBias),
-];
+/// An input that can be appended to a mix point. The persisted config keeps
+/// this semantic form instead of the picker position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SelectableInput {
+    Band(BandComponent),
+    BassBands,
+    Power,
+    PowerLevel,
+    Bass,
+    BassLevel,
+    Kick,
+    KickOnset,
+    SnareOnset,
+    DropOnset,
+    PhaseClock,
+    Style(StyleInput),
+}
+
+impl SelectableInput {
+    pub const ALL: [Self; 31] = [
+        Self::Band(BandComponent::Spin),
+        Self::Band(BandComponent::Pitch),
+        Self::Band(BandComponent::Roll),
+        Self::Band(BandComponent::Twist),
+        Self::Band(BandComponent::Bulge),
+        Self::Band(BandComponent::Ripple),
+        Self::Band(BandComponent::Shear),
+        Self::Band(BandComponent::Zoom),
+        Self::Band(BandComponent::Accent),
+        Self::Band(BandComponent::Line),
+        Self::Band(BandComponent::Jitter),
+        Self::Band(BandComponent::Phase),
+        Self::BassBands,
+        Self::Power,
+        Self::PowerLevel,
+        Self::Bass,
+        Self::BassLevel,
+        Self::Kick,
+        Self::KickOnset,
+        Self::SnareOnset,
+        Self::DropOnset,
+        Self::PhaseClock,
+        Self::Style(StyleInput::AxisX),
+        Self::Style(StyleInput::AxisY),
+        Self::Style(StyleInput::AxisZ),
+        Self::Style(StyleInput::PhaseRate),
+        Self::Style(StyleInput::TwistSign),
+        Self::Style(StyleInput::ShearSign),
+        Self::Style(StyleInput::DeformBias),
+        Self::Style(StyleInput::ZoomBias),
+        Self::Style(StyleInput::JitterBias),
+    ];
+
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|input| *input == self)
+            .expect("every selectable input is listed")
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        Self::ALL[index.min(Self::ALL.len() - 1)]
+    }
+
+    pub fn input(self) -> Input {
+        match self {
+            Self::Band(component) => Input::Band(component),
+            Self::BassBands => Input::BassBands,
+            Self::Power => Input::Power,
+            Self::PowerLevel => Input::PowerLevel,
+            Self::Bass => Input::Bass,
+            Self::BassLevel => Input::BassLevel,
+            Self::Kick => Input::Kick,
+            Self::KickOnset => Input::KickOnset,
+            Self::SnareOnset => Input::SnareOnset,
+            Self::DropOnset => Input::DropOnset,
+            Self::PhaseClock => Input::PhaseClock,
+            Self::Style(style) => Input::Style(style),
+        }
+    }
+}
 
 /// How one term enters its mix point.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Mix {
     Add,
     Mul,
@@ -1001,7 +1231,20 @@ impl Mix {
 /// in a multiplicative point the additive terms offset the product. A pure sum
 /// or product is therefore just a point whose terms all share the primary
 /// operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, EnumCount, VariantArray)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    EnumCount,
+    VariantArray,
+    Serialize,
+    Deserialize,
+)]
 pub enum MixPoint {
     PulseEntrance,
     PulseEnergy,
@@ -1089,7 +1332,9 @@ pub struct Extra {
     pub mix: Mix,
 }
 
-/// Default gain and mix of a newly added input.
+/// Gain range and default of a user-added mix input.
+const EXTRA_GAIN_MIN: f32 = 0.0;
+const EXTRA_GAIN_MAX: f32 = 5.0;
 const EXTRA_GAIN: f32 = 0.1;
 
 /// Runtime overrides and user-added terms for every mix point.
@@ -1276,6 +1521,146 @@ impl Mixer {
             Mix::Mul if multiplied => product + if summed { sum } else { 0.0 },
             Mix::Mul => sum,
         }
+    }
+}
+
+/// Persisted mixer adjustments: term modes, constant values, and user-added
+/// inputs. Anything absent keeps its built-in definition.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MixerTuning {
+    modes: Vec<MixModeTuning>,
+    constants: Vec<ConstantTuning>,
+    extras: BTreeMap<MixPoint, Vec<ExtraTuning>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MixModeTuning {
+    point: MixPoint,
+    index: usize,
+    mix: Mix,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConstantTuning {
+    point: MixPoint,
+    index: usize,
+    value: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtraTuning {
+    input: SelectableInput,
+    gain: f32,
+    mix: Mix,
+}
+
+impl Mixer {
+    /// The persisted part of this mixer. Extra serials are session handles and
+    /// are reassigned when the tuning is applied.
+    pub fn tuning(&self) -> MixerTuning {
+        MixerTuning {
+            modes: self
+                .modes
+                .iter()
+                .map(|(&(point, index), &mix)| MixModeTuning { point, index, mix })
+                .collect(),
+            constants: self
+                .constants
+                .iter()
+                .map(|(&(point, index), &value)| ConstantTuning {
+                    point,
+                    index,
+                    value,
+                })
+                .collect(),
+            extras: self
+                .extras
+                .iter()
+                .map(|(&point, extras)| {
+                    let extras = extras
+                        .iter()
+                        .map(|(_, extra)| ExtraTuning {
+                            input: extra
+                                .input
+                                .selectable()
+                                .expect("extra inputs are picked from the selectable list"),
+                            gain: extra.gain,
+                            mix: extra.mix,
+                        })
+                        .collect();
+                    (point, extras)
+                })
+                .collect(),
+        }
+    }
+}
+
+impl MixerTuning {
+    pub fn to_mixer(&self) -> anyhow::Result<Mixer> {
+        let mut mixer = Mixer::default();
+        let mut mode_keys = BTreeSet::new();
+        for mode in &self.modes {
+            Self::validate_fixed_index(mode.point, mode.index)?;
+            anyhow::ensure!(
+                mode_keys.insert((mode.point, mode.index)),
+                "duplicate mix mode for {} term {}",
+                mode.point.title(),
+                mode.index
+            );
+            mixer.set_mode(Contribution::Fixed(mode.point, mode.index), mode.mix);
+        }
+        let mut constant_keys = BTreeSet::new();
+        for constant in &self.constants {
+            Self::validate_fixed_index(constant.point, constant.index)?;
+            let contribution = Contribution::Fixed(constant.point, constant.index);
+            anyhow::ensure!(
+                constant.point.contributions()[constant.index]
+                    .constant()
+                    .is_some(),
+                "{} term {} is not a constant",
+                constant.point.title(),
+                constant.index
+            );
+            anyhow::ensure!(
+                constant_keys.insert((constant.point, constant.index)),
+                "duplicate constant value for {} term {}",
+                constant.point.title(),
+                constant.index
+            );
+            validate_value(
+                constant.value,
+                Parameter::Constant(contribution).range(),
+                "constant term value",
+            )?;
+            mixer.set_constant_value(contribution, constant.value);
+        }
+        for (&point, extras) in &self.extras {
+            for extra in extras {
+                validate_value(
+                    extra.gain,
+                    (EXTRA_GAIN_MIN, EXTRA_GAIN_MAX),
+                    "extra input gain",
+                )?;
+                let id = mixer.add_extra(point);
+                mixer.set_extra_input(id, extra.input.input());
+                mixer.set_extra_gain(id, extra.gain);
+                mixer.set_mode(Contribution::Extra(id), extra.mix);
+            }
+        }
+        Ok(mixer)
+    }
+
+    fn validate_fixed_index(point: MixPoint, index: usize) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            index < point.contributions().len(),
+            "{} has no term {index}",
+            point.title()
+        );
+        Ok(())
     }
 }
 
@@ -2464,15 +2849,53 @@ mod tests {
 
     #[test]
     fn selectable_extra_inputs_are_unique() {
-        for (index, input) in SELECTABLE_INPUTS.iter().enumerate() {
-            assert_eq!(input.selectable_index(), Some(index));
+        for (index, input) in SelectableInput::ALL.iter().enumerate() {
+            assert_eq!(input.index(), index);
+            assert_eq!(input.input().selectable(), Some(*input));
             assert_eq!(
-                SELECTABLE_INPUTS
+                SelectableInput::ALL
                     .iter()
-                    .filter(|candidate| candidate == &input)
+                    .filter(|candidate| *candidate == input)
                     .count(),
                 1
             );
         }
+    }
+
+    #[test]
+    fn mixer_tuning_round_trips_overrides_and_extras() {
+        let point = MixPoint::PulseEnergy;
+        let base = Contribution::Fixed(point, 3);
+        let mut mixer = Mixer::default();
+        mixer.set_mode(Contribution::Fixed(point, 0), Mix::Mul);
+        mixer.set_constant_value(base, 0.4);
+        let extra = mixer.add_extra(MixPoint::SpinSpeed);
+        mixer.set_extra_input(extra, Input::Band(BandComponent::Bulge));
+        mixer.set_extra_gain(extra, 1.5);
+        mixer.set_mode(Contribution::Extra(extra), Mix::Mul);
+
+        let tuning = mixer.tuning();
+        let restored = tuning.to_mixer().unwrap();
+        assert_eq!(restored.tuning(), tuning);
+        assert_eq!(restored.mode(Contribution::Fixed(point, 0)), Mix::Mul);
+        assert_eq!(restored.constant_value(base), Some(0.4));
+        let restored_extra = restored
+            .extras(MixPoint::SpinSpeed)
+            .next()
+            .expect("the extra input survives the round trip");
+        assert_eq!(restored_extra.1.input, Input::Band(BandComponent::Bulge));
+        assert_eq!(restored_extra.1.gain, 1.5);
+        assert_eq!(restored_extra.1.mix, Mix::Mul);
+    }
+
+    #[test]
+    fn mixer_tuning_rejects_unknown_fixed_terms() {
+        let mut tuning = MixerTuning::default();
+        tuning.modes.push(MixModeTuning {
+            point: MixPoint::PulseEnergy,
+            index: 99,
+            mix: Mix::Mul,
+        });
+        assert!(tuning.to_mixer().is_err());
     }
 }

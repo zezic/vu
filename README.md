@@ -206,7 +206,7 @@ The inspector follows the selection:
 - every property row carries small `M` and `S` buttons. `M` mutes that property
   so it contributes its neutral value, and `S` solos it so every property that
   is not soloed is muted. Rows that are currently silenced dim, and mute and
-  solo are temporary tuning that resets on restart.
+  solo persist with the rest of the inspector tuning.
 - every dependency graph carries a short caption naming how its result reaches
   the selected property, for example `×0.18 add to energy`, `rate ×1.8 add`, or
   `raw + smoothed flux / threshold`
@@ -285,11 +285,14 @@ The inspector follows the selection:
   composite onset flux and threshold, and trigger flash. The header reports the
   detector state, flux or gap values against the threshold, hit total, and last
   power.
-- detector changes made with sliders update the HUD readouts and persist through
-  the same config field as the `G` / `H` and `J` / `K` hotkeys. Envelope rates,
-  kick decay, style values, component gains, band routing, input shaping, mix
-  modes, extra inputs, base values, property mutes, and adaptive reference state
-  are runtime tuning and reset on restart.
+- every inspector edit persists in the config: detector changes (also reachable
+  through the `G` / `H` and `J` / `K` hotkeys), envelope rates, kick decay, style
+  values, component gains, band routing, input shaping, mix modes, extra inputs,
+  base values, property mutes, solo state, and adaptive reference tracking. A
+  tuned style value is applied to the current figure and to every figure spawned
+  by a later drop; untuned style values keep their random variation. Adaptive
+  reference positions are tracking state, so only the `AUTO REFS` choice is
+  stored and the references adapt again after a restart.
 - onset graphs show the decaying trigger flash and mark confirmed triggers along
   the top. The band flux graph shows raw and smoothed flux plus the adaptive
   threshold, and marks each onset. Every graph uses the same four-second

@@ -6,11 +6,12 @@ mod geometry;
 mod renderer;
 mod spectrum;
 
-use computation::MixContext;
+use computation::{validate_value, MixContext};
 pub use computation::{
     BandComponent, BandRouting, ComputeNode, Contribution, ContributionSpec, Curve, Detector,
     EnvelopeTarget, Extra, ExtraRef, FluxSetting, Gain, Gains, Input, InputShape, Mix, MixPoint,
-    Mixer, Parameter, ReferenceTracking, Source, StyleInput, TreeTarget, SELECTABLE_INPUTS,
+    Mixer, MixerTuning, Parameter, ReferenceTracking, SelectableInput, Source, StyleInput,
+    TreeTarget,
 };
 pub use detection::{
     DetectorKernel, DetectorSettings, DropKernel, DropKernels, DropStatus, OnsetFluxStatus,
@@ -24,7 +25,10 @@ pub use detection::{
 };
 use detection::{OnsetBank, QuakeSequence, Spring};
 
-use std::{collections::VecDeque, f32::consts::TAU};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    f32::consts::TAU,
+};
 
 use serde::{Deserialize, Serialize};
 use strum::{EnumCount, VariantArray};
@@ -191,6 +195,222 @@ impl From<NearOpacity> for f32 {
     }
 }
 
+/// Persisted envelope times and pre-envelope shaping for one analysis input.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputTuning {
+    pub attack: f32,
+    pub release: f32,
+    pub shape: InputShape,
+}
+
+impl InputTuning {
+    fn band(index: usize) -> Self {
+        Self {
+            attack: 14.0,
+            release: 5.0 + 5.0 * index as f32 / (BAND_COUNT - 1) as f32,
+            shape: InputShape::adaptive(),
+        }
+    }
+
+    fn power() -> Self {
+        Self {
+            attack: 18.0,
+            release: 4.5,
+            shape: InputShape::default(),
+        }
+    }
+
+    fn bass() -> Self {
+        Self {
+            attack: 20.0,
+            release: 7.0,
+            shape: InputShape::default(),
+        }
+    }
+
+    fn treble() -> Self {
+        Self {
+            attack: 16.0,
+            release: 3.5,
+            shape: InputShape::default(),
+        }
+    }
+
+    fn validate(self, name: &str) -> anyhow::Result<()> {
+        validate_value(
+            self.attack,
+            Parameter::Attack(EnvelopeTarget::Power).range(),
+            &format!("{name} attack"),
+        )?;
+        validate_value(
+            self.release,
+            Parameter::Release(EnvelopeTarget::Power).range(),
+            &format!("{name} release"),
+        )?;
+        self.shape
+            .validate()
+            .map_err(|error| error.context(format!("{name} shape")))?;
+        Ok(())
+    }
+}
+
+/// Persisted envelope and shape settings for every analysis input.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InputTunings {
+    pub bands: [InputTuning; BAND_COUNT],
+    pub power: InputTuning,
+    pub bass: InputTuning,
+    pub treble: InputTuning,
+}
+
+impl Default for InputTunings {
+    fn default() -> Self {
+        Self {
+            bands: std::array::from_fn(InputTuning::band),
+            power: InputTuning::power(),
+            bass: InputTuning::bass(),
+            treble: InputTuning::treble(),
+        }
+    }
+}
+
+impl InputTunings {
+    fn validate(&self) -> anyhow::Result<()> {
+        for (index, input) in self.bands.iter().enumerate() {
+            input.validate(&format!("band {index}"))?;
+        }
+        self.power.validate("power")?;
+        self.bass.validate("bass")?;
+        self.treble.validate("treble")?;
+        Ok(())
+    }
+}
+
+/// Persisted property mute and solo state.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PropertyGatesTuning {
+    muted: BTreeSet<Property>,
+    soloed: BTreeSet<Property>,
+}
+
+impl From<PropertyGates> for PropertyGatesTuning {
+    fn from(gates: PropertyGates) -> Self {
+        Self {
+            muted: Property::VARIANTS
+                .iter()
+                .copied()
+                .filter(|property| gates.is_muted(*property))
+                .collect(),
+            soloed: Property::VARIANTS
+                .iter()
+                .copied()
+                .filter(|property| gates.is_soloed(*property))
+                .collect(),
+        }
+    }
+}
+
+impl From<PropertyGatesTuning> for PropertyGates {
+    fn from(gates: PropertyGatesTuning) -> Self {
+        let mut result = Self::default();
+        for property in gates.muted {
+            result.muted[property.index()] = true;
+        }
+        for property in gates.soloed {
+            result.soloed[property.index()] = true;
+        }
+        result
+    }
+}
+
+/// Style values pinned from the inspector. Values that are absent keep the
+/// per-figure random variation.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StyleTuning(BTreeMap<StyleInput, f32>);
+
+impl StyleTuning {
+    fn set(&mut self, input: StyleInput, value: f32) {
+        self.0.insert(input, value);
+    }
+
+    fn apply(&self, style: &mut Style) {
+        for (&input, &value) in &self.0 {
+            set_style_value(style, input, value);
+        }
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        for (&input, &value) in &self.0 {
+            validate_value(
+                value,
+                Parameter::Style(input).range(),
+                &format!("{} style", Parameter::Style(input).label()),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Everything the inspector can tune that survives a restart.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "VisualizerTuningRaw")]
+pub struct VisualizerTuning {
+    pub inputs: InputTunings,
+    /// Exponential decay rate of the kick envelope.
+    pub kick_decay: f32,
+    pub gains: Gains,
+    pub routing: BandRouting,
+    pub mixer: MixerTuning,
+    pub gates: PropertyGatesTuning,
+    pub style: StyleTuning,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct VisualizerTuningRaw {
+    inputs: InputTunings,
+    kick_decay: f32,
+    gains: Gains,
+    routing: BandRouting,
+    mixer: MixerTuning,
+    gates: PropertyGatesTuning,
+    style: StyleTuning,
+}
+
+impl TryFrom<VisualizerTuningRaw> for VisualizerTuning {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: VisualizerTuningRaw) -> Result<Self, Self::Error> {
+        let tuning = Self {
+            inputs: raw.inputs,
+            kick_decay: raw.kick_decay,
+            gains: raw.gains,
+            routing: raw.routing,
+            mixer: raw.mixer,
+            gates: raw.gates,
+            style: raw.style,
+        };
+        tuning.validate()?;
+        Ok(tuning)
+    }
+}
+
+impl VisualizerTuning {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.inputs.validate()?;
+        validate_value(self.kick_decay, Parameter::KickDecay.range(), "kick decay")?;
+        self.gains.validate()?;
+        self.routing.validate()?;
+        self.mixer.to_mixer()?;
+        self.style.validate()?;
+        Ok(())
+    }
+}
+
 /// One exposure-swept line, in physical pixels, uploaded as a vertex instance.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -344,7 +564,20 @@ impl BandRole {
 /// One animation value that the analyzer drives. The rendering code keeps no
 /// separate registry: this enum owns the name, the description shown in the
 /// inspector, and the analysis sources that feed its current value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, EnumCount, VariantArray)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    EnumCount,
+    VariantArray,
+    Serialize,
+    Deserialize,
+)]
 pub enum Property {
     Pulse,
     Spin,
@@ -950,6 +1183,7 @@ pub struct Visualizer {
     power_shape: InputShape,
     bass_shape: InputShape,
     treble_shape: InputShape,
+    style_tuning: StyleTuning,
     time: f32,
     palette: Palette,
     depth_fade: DepthFade,
@@ -967,16 +1201,18 @@ pub struct Visualizer {
 
 impl Visualizer {
     pub fn new() -> Self {
-        let bands =
-            std::array::from_fn(|index| Envelope::new(14.0, 5.0 + 5.0 * index as f32 / 15.0));
+        let tuning = VisualizerTuning::default();
+        let inputs = tuning.inputs;
         let mut rng = Rng::new(0x005e_ed0f_7e5e_1e55u64);
         let scene = Scene::new(&mut rng);
-        Self {
+        let mut visualizer = Self {
             analyzer: SpectrumAnalyzer::new(48_000),
-            bands,
-            power: Envelope::new(18.0, 4.5),
-            bass: Envelope::new(20.0, 7.0),
-            treble: Envelope::new(16.0, 3.5),
+            bands: inputs
+                .bands
+                .map(|input| Envelope::new(input.attack, input.release)),
+            power: Envelope::new(inputs.power.attack, inputs.power.release),
+            bass: Envelope::new(inputs.bass.attack, inputs.bass.release),
+            treble: Envelope::new(inputs.treble.attack, inputs.treble.release),
             detectors: DetectorSettings::default(),
             onsets: OnsetBank::new(),
             pending_actions: VecDeque::with_capacity(MAX_PENDING_ACTIONS),
@@ -984,21 +1220,25 @@ impl Visualizer {
             scene,
             frames: ShutterWindow::default(),
             kick: 0.0,
-            kick_decay: 3.2,
+            kick_decay: tuning.kick_decay,
             flip: Spring::default(),
             flip_target: 0.0,
             flip_count: 0,
             quake_x: Spring::default(),
             quake_y: Spring::default(),
             kick_sequence: QuakeSequence::default(),
-            gains: Gains::default(),
-            routing: BandRouting::default(),
-            mixer: Mixer::default(),
-            property_gates: PropertyGates::default(),
-            band_shapes: std::array::from_fn(|_| InputShape::adaptive()),
-            power_shape: InputShape::default(),
-            bass_shape: InputShape::default(),
-            treble_shape: InputShape::default(),
+            gains: tuning.gains,
+            routing: tuning.routing,
+            mixer: tuning
+                .mixer
+                .to_mixer()
+                .expect("the default visualizer tuning is valid"),
+            property_gates: tuning.gates.into(),
+            band_shapes: inputs.bands.map(|input| input.shape),
+            power_shape: inputs.power.shape,
+            bass_shape: inputs.bass.shape,
+            treble_shape: inputs.treble.shape,
+            style_tuning: tuning.style,
             time: 0.0,
             palette: Palette::from_theme(ThemeId::default()),
             depth_fade: DepthFade::default(),
@@ -1012,6 +1252,85 @@ impl Visualizer {
             debug_history: DebugHistory::default(),
             lines: Vec::with_capacity(MAX_LINES),
             ribbons: Vec::with_capacity(MAX_RIBBONS),
+        };
+        visualizer.apply_style_tuning();
+        visualizer
+    }
+
+    /// Load persisted inspector tuning. The value is validated before it
+    /// reaches the visualizer.
+    pub fn set_tuning(&mut self, tuning: VisualizerTuning) {
+        tuning
+            .validate()
+            .expect("visualizer tuning is validated before it reaches the visualizer");
+        let inputs = tuning.inputs;
+        for (envelope, input) in self.bands.iter_mut().zip(inputs.bands) {
+            envelope.attack = input.attack;
+            envelope.release = input.release;
+        }
+        self.power.attack = inputs.power.attack;
+        self.power.release = inputs.power.release;
+        self.bass.attack = inputs.bass.attack;
+        self.bass.release = inputs.bass.release;
+        self.treble.attack = inputs.treble.attack;
+        self.treble.release = inputs.treble.release;
+        self.band_shapes = inputs.bands.map(|input| input.shape);
+        self.power_shape = inputs.power.shape;
+        self.bass_shape = inputs.bass.shape;
+        self.treble_shape = inputs.treble.shape;
+        self.kick_decay = tuning.kick_decay;
+        self.gains = tuning.gains;
+        self.routing = tuning.routing;
+        self.mixer = tuning
+            .mixer
+            .to_mixer()
+            .expect("validated mixer tuning builds a mixer");
+        self.property_gates = tuning.gates.into();
+        self.style_tuning = tuning.style;
+        self.apply_style_tuning();
+    }
+
+    /// The live inspector tuning, for config sync.
+    pub fn tuning(&self) -> VisualizerTuning {
+        VisualizerTuning {
+            inputs: InputTunings {
+                bands: std::array::from_fn(|index| InputTuning {
+                    attack: self.bands[index].attack,
+                    release: self.bands[index].release,
+                    shape: self.band_shapes[index].persisted(),
+                }),
+                power: InputTuning {
+                    attack: self.power.attack,
+                    release: self.power.release,
+                    shape: self.power_shape.persisted(),
+                },
+                bass: InputTuning {
+                    attack: self.bass.attack,
+                    release: self.bass.release,
+                    shape: self.bass_shape.persisted(),
+                },
+                treble: InputTuning {
+                    attack: self.treble.attack,
+                    release: self.treble.release,
+                    shape: self.treble_shape.persisted(),
+                },
+            },
+            kick_decay: self.kick_decay,
+            gains: self.gains,
+            routing: self.routing,
+            mixer: self.mixer.tuning(),
+            gates: self.property_gates.into(),
+            style: self.style_tuning.clone(),
+        }
+    }
+
+    fn apply_style_tuning(&mut self) {
+        self.style_tuning.apply(&mut self.scene.current.style);
+        self.style_tuning
+            .apply(&mut self.scene.current.target_style);
+        if let Some(outgoing) = &mut self.scene.outgoing {
+            self.style_tuning.apply(&mut outgoing.style);
+            self.style_tuning.apply(&mut outgoing.target_style);
         }
     }
 
@@ -1395,6 +1714,7 @@ impl Visualizer {
             Parameter::Style(style) => {
                 set_style_value(&mut self.scene.current.style, style, value);
                 set_style_value(&mut self.scene.current.target_style, style, value);
+                self.style_tuning.set(style, value);
             }
             Parameter::Gain(gain) => self.gains[gain] = value,
             Parameter::BandSource(component) => {
@@ -1955,7 +2275,7 @@ impl Visualizer {
                 }
             }
             Action::Drop(power) => {
-                self.scene.change(&mut self.rng, accent);
+                self.scene.change(&mut self.rng, accent, &self.style_tuning);
                 if self.property_gates.plays(Property::Quake) {
                     self.quake_y
                         .impulse(power * self.detectors.drop_quake_factor);
@@ -2109,9 +2429,10 @@ impl Scene {
         }
     }
 
-    fn change(&mut self, rng: &mut Rng, accent: f32) {
+    fn change(&mut self, rng: &mut Rng, accent: f32, style_tuning: &StyleTuning) {
         let next = self.current.kind.next();
-        let target_style = Style::random(rng);
+        let mut target_style = Style::random(rng);
+        style_tuning.apply(&mut target_style);
         let tint = FigureTint::spawn(next, accent, rng);
         let mut entering = FigureRuntime::new(next, 0.0, target_style, tint);
         entering.pose.yaw += rng.signed() * 0.9;
@@ -3721,6 +4042,88 @@ mod tests {
         let amount = Parameter::InputAmount(EnvelopeTarget::Power);
         visualizer.set_parameter(amount, 100.0);
         assert_eq!(visualizer.parameter_value(amount), 8.0);
+    }
+
+    #[test]
+    fn default_tuning_is_valid() {
+        VisualizerTuning::default()
+            .validate()
+            .expect("the built-in visualizer defaults stay inside every parameter range");
+    }
+
+    #[test]
+    fn inspector_tuning_survives_a_config_round_trip() {
+        let mut visualizer = Visualizer::new();
+        visualizer.set_parameter(Parameter::KickDecay, 7.5);
+        visualizer.set_parameter(Parameter::Gain(Gain::SpinBand), 3.25);
+        visualizer.set_parameter(Parameter::BandSource(BandComponent::Spin), 9.0);
+        visualizer.set_parameter(Parameter::Attack(EnvelopeTarget::Power), 22.0);
+        visualizer.set_parameter(Parameter::Release(EnvelopeTarget::Bass), 8.0);
+        visualizer.set_parameter(Parameter::InputAmount(EnvelopeTarget::Power), 3.0);
+        visualizer.set_parameter(Parameter::Style(StyleInput::DeformBias), 1.25);
+        visualizer.toggle_adaptive(EnvelopeTarget::Power);
+        visualizer.toggle_property_mute(Property::Twist);
+        visualizer.toggle_property_solo(Property::Spin);
+        let base = Contribution::Fixed(MixPoint::PulseEnergy, 3);
+        visualizer.set_parameter(Parameter::Constant(base), 0.4);
+        let extra = visualizer.add_extra(MixPoint::SpinSpeed);
+        visualizer.set_parameter(
+            Parameter::ExtraSource(extra),
+            SelectableInput::Band(BandComponent::Bulge).index() as f32,
+        );
+        visualizer.set_parameter(Parameter::ExtraGain(extra), 1.5);
+        visualizer.toggle_contribution_mix(Contribution::Extra(extra));
+
+        let tuning = visualizer.tuning();
+        let text = ron::to_string(&tuning).expect("visualizer tuning serializes");
+        let decoded: VisualizerTuning = ron::from_str(&text).expect("visualizer tuning loads");
+        assert_eq!(decoded, tuning);
+
+        let mut restored = Visualizer::new();
+        restored.set_tuning(decoded.clone());
+        assert_eq!(restored.tuning(), decoded);
+        assert_eq!(restored.parameter_value(Parameter::KickDecay), 7.5);
+        assert_eq!(
+            restored.parameter_value(Parameter::Gain(Gain::SpinBand)),
+            3.25
+        );
+        assert_eq!(
+            restored.parameter_value(Parameter::BandSource(BandComponent::Spin)),
+            9.0
+        );
+        assert_eq!(restored.parameter_value(Parameter::Constant(base)), 0.4);
+        assert!(restored.property_muted(Property::Twist));
+        assert!(restored.property_soloed(Property::Spin));
+        let restored_extra = restored
+            .mixer
+            .extras(MixPoint::SpinSpeed)
+            .next()
+            .expect("the extra input is restored");
+        assert_eq!(restored_extra.1.input, Input::Band(BandComponent::Bulge));
+        assert_eq!(restored_extra.1.gain, 1.5);
+        assert_eq!(restored_extra.1.mix, Mix::Mul);
+    }
+
+    #[test]
+    fn adaptive_reference_drift_is_not_a_persisted_setting() {
+        let mut visualizer = Visualizer::new();
+        let before = visualizer.tuning();
+        for _ in 0..60 {
+            visualizer.band_shapes[0].observe(0.9, 1.0 / 60.0);
+        }
+        assert_ne!(visualizer.band_shapes[0].low, 0.0);
+        assert_eq!(visualizer.tuning(), before);
+    }
+
+    #[test]
+    fn a_pinned_style_value_reaches_every_spawned_figure() {
+        let mut visualizer = Visualizer::new();
+        visualizer.set_parameter(Parameter::Style(StyleInput::DeformBias), 1.25);
+        visualizer.handle_action(Action::Drop(1.0), 0.5);
+        assert!(
+            (visualizer.scene.current.target_style.deform_bias - 1.25).abs() < 1e-6,
+            "the drop keeps the tuned style value"
+        );
     }
 
     #[test]

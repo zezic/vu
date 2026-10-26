@@ -133,6 +133,9 @@ mod tests {
         config.edit().near_opacity = config
             .near_opacity
             .adjusted(crate::frame_schedule::Adjustment::Increase);
+        config.edit().tuning.kick_decay = 4.5;
+        config.edit().tuning.gains[crate::visualizer::Gain::SpinBand] = 2.5;
+        config.edit().tuning.routing[crate::visualizer::BandComponent::Spin] = 9;
         config.flush_if_due(config.last_write + SAVE_INTERVAL - Duration::from_millis(1))?;
         assert!(!path.exists());
         config.flush_if_due(config.last_write + SAVE_INTERVAL)?;
@@ -188,6 +191,15 @@ mod tests {
             "(near_opacity: 0.5)",
             "(near_opacity: 1.1)",
             "(near_opacity: NaN)",
+            "(tuning: (kick_decay: -1.0))",
+            "(tuning: (kick_decay: 21.0))",
+            "(tuning: (inputs: (power: (attack: 0.0, release: 4.5, \
+             shape: (low: 0.0, high: 1.0, curve: Linear, amount: 1.0, tracking: Manual))))))",
+            "(tuning: (inputs: (power: (attack: 18.0, release: 4.5, \
+             shape: (low: 0.8, high: 0.2, curve: Linear, amount: 1.0, tracking: Manual))))))",
+            "(tuning: (routing: { Spin: 16 }))",
+            "(tuning: (gains: { SpinBand: 20.0 }))",
+            "(tuning: (style: { DeformBias: 3.0 }))",
             "(frame_rate_limit: Fps99)",
             "(mode: Unknown)",
             "(peak_movement: Unknown)",
@@ -221,6 +233,10 @@ mod tests {
         assert_eq!(
             missing.near_opacity,
             crate::visualizer::NearOpacity::default()
+        );
+        assert_eq!(
+            missing.tuning,
+            crate::visualizer::VisualizerTuning::default()
         );
         Ok(())
     }

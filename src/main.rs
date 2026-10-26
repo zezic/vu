@@ -417,6 +417,10 @@ impl App {
                 if self.settings.detectors != detectors {
                     self.settings.edit().detectors = detectors;
                 }
+                let tuning = self.meter.visualizer_tuning();
+                if self.settings.tuning != tuning {
+                    self.settings.edit().tuning = tuning;
+                }
                 let now = Instant::now();
                 let frame_time = FrameTime::new(self.previous_frame, now);
                 self.previous_frame = now;

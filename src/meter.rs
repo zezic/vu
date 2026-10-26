@@ -822,6 +822,7 @@ impl Meter {
         let depth_fade_value = Readout::value(&mut fonts, &format!("{:>3}%", depth_fade.percent()));
         let near_opacity = config.near_opacity;
         visualizer.set_near_opacity(near_opacity);
+        visualizer.set_tuning(config.tuning.clone());
         let near_opacity_readout = Readout::new(&mut fonts, "Near Opacity", ["[U]", "[I]"]);
         let near_opacity_value =
             Readout::value(&mut fonts, &format!("{:>3}%", near_opacity.percent()));
@@ -1233,6 +1234,11 @@ impl Meter {
     /// Live detector settings, including slider edits, for config sync.
     pub fn detector_settings(&self) -> visualizer::DetectorSettings {
         self.detectors
+    }
+
+    /// Live inspector tuning, including slider edits, for config sync.
+    pub fn visualizer_tuning(&self) -> visualizer::VisualizerTuning {
+        self.visualizer.tuning()
     }
 
     fn set_parameter(&mut self, parameter: visualizer::Parameter, value: f32) {

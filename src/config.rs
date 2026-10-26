@@ -178,6 +178,7 @@ pub struct Config {
     pub detectors: crate::visualizer::DetectorSettings,
     pub depth_fade: crate::visualizer::DepthFade,
     pub near_opacity: crate::visualizer::NearOpacity,
+    pub tuning: crate::visualizer::VisualizerTuning,
 }
 
 pub fn config_file() -> anyhow::Result<PathBuf> {
