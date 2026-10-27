@@ -1,6 +1,6 @@
 use vello::{kurbo::Size, util::DeviceHandle, wgpu};
 
-use super::{Frame, LineInstance, RibbonInstance};
+use super::{Frame, LineInstance, ModelComposite, RibbonInstance};
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -40,6 +40,8 @@ pub struct Renderer {
     background_layout: wgpu::BindGroupLayout,
     background: Option<BackgroundBinding>,
     line_pipeline: wgpu::RenderPipeline,
+    model_additive_pipeline: wgpu::RenderPipeline,
+    model_multiplicative_pipeline: wgpu::RenderPipeline,
     ribbon_pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     uniform_bindings: wgpu::BindGroup,
@@ -134,6 +136,28 @@ impl Renderer {
             label: Some("Visualizer lines"),
             source: wgpu::ShaderSource::Wgsl(include_str!("lines.wgsl").into()),
         });
+        let line_attributes = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 32,
+                shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 48,
+                shader_location: 3,
+            },
+        ];
         let line_pipeline = instance_pipeline(
             device,
             format,
@@ -143,28 +167,59 @@ impl Renderer {
             "line_fragment",
             &uniform_layout,
             std::mem::size_of::<LineInstance>() as u64,
-            &[
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 0,
-                    shader_location: 0,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 16,
-                    shader_location: 1,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 32,
-                    shader_location: 2,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 48,
-                    shader_location: 3,
-                },
-            ],
+            &line_attributes,
+            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+            wgpu::ColorWrites::ALL,
+        );
+        let additive_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        let multiplicative_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Dst,
+                dst_factor: wgpu::BlendFactor::Zero,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::Zero,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        let model_additive_pipeline = instance_pipeline(
+            device,
+            format,
+            "Visualizer model additive",
+            &line_shader,
+            "line_vertex",
+            "line_additive_fragment",
+            &uniform_layout,
+            std::mem::size_of::<LineInstance>() as u64,
+            &line_attributes,
+            additive_blend,
+            wgpu::ColorWrites::COLOR,
+        );
+        let model_multiplicative_pipeline = instance_pipeline(
+            device,
+            format,
+            "Visualizer model multiplicative",
+            &line_shader,
+            "line_vertex",
+            "line_multiply_fragment",
+            &uniform_layout,
+            std::mem::size_of::<LineInstance>() as u64,
+            &line_attributes,
+            multiplicative_blend,
+            wgpu::ColorWrites::COLOR,
         );
 
         let ribbon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -212,6 +267,8 @@ impl Renderer {
                     shader_location: 5,
                 },
             ],
+            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+            wgpu::ColorWrites::ALL,
         );
 
         let line_capacity = 256;
@@ -223,6 +280,8 @@ impl Renderer {
             background_layout,
             background: None,
             line_pipeline,
+            model_additive_pipeline,
+            model_multiplicative_pipeline,
             ribbon_pipeline,
             uniforms,
             uniform_bindings,
@@ -285,11 +344,27 @@ impl Renderer {
                 .queue
                 .write_buffer(&self.ribbon_buffer, 0, bytemuck::cast_slice(frame.ribbons));
         }
-        if !frame.lines.is_empty() {
-            self.ensure_line_capacity(&device.device, frame.lines.len());
-            device
-                .queue
-                .write_buffer(&self.line_buffer, 0, bytemuck::cast_slice(frame.lines));
+        let model_count = frame.model_lines.len();
+        let line_count = frame.lines.len();
+        let total_lines = model_count + line_count;
+        let line_stride = std::mem::size_of::<LineInstance>() as u64;
+        let model_bytes = model_count as u64 * line_stride;
+        if total_lines > 0 {
+            self.ensure_line_capacity(&device.device, total_lines);
+            if model_count > 0 {
+                device.queue.write_buffer(
+                    &self.line_buffer,
+                    0,
+                    bytemuck::cast_slice(frame.model_lines),
+                );
+            }
+            if line_count > 0 {
+                device.queue.write_buffer(
+                    &self.line_buffer,
+                    model_bytes,
+                    bytemuck::cast_slice(frame.lines),
+                );
+            }
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Visualizer overlay"),
@@ -315,17 +390,27 @@ impl Renderer {
             &[],
         );
         pass.draw(0..3, 0..1);
+        if model_count > 0 {
+            let pipeline = match frame.model_composite {
+                ModelComposite::Additive => &self.model_additive_pipeline,
+                ModelComposite::Multiplicative => &self.model_multiplicative_pipeline,
+            };
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &self.uniform_bindings, &[]);
+            pass.set_vertex_buffer(0, self.line_buffer.slice(0..model_bytes));
+            pass.draw(0..6, 0..model_count as u32);
+        }
         if !frame.ribbons.is_empty() {
             pass.set_pipeline(&self.ribbon_pipeline);
             pass.set_bind_group(0, &self.uniform_bindings, &[]);
             pass.set_vertex_buffer(0, self.ribbon_buffer.slice(..));
             pass.draw(0..6, 0..frame.ribbons.len() as u32);
         }
-        if !frame.lines.is_empty() {
+        if line_count > 0 {
             pass.set_pipeline(&self.line_pipeline);
             pass.set_bind_group(0, &self.uniform_bindings, &[]);
-            pass.set_vertex_buffer(0, self.line_buffer.slice(..));
-            pass.draw(0..6, 0..frame.lines.len() as u32);
+            pass.set_vertex_buffer(0, self.line_buffer.slice(model_bytes..));
+            pass.draw(0..6, 0..line_count as u32);
         }
     }
 }
@@ -341,6 +426,8 @@ fn instance_pipeline(
     uniform_layout: &wgpu::BindGroupLayout,
     stride: u64,
     attributes: &[wgpu::VertexAttribute],
+    blend: wgpu::BlendState,
+    write_mask: wgpu::ColorWrites,
 ) -> wgpu::RenderPipeline {
     let layouts = [Some(uniform_layout)];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -368,8 +455,8 @@ fn instance_pipeline(
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
+                blend: Some(blend),
+                write_mask,
             })],
         }),
         primitive: Default::default(),

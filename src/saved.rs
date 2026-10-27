@@ -136,6 +136,9 @@ mod tests {
         config.edit().near_opacity = config
             .near_opacity
             .adjusted(crate::frame_schedule::Adjustment::Increase);
+        config.edit().crease_threshold = config
+            .crease_threshold
+            .adjusted(crate::frame_schedule::Adjustment::Increase);
         config.edit().tuning.kick_decay = 4.5;
         config.edit().tuning.gains[crate::visualizer::Gain::SpinBand] = 2.5;
         config.edit().tuning.routing[crate::visualizer::BandComponent::Spin] = 9;
@@ -198,6 +201,9 @@ mod tests {
             "(near_opacity: 0.5)",
             "(near_opacity: 1.1)",
             "(near_opacity: NaN)",
+            "(crease_threshold: 9.0)",
+            "(crease_threshold: 81.0)",
+            "(crease_threshold: NaN)",
             "(tuning: (kick_decay: -1.0))",
             "(tuning: (kick_decay: 21.0))",
             "(tuning: (inputs: (power: (attack: 0.0, release: 4.5, \
@@ -240,6 +246,10 @@ mod tests {
         assert_eq!(
             missing.near_opacity,
             crate::visualizer::NearOpacity::default()
+        );
+        assert_eq!(
+            missing.crease_threshold,
+            crate::visualizer::CreaseThreshold::default()
         );
         assert_eq!(
             missing.tuning,

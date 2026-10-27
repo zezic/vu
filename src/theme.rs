@@ -76,6 +76,13 @@ pub enum Accent {
     BrightWhite,
 }
 impl ThemeId {
+    /// The registry groups a light theme by its background being lighter than
+    /// the derived scale tone.
+    pub fn is_light(self) -> bool {
+        let entry = &registry()[self.0];
+        luma(entry.colors.background) >= luma(entry.colors.scale)
+    }
+
     pub fn color(self, accent: Accent) -> Color {
         let entry = &registry()[self.0];
         let index = match accent {
@@ -162,6 +169,11 @@ pub fn mix(from: Color, to: Color, progress: f32) -> Color {
     }))
 }
 
+fn luma(color: Color) -> f32 {
+    let [r, g, b, _] = color.components;
+    0.299 * r + 0.587 * g + 0.114 * b
+}
+
 fn hex(value: &str) -> Color {
     assert_eq!(value.len(), 7, "bundled colors are #RRGGBB");
     let rgb = u32::from_str_radix(value.strip_prefix('#').expect("hex prefix"), 16)
@@ -198,10 +210,6 @@ fn registry() -> &'static [Entry] {
                 name: theme.name,
             })
             .collect();
-        let luma = |color: Color| {
-            let [r, g, b, _] = color.components;
-            0.299 * r + 0.587 * g + 0.114 * b
-        };
         entries.sort_by(|a, b| {
             let light = |entry: &Entry| luma(entry.colors.background) >= luma(entry.colors.scale);
             light(a).cmp(&light(b)).then_with(|| a.name.cmp(&b.name))
@@ -270,6 +278,15 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_shipped_theme_classifies_as_light_or_dark() {
+        let light = (0..registry().len())
+            .filter(|&index| ThemeId(index).is_light())
+            .count();
+        assert!(light > 0);
+        assert!(light < registry().len());
+    }
 
     #[test]
     fn registry_cycles_and_serializes_every_shipped_theme() {

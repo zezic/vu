@@ -61,6 +61,18 @@ impl Vec3 {
         }
     }
 
+    pub fn dot(self, other: Self) -> f32 {
+        self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
+    pub fn cross(self, other: Self) -> Self {
+        Self::new(
+            self.y * other.z - self.z * other.y,
+            self.z * other.x - self.x * other.z,
+            self.x * other.y - self.y * other.x,
+        )
+    }
+
     pub fn rotate_x(self, angle: f32) -> Self {
         let (sin, cos) = angle.sin_cos();
         Self::new(
@@ -172,11 +184,13 @@ impl FigureKind {
     }
 }
 
+#[derive(Clone)]
 enum Source {
     Three(Vec<Vec3>),
     Four(Vec<[f32; 4]>),
 }
 
+#[derive(Clone)]
 pub struct Wireframe {
     source: Source,
     edges: Vec<[u16; 2]>,
@@ -191,6 +205,30 @@ impl Wireframe {
             FigureKind::Icosahedron => icosahedron(),
             FigureKind::Tesseract => tesseract(),
             FigureKind::Torus => torus(),
+        }
+    }
+
+    /// Builds a wireframe from an indexed mesh. Vertices must already be in
+    /// model space; the caller is responsible for fitting them to the camera.
+    /// The edge list may be empty when a coarse crease threshold hides every
+    /// feature of a smooth model.
+    pub fn from_edges(vertices: Vec<Vec3>, edges: Vec<[u16; 2]>) -> Self {
+        assert!(!vertices.is_empty(), "a wireframe needs a vertex");
+        assert!(
+            vertices.len() <= u16::MAX as usize + 1,
+            "wireframe vertices are indexed by u16"
+        );
+        let vertex_count = vertices.len();
+        assert!(
+            edges.iter().all(|&[a, b]| {
+                (a as usize) < vertex_count && (b as usize) < vertex_count && a != b
+            }),
+            "every wireframe edge must join two distinct vertices"
+        );
+        Self {
+            source: Source::Three(vertices),
+            edges,
+            vertex_count,
         }
     }
 

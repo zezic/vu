@@ -725,7 +725,12 @@ pub struct Meter {
     presentation_value: Text,
     scene_readout: Readout,
     scene_value: Text,
-    scene_name: &'static str,
+    scene_name: String,
+    line_count: usize,
+    line_count_value: Text,
+    model_position: Option<(usize, usize)>,
+    model_readout: Readout,
+    model_value: Text,
     debug_readout: Readout,
     debug_value: Text,
     debug: bool,
@@ -758,6 +763,9 @@ pub struct Meter {
     near_opacity: visualizer::NearOpacity,
     near_opacity_readout: Readout,
     near_opacity_value: Text,
+    crease_threshold: visualizer::CreaseThreshold,
+    crease_readout: Readout,
+    crease_value: Text,
     diagnosis_text: Option<Text>,
     diagnosis_anchor: Point,
     diagnosis_color: Color,
@@ -803,6 +811,22 @@ pub struct Meter {
 }
 
 impl Meter {
+    fn layout_model_value(fonts: &mut Fonts, position: Option<(usize, usize)>) -> Text {
+        let label = position.map_or_else(
+            || "Model -".to_owned(),
+            |(current, total)| format!("Model {current}/{total}"),
+        );
+        fonts.layout(&label, 12.0)
+    }
+
+    fn model_composite(theme: ThemeId) -> visualizer::ModelComposite {
+        if theme.is_light() {
+            visualizer::ModelComposite::Multiplicative
+        } else {
+            visualizer::ModelComposite::Additive
+        }
+    }
+
     pub fn new(config: &Config) -> anyhow::Result<Self> {
         let preamp = config.preamp_db;
         let selected = config.theme;
@@ -811,8 +835,7 @@ impl Meter {
         let presentation = config.presentation;
         let presentation_readout = Readout::inline(&mut fonts, ["[F]"]);
         let presentation_value = Readout::value(&mut fonts, presentation.name());
-        let scene_readout = Readout::inline(&mut fonts, ["FIGURE"]);
-        let scene_value = fonts.layout_ui("Cube", 12.0, UiFace::SemiBoldItalic);
+        let scene_readout = Readout::inline(&mut fonts, ["SCENE"]);
         let debug_readout = Readout::inline(&mut fonts, ["[D]", "[B]"]);
         let debug_value = Readout::value(&mut fonts, "Debug Off");
         let text_scale = config.visualizer_text_scale;
@@ -821,6 +844,7 @@ impl Meter {
             Readout::value(&mut fonts, &format!("Text {:>3}%", text_scale.percent()));
         let detectors = config.detectors.clone();
         let mut visualizer = Visualizer::new();
+        visualizer.set_model_composite(Self::model_composite(selected));
         visualizer.set_detector_settings(detectors.clone());
         let kick_gap_readout = Readout::new(&mut fonts, "Kick Gap", ["[G]", "[H]"]);
         let kick_gap_value = Readout::value(
@@ -840,7 +864,23 @@ impl Meter {
         let near_opacity_readout = Readout::new(&mut fonts, "Near Opacity", ["[U]", "[I]"]);
         let near_opacity_value =
             Readout::value(&mut fonts, &format!("{:>3}%", near_opacity.percent()));
-        let scene_name = visualizer.scene_name();
+        let crease_threshold = config.crease_threshold;
+        visualizer.set_crease_threshold(crease_threshold);
+        let crease_readout = Readout::new(&mut fonts, "Crease", ["[,]", "[.]"]);
+        let crease_value = Readout::value(
+            &mut fonts,
+            &format!("{:>3}", crease_threshold.whole_degrees()),
+        );
+        if presentation.shows_visualizer() {
+            visualizer.set_presentation(presentation);
+        }
+        let scene_name = visualizer.scene_name().to_owned();
+        let scene_value = fonts.layout_ui(&scene_name, 12.0, UiFace::SemiBoldItalic);
+        let line_count = visualizer.frame().lines.len();
+        let line_count_value = fonts.layout(&format!("LINES {line_count}"), 12.0);
+        let model_position = visualizer.model_position();
+        let model_readout = Readout::inline(&mut fonts, ["[\\]"]);
+        let model_value = Self::layout_model_value(&mut fonts, model_position);
         let mode_readout = Readout::gauge_inline(&mut fonts, ["[M]"]);
         let mode_value = Readout::gauge_value(&mut fonts, config.mode.name());
         let peak_movement_readout = Readout::gauge_inline(&mut fonts, ["[N]"]);
@@ -892,6 +932,11 @@ impl Meter {
             scene_readout,
             scene_value,
             scene_name,
+            line_count,
+            line_count_value,
+            model_position,
+            model_readout,
+            model_value,
             debug_readout,
             debug_value,
             debug: false,
@@ -924,6 +969,9 @@ impl Meter {
             near_opacity,
             near_opacity_readout,
             near_opacity_value,
+            crease_threshold,
+            crease_readout,
+            crease_value,
             diagnosis_text: None,
             diagnosis_anchor: Point::ORIGIN,
             diagnosis_color: Color::new([1.0, 1.0, 1.0, 1.0]),
@@ -997,7 +1045,7 @@ impl Meter {
                 );
             }
         }
-        if self.presentation == Presentation::Visualizer {
+        if self.presentation.shows_visualizer() {
             self.visualizer.consume_buf(buf, self.processor.preamp);
         }
     }
@@ -1037,7 +1085,7 @@ impl Meter {
         self.update_kernels(pointer);
         self.update_pattern(pointer);
         self.update_offset(pointer);
-        if self.debug && self.presentation == Presentation::Visualizer {
+        if self.debug && self.presentation.shows_visualizer() {
             self.face_settings = None;
         }
     }
@@ -1045,10 +1093,7 @@ impl Meter {
     /// Selects or clears an analysis item under the pointer. Returns true when
     /// the panel consumed the click so the host can skip its drag gesture.
     pub fn click_debug(&mut self, view: &View, position: Point) -> bool {
-        if !self.debug
-            || self.presentation != Presentation::Visualizer
-            || self.debug_snapshot.is_none()
-        {
+        if !self.debug || !self.presentation.shows_visualizer() || self.debug_snapshot.is_none() {
             return false;
         }
         let property = match self.debug_selection {
@@ -1541,7 +1586,8 @@ impl Meter {
         }
         self.presentation = presentation;
         self.presentation_value = Readout::value(&mut self.fonts, presentation.name());
-        if presentation == Presentation::Visualizer {
+        if presentation.shows_visualizer() {
+            self.visualizer.set_presentation(presentation);
             self.visualizer.reset_audio();
         } else {
             self.appearance = None;
@@ -1581,6 +1627,8 @@ impl Meter {
 
     pub fn set_theme(&mut self, selected: ThemeId) {
         self.theme.select(selected);
+        self.visualizer
+            .set_model_composite(Self::model_composite(selected));
         self.theme_value = Readout::value(&mut self.fonts, selected.name());
         self.gauge_theme_value = Readout::gauge_value(&mut self.fonts, selected.name());
         self.face_settings = None;
@@ -1654,6 +1702,23 @@ impl Meter {
         self.near_opacity_value =
             Readout::value(&mut self.fonts, &format!("{:>3}%", near_opacity.percent()));
         self.face_settings = None;
+    }
+
+    pub fn set_crease_threshold(&mut self, crease: visualizer::CreaseThreshold) {
+        if self.crease_threshold == crease {
+            return;
+        }
+        self.crease_threshold = crease;
+        self.visualizer.set_crease_threshold(crease);
+        self.crease_value =
+            Readout::value(&mut self.fonts, &format!("{:>3}", crease.whole_degrees()));
+        self.face_settings = None;
+    }
+
+    pub fn next_model(&mut self) {
+        if self.presentation == Presentation::Weapon {
+            self.visualizer.next_model();
+        }
     }
 
     pub fn repair_needles(&mut self) {
@@ -1782,7 +1847,7 @@ impl Meter {
                     );
                 }
             }
-            Presentation::Visualizer => {
+            Presentation::Visualizer | Presentation::Weapon => {
                 // Visualizer chrome uses fixed logical sizes, scaled by DPI and
                 // the user's text-size setting but never by window size.
                 let ui = view.ui_scale() * f64::from(self.text_scale.factor());
@@ -1793,6 +1858,8 @@ impl Meter {
                     view.viewport.width - 24.0 * ui - shutter_width,
                     view.viewport.height - 24.0 * ui,
                 )) * Affine::scale(ui);
+                let line_count_transform = shutter_transform
+                    * Affine::translate((-(self.line_count_value.width() + 16.0), 0.0));
                 let top_left = Affine::translate((24.0 * ui, 32.0 * ui)) * Affine::scale(ui);
                 let palette = self.visualizer.palette();
                 let hud_colors = MeterColors {
@@ -1830,6 +1897,8 @@ impl Meter {
                     &hud_colors,
                     HintOrder::BeforeValue,
                 );
+                self.line_count_value
+                    .draw_left(scene, line_count_transform, hud_colors.readout);
                 self.shutter_readout.draw_inline(
                     scene,
                     shutter_transform,
@@ -1877,8 +1946,23 @@ impl Meter {
                     &self.near_opacity_value,
                     &hud_colors,
                 );
+                if self.presentation == Presentation::Weapon {
+                    self.crease_readout.draw_left_aligned(
+                        scene,
+                        top_left * Affine::translate((0.0, 264.0)),
+                        &self.crease_value,
+                        &hud_colors,
+                    );
+                    self.model_readout.draw_inline(
+                        scene,
+                        top_left * Affine::translate((0.0, 308.0)),
+                        &self.model_value,
+                        &hud_colors,
+                        HintOrder::BeforeValue,
+                    );
+                }
                 if self.debug {
-                    if let Some(snapshot) = self.debug_snapshot {
+                    if let Some(snapshot) = &self.debug_snapshot {
                         let history = self.visualizer.debug_history();
                         let palette = self.visualizer.palette();
                         let visualizer = &self.visualizer;
@@ -1886,7 +1970,7 @@ impl Meter {
                             &mut self.fonts,
                             scene,
                             view,
-                            &snapshot,
+                            snapshot,
                             history,
                             visualizer,
                             palette,
@@ -1967,8 +2051,21 @@ impl Meter {
     fn update_visualizer_overlays(&mut self, dt: f32) {
         let name = self.visualizer.scene_name();
         if name != self.scene_name {
-            self.scene_name = name;
+            self.scene_name = name.to_owned();
             self.scene_value = self.fonts.layout_ui(name, 12.0, UiFace::SemiBoldItalic);
+            self.face_settings = None;
+        }
+        let frame = self.visualizer.frame();
+        let line_count = frame.lines.len() + frame.model_lines.len();
+        if line_count != self.line_count {
+            self.line_count = line_count;
+            self.line_count_value = self.fonts.layout(&format!("LINES {line_count}"), 12.0);
+            self.face_settings = None;
+        }
+        let model_position = self.visualizer.model_position();
+        if model_position != self.model_position {
+            self.model_position = model_position;
+            self.model_value = Self::layout_model_value(&mut self.fonts, model_position);
             self.face_settings = None;
         }
         if self.debug {
@@ -2078,13 +2175,13 @@ impl Meter {
     ) -> MeterFrame<'_> {
         let dt = frame_time.seconds();
         self.theme.advance(dt);
-        let tree_open = self.presentation == Presentation::Visualizer
+        let tree_open = self.presentation.shows_visualizer()
             && self.debug
             && matches!(
                 self.debug_selection,
                 Some(visualizer::DebugSelection::Property(_))
             );
-        if self.presentation == Presentation::Visualizer {
+        if self.presentation.shows_visualizer() {
             self.visualizer.set_diagnosis_suppressed(tree_open);
             let frame_interval = self.display_interval(frame_time);
             let palette = visualizer::Palette::from_theme(self.theme.selected());
@@ -2162,7 +2259,7 @@ impl Meter {
                     }),
                 }
             }
-            Presentation::Visualizer => {
+            Presentation::Visualizer | Presentation::Weapon => {
                 if !tree_open {
                     if let Some(text) = &self.diagnosis_text {
                         Self::draw_diagnosis(
@@ -2213,6 +2310,9 @@ impl Meter {
         }
     }
     pub fn configure(&mut self, config: &Config) {
+        if self.crease_threshold != config.crease_threshold {
+            self.set_crease_threshold(config.crease_threshold);
+        }
         if self.presentation != config.presentation {
             self.set_presentation(config.presentation);
         }

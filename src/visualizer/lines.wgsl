@@ -19,6 +19,14 @@ struct VertexOutput {
     @location(3) @interpolate(flat) style: vec4<f32>,
 }
 
+struct LineInk {
+    color: vec4<f32>,
+    coverage: f32,
+}
+
+const COLOR_STEP: f32 = 1.0 / 255.0;
+const COLOR_CEIL: f32 = 254.0 / 255.0;
+
 @vertex
 fn line_vertex(
     @builtin(vertex_index) vertex_index: u32,
@@ -52,23 +60,65 @@ fn segment_distance(point: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     return distance(point, a + along * fraction);
 }
 
-@fragment
-fn line_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
+fn line_ink(vertex: VertexOutput) -> LineInk {
     let width = max(vertex.style.x, 0.7);
-    let nearest = segment_distance(
-        vertex.position.xy,
-        vertex.endpoints.xy,
-        vertex.endpoints.zw,
-    );
-    let coverage = clamp(width * 0.5 + 0.5 - nearest, 0.0, 1.0);
-    let along = vertex.endpoints.zw - vertex.endpoints.xy;
+    let segment = vertex.endpoints.zw - vertex.endpoints.xy;
+    let length_squared = dot(segment, segment);
+    var coverage: f32;
+    if vertex.style.y > 0.5 && length_squared > 1e-6 {
+        // Flat-rectangle distance with a square cap: the stroke extends half
+        // a width past each endpoint, unlike the round point-to-segment cap.
+        let segment_length = sqrt(length_squared);
+        let direction = segment / segment_length;
+        let relative = vertex.position.xy - vertex.endpoints.xy;
+        let along = dot(relative, direction);
+        let across = abs(relative.x * direction.y - relative.y * direction.x);
+        let local = vec2(
+            abs(along - segment_length * 0.5) - segment_length * 0.5 - width * 0.5,
+            across - width * 0.5,
+        );
+        let sdf = length(max(local, vec2(0.0))) + min(max(local.x, local.y), 0.0);
+        coverage = clamp(0.5 - sdf, 0.0, 1.0);
+    } else {
+        let nearest = segment_distance(
+            vertex.position.xy,
+            vertex.endpoints.xy,
+            vertex.endpoints.zw,
+        );
+        coverage = clamp(width * 0.5 + 0.5 - nearest, 0.0, 1.0);
+    }
     let fraction = clamp(
-        dot(vertex.position.xy - vertex.endpoints.xy, along)
-            / max(dot(along, along), 1e-6),
+        dot(vertex.position.xy - vertex.endpoints.xy, segment)
+            / max(length_squared, 1e-6),
         0.0,
         1.0,
     );
-    let color = mix(vertex.start_color, vertex.end_color, fraction);
-    let alpha = color.a * coverage;
-    return vec4(color.rgb * alpha, alpha);
+    return LineInk(mix(vertex.start_color, vertex.end_color, fraction), coverage);
+}
+
+@fragment
+fn line_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
+    let ink = line_ink(vertex);
+    let alpha = ink.color.a * ink.coverage;
+    return vec4(ink.color.rgb * alpha, alpha);
+}
+
+@fragment
+fn line_additive_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
+    let ink = line_ink(vertex);
+    let alpha = ink.color.a * ink.coverage;
+    // An additive color with a zero component contributes nothing there.
+    let rgb = max(ink.color.rgb, vec3<f32>(COLOR_STEP));
+    return vec4(rgb * alpha, alpha);
+}
+
+@fragment
+fn line_multiply_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
+    let ink = line_ink(vertex);
+    let alpha = ink.color.a * ink.coverage;
+    // A multiplicative color with a full component leaves that channel
+    // untouched; step every full component down so the line always tints it.
+    let rgb = min(ink.color.rgb, vec3<f32>(COLOR_CEIL));
+    let multiplier = mix(vec3<f32>(1.0), rgb, alpha);
+    return vec4(multiplier, 1.0);
 }

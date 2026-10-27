@@ -359,6 +359,111 @@ fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Resu
 }
 
 #[test]
+fn theme_polarity_selects_the_model_composite_mode() {
+    use crate::frame_schedule::Adjustment;
+    use crate::visualizer::ModelComposite;
+    let mut light = crate::theme::ThemeId::default();
+    for _ in 0..64 {
+        if light.is_light() {
+            break;
+        }
+        light = light.adjusted(Adjustment::Increase);
+    }
+    assert!(light.is_light());
+    assert_eq!(
+        Meter::model_composite(light),
+        ModelComposite::Multiplicative
+    );
+
+    let mut dark = crate::theme::ThemeId::default();
+    for _ in 0..64 {
+        if !dark.is_light() {
+            break;
+        }
+        dark = dark.adjusted(Adjustment::Increase);
+    }
+    assert!(!dark.is_light());
+    assert_eq!(Meter::model_composite(dark), ModelComposite::Additive);
+}
+
+#[test]
+fn weapon_presentation_loads_the_model_and_replaces_the_figures() -> anyhow::Result<()> {
+    use crate::visualizer::{CreaseThreshold, Presentation};
+    let mut clock = TestClock::new();
+    let mut meter = Meter::new(&crate::config::Config {
+        presentation: Presentation::Visualizer,
+        preamp_db: PreampDb::try_from(0.0)?,
+        ..Default::default()
+    })?;
+    meter.audio_event(AudioEvent::Config { samplerate: 48000 });
+    for _ in 0..8 {
+        clock.feed(&mut meter, &[[0.4, 0.8]; 800]);
+    }
+    clock.display = clock.origin + Duration::from_millis(120);
+
+    meter.set_presentation(Presentation::Weapon);
+    assert_eq!(meter.presentation(), Presentation::Weapon);
+    let view = View::fit(Size::new(1280.0, 440.0));
+    let mut scene = Scene::new();
+    let (lines, ribbons) = {
+        let frame = meter.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            None,
+            clock.frame(1.0 / 60.0),
+        );
+        match &frame.overlay {
+            super::Overlay::Visualizer(frame) => (
+                frame.lines.len() + frame.model_lines.len(),
+                frame.ribbons.len(),
+            ),
+            super::Overlay::Gauges(_) => panic!("the weapon presentation must supply lines"),
+        }
+    };
+    assert_ne!(meter.scene_name, "Cube");
+    assert!(!meter.scene_name.is_empty());
+    assert!(lines > 1_000);
+    assert_eq!(ribbons, 0);
+
+    meter.set_crease_threshold(CreaseThreshold::try_from(70.0)?);
+    let coarser = {
+        let frame = meter.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            None,
+            clock.frame(1.0 / 60.0),
+        );
+        match &frame.overlay {
+            super::Overlay::Visualizer(frame) => frame.lines.len() + frame.model_lines.len(),
+            super::Overlay::Gauges(_) => panic!("the weapon presentation must supply lines"),
+        }
+    };
+    assert!(coarser < lines);
+
+    let (_, total) = meter
+        .model_position
+        .expect("the showcase models are loaded");
+    if total > 1 {
+        let before = meter.scene_name.clone();
+        meter.next_model();
+        let _ = meter.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            None,
+            clock.frame(1.0 / 60.0),
+        );
+        assert_ne!(meter.scene_name, before);
+    }
+
+    meter.set_presentation(Presentation::Visualizer);
+    assert_eq!(meter.presentation(), Presentation::Visualizer);
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires a compute-capable GPU"]
 fn renders_all_measurement_modes_and_units_in_both_layouts() -> anyhow::Result<()> {
     let mut clock = TestClock::new();
@@ -1665,7 +1770,9 @@ fn renders_visualizer_face_and_wireframe_with_hud() -> anyhow::Result<()> {
         Size::new(f64::from(width), f64::from(height)),
         crate::visualizer::Frame {
             lines: &lines,
+            model_lines: &[],
             ribbons: &ribbons,
+            model_composite: Default::default(),
         },
     );
     device.queue.submit([encoder.finish()]);

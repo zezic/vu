@@ -3,6 +3,7 @@
 mod computation;
 mod detection;
 mod geometry;
+mod model;
 mod renderer;
 mod spectrum;
 
@@ -55,7 +56,6 @@ use spectrum::{Spectrum, SpectrumAnalyzer};
 
 pub use renderer::Renderer;
 
-const MAX_LINES: usize = 2048;
 const MAX_RIBBONS: usize = 8192;
 const MAX_PENDING_ACTIONS: usize = 64;
 const MAX_HISTORY: usize = 17;
@@ -77,14 +77,16 @@ pub enum Presentation {
     Gauges,
     #[default]
     Visualizer,
+    Weapon,
 }
 
 impl Presentation {
     #[must_use]
-    pub fn toggled(self) -> Self {
+    pub fn next(self) -> Self {
         match self {
             Self::Gauges => Self::Visualizer,
-            Self::Visualizer => Self::Gauges,
+            Self::Visualizer => Self::Weapon,
+            Self::Weapon => Self::Gauges,
         }
     }
 
@@ -92,8 +94,22 @@ impl Presentation {
         match self {
             Self::Gauges => "Gauges",
             Self::Visualizer => "Wireframe",
+            Self::Weapon => "Weapon",
         }
     }
+
+    /// Both visualizer presentations consume audio and draw the visualizer HUD.
+    pub fn shows_visualizer(self) -> bool {
+        matches!(self, Self::Visualizer | Self::Weapon)
+    }
+}
+
+/// How the weapon wireframe composites over the theme background.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ModelComposite {
+    #[default]
+    Additive,
+    Multiplicative,
 }
 
 /// Depth opacity modulation strength: 0 keeps every vertex opaque, 1 makes the
@@ -195,6 +211,63 @@ impl TryFrom<f32> for NearOpacity {
 
 impl From<NearOpacity> for f32 {
     fn from(value: NearOpacity) -> Self {
+        value.0
+    }
+}
+
+/// Weapon showcase edge crease threshold in degrees. Lower values keep more
+/// edge detail; higher values reduce the wireframe to the strongest creases.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct CreaseThreshold(f32);
+
+impl CreaseThreshold {
+    pub const MIN_DEGREES: f32 = 10.0;
+    pub const MAX_DEGREES: f32 = 80.0;
+    pub const MIN: Self = Self(Self::MIN_DEGREES);
+    pub const MAX: Self = Self(Self::MAX_DEGREES);
+    const STEP_DEGREES: f32 = 5.0;
+
+    pub fn degrees(self) -> f32 {
+        self.0
+    }
+
+    pub fn whole_degrees(self) -> u32 {
+        self.0.round() as u32
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        let delta = match adjustment {
+            Adjustment::Decrease => -Self::STEP_DEGREES,
+            Adjustment::Increase => Self::STEP_DEGREES,
+        };
+        Self((self.0 + delta).clamp(Self::MIN_DEGREES, Self::MAX_DEGREES))
+    }
+}
+
+impl Default for CreaseThreshold {
+    fn default() -> Self {
+        Self(45.0)
+    }
+}
+
+impl TryFrom<f32> for CreaseThreshold {
+    type Error = anyhow::Error;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        anyhow::ensure!(
+            value.is_finite() && (Self::MIN_DEGREES..=Self::MAX_DEGREES).contains(&value),
+            "crease_threshold must be finite and between {MIN} and {MAX}",
+            MIN = Self::MIN_DEGREES,
+            MAX = Self::MAX_DEGREES
+        );
+        Ok(Self(value))
+    }
+}
+
+impl From<CreaseThreshold> for f32 {
+    fn from(value: CreaseThreshold) -> Self {
         value.0
     }
 }
@@ -431,7 +504,7 @@ pub struct LineInstance {
     pub start_color: [f32; 4],
     /// Tint and opacity at the end endpoint.
     pub end_color: [f32; 4],
-    /// Stroke width, triangle fallback flag, static-center flag, padding.
+    /// Stroke width, flat-cap flag, padding, padding.
     pub style: [f32; 4],
 }
 
@@ -453,6 +526,20 @@ impl LineInstance {
             end_color,
             style: [width, 0.0, 0.0, 0.0],
         }
+    }
+
+    /// A shaded line with a flat, square end cap instead of the default round
+    /// cap. Used for the rigid wireframe model.
+    fn flat(
+        start: Vec2,
+        end: Vec2,
+        start_color: [f32; 4],
+        end_color: [f32; 4],
+        width: f32,
+    ) -> Self {
+        let mut line = Self::shaded(start, end, start_color, end_color, width);
+        line.style[1] = 1.0;
+        line
     }
 }
 
@@ -988,7 +1075,7 @@ pub struct StyleDebug {
     pub jitter_bias: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct DebugSnapshot {
     pub bands: [BandDebug; BAND_COUNT],
     pub properties: [f32; Property::COUNT],
@@ -1005,8 +1092,8 @@ pub struct DebugSnapshot {
     pub kick_hits: u32,
     pub snare_hits: u32,
     pub drop_hits: u32,
-    pub scene: &'static str,
-    pub outgoing: Option<&'static str>,
+    pub scene: String,
+    pub outgoing: Option<String>,
     pub transition: f32,
     pub style: StyleDebug,
     pub phase: f32,
@@ -1133,7 +1220,7 @@ struct Diagnosis {
     anchor: Vec2,
     readout: Option<DiagnosisReadout>,
     revision: u64,
-    scene: &'static str,
+    scene: String,
 }
 
 impl Diagnosis {
@@ -1150,7 +1237,7 @@ impl Diagnosis {
             anchor: Vec2::new(0.0, 0.0),
             readout: None,
             revision: 0,
-            scene: "",
+            scene: String::new(),
         }
     }
 
@@ -1166,7 +1253,17 @@ impl Diagnosis {
 #[derive(Clone, Copy)]
 pub struct Frame<'a> {
     pub lines: &'a [LineInstance],
+    pub model_lines: &'a [LineInstance],
     pub ribbons: &'a [RibbonInstance],
+    pub model_composite: ModelComposite,
+}
+
+/// Lazily loaded weapon model. The loaded copy is retained so switching back to
+/// the showcase does not re-read the file.
+enum Showcase {
+    Unloaded,
+    Ready(Box<model::ModelSet>),
+    Failed(String),
 }
 
 pub struct Visualizer {
@@ -1180,6 +1277,10 @@ pub struct Visualizer {
     pending_actions: VecDeque<Action>,
     rng: Rng,
     scene: Scene,
+    presentation: Presentation,
+    showcase: Showcase,
+    model_composite: ModelComposite,
+    model_lines: Vec<LineInstance>,
     frames: ShutterWindow,
     kick: f32,
     kick_decay: f32,
@@ -1202,6 +1303,7 @@ pub struct Visualizer {
     palette: Palette,
     depth_fade: DepthFade,
     near_opacity: NearOpacity,
+    crease_threshold: CreaseThreshold,
     last_spectrum: Spectrum,
     analysis_revision: u64,
     kick_hits: u32,
@@ -1232,6 +1334,10 @@ impl Visualizer {
             pending_actions: VecDeque::with_capacity(MAX_PENDING_ACTIONS),
             rng,
             scene,
+            presentation: Presentation::Visualizer,
+            showcase: Showcase::Unloaded,
+            model_composite: ModelComposite::default(),
+            model_lines: Vec::new(),
             frames: ShutterWindow::default(),
             kick: 0.0,
             kick_decay: tuning.kick_decay,
@@ -1257,6 +1363,7 @@ impl Visualizer {
             palette: Palette::from_theme(ThemeId::default()),
             depth_fade: DepthFade::default(),
             near_opacity: NearOpacity::default(),
+            crease_threshold: CreaseThreshold::default(),
             last_spectrum: Spectrum::default(),
             analysis_revision: 0,
             kick_hits: 0,
@@ -1264,7 +1371,7 @@ impl Visualizer {
             drop_hits: 0,
             diagnosis: Diagnosis::new(),
             debug_history: DebugHistory::default(),
-            lines: Vec::with_capacity(MAX_LINES),
+            lines: Vec::with_capacity(2048),
             ribbons: Vec::with_capacity(MAX_RIBBONS),
         };
         visualizer
@@ -1272,6 +1379,88 @@ impl Visualizer {
             .set_relative_excess(visualizer.detectors.excess);
         visualizer.apply_style_tuning();
         visualizer
+    }
+
+    /// Switches the visualizer content with the presentation. The weapon model
+    /// is loaded the first time the showcase becomes visible.
+    pub fn set_presentation(&mut self, presentation: Presentation) {
+        assert!(
+            presentation.shows_visualizer(),
+            "the visualizer only handles its own presentations"
+        );
+        if self.presentation == presentation {
+            return;
+        }
+        self.presentation = presentation;
+        match presentation {
+            Presentation::Weapon => self.enter_showcase(),
+            Presentation::Visualizer if self.scene.current.is_showcase() => {
+                let accent = self.accent();
+                self.scene
+                    .leave_showcase(&mut self.rng, accent, &self.style_tuning);
+            }
+            _ => {}
+        }
+    }
+
+    fn enter_showcase(&mut self) {
+        let accent = self.accent();
+        if let Showcase::Ready(models) = &self.showcase {
+            self.scene.enter_showcase(
+                models.current(),
+                self.crease_threshold,
+                accent,
+                &self.style_tuning,
+            );
+            return;
+        }
+        if let Showcase::Failed(error) = &self.showcase {
+            log::error!("retrying the weapon showcase after: {error}");
+        }
+        match model::ModelSet::load() {
+            Ok(models) => {
+                let (_, total) = models.position();
+                log::info!("weapon showcase: {total} models");
+                self.scene.enter_showcase(
+                    models.current(),
+                    self.crease_threshold,
+                    accent,
+                    &self.style_tuning,
+                );
+                self.showcase = Showcase::Ready(Box::new(models));
+            }
+            Err(error) => {
+                log::error!("could not load the weapon showcase: {error:#}");
+                self.showcase = Showcase::Failed(format!("{error:#}"));
+            }
+        }
+    }
+
+    /// Steps to the next showcase model. Drops call this while the showcase is
+    /// active; the hotkey calls it from outside a frame.
+    fn advance_model(&mut self, accent: f32) {
+        let Showcase::Ready(models) = &mut self.showcase else {
+            return;
+        };
+        if !models.advance() {
+            return;
+        }
+        self.scene
+            .switch_showcase(models.current(), self.crease_threshold, accent);
+    }
+
+    pub fn next_model(&mut self) {
+        if self.presentation == Presentation::Weapon {
+            let accent = self.accent();
+            self.advance_model(accent);
+        }
+    }
+
+    pub fn model_position(&self) -> Option<(usize, usize)> {
+        match &self.showcase {
+            Showcase::Ready(models) => Some(models.position()),
+            _ => None,
+        }
     }
 
     /// Load persisted inspector tuning. The value is validated before it
@@ -1476,12 +1665,17 @@ impl Visualizer {
     pub fn frame(&self) -> Frame<'_> {
         Frame {
             lines: &self.lines,
+            model_lines: &self.model_lines,
             ribbons: &self.ribbons,
+            model_composite: self.model_composite,
         }
     }
 
-    pub fn scene_name(&self) -> &'static str {
-        self.scene.current.kind.name()
+    pub fn scene_name(&self) -> &str {
+        match &self.showcase {
+            Showcase::Failed(_) if self.presentation == Presentation::Weapon => "No model",
+            _ => self.scene.current.name(),
+        }
     }
 
     pub fn analysis_revision(&self) -> u64 {
@@ -2004,6 +2198,22 @@ impl Visualizer {
         self.near_opacity = near_opacity;
     }
 
+    pub fn set_crease_threshold(&mut self, crease: CreaseThreshold) {
+        if self.crease_threshold == crease {
+            return;
+        }
+        self.crease_threshold = crease;
+        if let Showcase::Ready(models) = &self.showcase {
+            if self.scene.current.is_showcase() {
+                self.scene.set_showcase_wireframe(models.current(), crease);
+            }
+        }
+    }
+
+    pub fn set_model_composite(&mut self, composite: ModelComposite) {
+        self.model_composite = composite;
+    }
+
     pub fn diagnosis(&self) -> Option<&DiagnosisReadout> {
         if self.diagnosis.suppressed {
             None
@@ -2143,8 +2353,12 @@ impl Visualizer {
             kick_hits: self.kick_hits,
             snare_hits: self.snare_hits,
             drop_hits: self.drop_hits,
-            scene: self.scene.current.kind.name(),
-            outgoing: self.scene.outgoing.as_ref().map(|f| f.kind.name()),
+            scene: self.scene_name().to_owned(),
+            outgoing: self
+                .scene
+                .outgoing
+                .as_ref()
+                .map(|figure| figure.name().to_owned()),
             transition: self.scene.transition,
             style: StyleDebug {
                 axis: [style.axis.x, style.axis.y, style.axis.z],
@@ -2157,7 +2371,7 @@ impl Visualizer {
             },
             phase: self.scene.current.phase.rem_euclid(TAU),
             entrance: self.scene.current.entrance,
-            lines: self.lines.len(),
+            lines: self.lines.len() + self.model_lines.len(),
             ribbons: self.ribbons.len(),
         }
     }
@@ -2180,6 +2394,10 @@ impl Visualizer {
         ui_scale: f32,
     ) {
         let dt = dt.clamp(0.0, 0.1);
+        if self.presentation == Presentation::Weapon && matches!(&self.showcase, Showcase::Unloaded)
+        {
+            self.enter_showcase();
+        }
         self.palette.approach(*palette, dt, 10.0);
         self.time += dt;
         let accent = self.accent();
@@ -2237,7 +2455,21 @@ impl Visualizer {
             Vec2::new(0.0, 0.0)
         };
         self.lines.clear();
+        self.model_lines.clear();
         self.ribbons.clear();
+        if self.presentation == Presentation::Weapon
+            && matches!(&self.showcase, Showcase::Failed(_))
+        {
+            self.diagnosis.active = false;
+            self.diagnosis.readout = None;
+            self.record_debug_sample();
+            return;
+        }
+        let scene_lines = if self.scene.current.is_showcase() {
+            &mut self.model_lines
+        } else {
+            &mut self.lines
+        };
         self.scene.update(
             dt,
             &music,
@@ -2255,19 +2487,14 @@ impl Visualizer {
             flip_pitch,
             shake,
             self.time,
-            &mut self.lines,
+            scene_lines,
             &mut self.ribbons,
-        );
-        debug_assert!(
-            self.lines.len() <= MAX_LINES,
-            "the wireframe renderer line budget is exhausted"
         );
         debug_assert!(
             self.ribbons.len() <= MAX_RIBBONS,
             "the wireframe renderer ribbon budget is exhausted: {} ribbons",
             self.ribbons.len()
         );
-        self.lines.truncate(MAX_LINES);
         self.ribbons.truncate(MAX_RIBBONS);
         self.record_debug_sample();
         let ui_scale = ui_scale.max(0.25);
@@ -2310,7 +2537,7 @@ impl Visualizer {
         self.diagnosis.remaining = 2.5 + self.rng.unit() * 3.0;
         self.diagnosis.mode_timer = 0.0;
         self.diagnosis.refresh_timer = 0.1;
-        self.diagnosis.scene = self.scene.current.kind.name();
+        self.diagnosis.scene = self.scene.current.name().to_owned();
         let target = self.diagnosis_target(viewport, ui_scale);
         self.diagnosis.anchor = target;
         self.diagnosis.revision += 1;
@@ -2332,9 +2559,9 @@ impl Visualizer {
             self.diagnosis.next_in = 3.0 + self.rng.unit() * 5.0;
             return;
         }
-        let scene = self.scene.current.kind.name();
+        let scene = self.scene.current.name();
         if scene != self.diagnosis.scene {
-            self.diagnosis.scene = scene;
+            self.diagnosis.scene = scene.to_owned();
             self.diagnosis.vertex = self.rng.range(self.scene.current.vertices.len().max(1));
             self.diagnosis.mode = DiagnosisMode::random(&mut self.rng);
             self.diagnosis.mode_timer = 0.0;
@@ -2483,7 +2710,11 @@ impl Visualizer {
                 }
             }
             Action::Drop(power) => {
-                self.scene.change(&mut self.rng, accent, &self.style_tuning);
+                if self.scene.current.is_showcase() {
+                    self.advance_model(accent);
+                } else {
+                    self.scene.change(&mut self.rng, accent, &self.style_tuning);
+                }
                 if self.property_gates.plays(Property::Quake) {
                     self.quake_y
                         .impulse(power * self.detectors.drop_quake_factor);
@@ -2638,7 +2869,10 @@ impl Scene {
     }
 
     fn change(&mut self, rng: &mut Rng, accent: f32, style_tuning: &StyleTuning) {
-        let next = self.current.kind.next();
+        let next = match &self.current.source {
+            FigureSource::Procedural(kind) => kind.next(),
+            FigureSource::Model { .. } => return,
+        };
         let mut target_style = Style::random(rng);
         style_tuning.apply(&mut target_style);
         let tint = FigureTint::spawn(next, accent, rng);
@@ -2651,6 +2885,67 @@ impl Scene {
         let old = std::mem::replace(&mut self.current, entering);
         self.outgoing = Some(old);
         self.transition = 0.0;
+    }
+
+    fn enter_showcase(
+        &mut self,
+        model: &model::Model,
+        crease: CreaseThreshold,
+        accent: f32,
+        style_tuning: &StyleTuning,
+    ) {
+        let mut style = Style::default();
+        style_tuning.apply(&mut style);
+        self.current = FigureRuntime::showcase(
+            model.name.clone(),
+            model.wireframe(crease),
+            style,
+            FigureTint::solid(accent),
+        );
+        self.outgoing = None;
+        self.transition = 1.0;
+    }
+
+    fn set_showcase_wireframe(&mut self, model: &model::Model, crease: CreaseThreshold) {
+        assert!(
+            self.current.is_showcase(),
+            "only the weapon showcase changes its crease threshold"
+        );
+        self.current.set_wireframe(model.wireframe(crease));
+    }
+
+    /// Crossfades into another model while keeping the current orientation.
+    fn switch_showcase(&mut self, model: &model::Model, crease: CreaseThreshold, accent: f32) {
+        assert!(
+            self.current.is_showcase(),
+            "only the weapon showcase switches models"
+        );
+        let mut entering = FigureRuntime::showcase(
+            model.name.clone(),
+            model.wireframe(crease),
+            self.current.target_style,
+            FigureTint::solid(accent),
+        );
+        entering.pose = self.current.pose;
+        entering.pitch = self.current.pitch;
+        entering.roll = self.current.roll;
+        entering.style = self.current.style;
+        entering.phase = self.current.phase;
+        self.outgoing = Some(std::mem::replace(&mut self.current, entering));
+        self.transition = 0.0;
+    }
+
+    fn leave_showcase(&mut self, rng: &mut Rng, accent: f32, style_tuning: &StyleTuning) {
+        let mut style = Style::random(rng);
+        style_tuning.apply(&mut style);
+        self.current = FigureRuntime::new(
+            FigureKind::Cube,
+            1.0,
+            style,
+            FigureTint::spawn(FigureKind::Cube, accent, rng),
+        );
+        self.outgoing = None;
+        self.transition = 1.0;
     }
 
     fn reset_temporal(&mut self) {
@@ -2754,8 +3049,27 @@ impl Scene {
     }
 }
 
+/// What the runtime draws: one step of the figure evolution, or a loaded model.
+enum FigureSource {
+    Procedural(FigureKind),
+    Model { name: String },
+}
+
+impl FigureSource {
+    fn name(&self) -> &str {
+        match self {
+            Self::Procedural(kind) => kind.name(),
+            Self::Model { name } => name,
+        }
+    }
+
+    fn is_model(&self) -> bool {
+        matches!(self, Self::Model { .. })
+    }
+}
+
 struct FigureRuntime {
-    kind: FigureKind,
+    source: FigureSource,
     wireframe: Wireframe,
     pose: Pose,
     pitch: Smoother,
@@ -2806,10 +3120,46 @@ struct VertexDiagnosis {
 
 impl FigureRuntime {
     fn new(kind: FigureKind, opacity: f32, target_style: Style, tint: FigureTint) -> Self {
-        let pose = Pose::default();
+        Self::with_source(
+            FigureSource::Procedural(kind),
+            Wireframe::build(kind),
+            Pose::default(),
+            opacity,
+            target_style,
+            tint,
+        )
+    }
+
+    /// A loaded model stays rigid and keeps a permanent label instead of
+    /// evolving through the figure kinds.
+    fn showcase(name: String, wireframe: Wireframe, target_style: Style, tint: FigureTint) -> Self {
+        let pose = Pose {
+            yaw: TAU * 0.25,
+            ..Pose::default()
+        };
+        Self::with_source(
+            FigureSource::Model { name },
+            wireframe,
+            pose,
+            1.0,
+            target_style,
+            tint,
+        )
+    }
+
+    fn with_source(
+        source: FigureSource,
+        wireframe: Wireframe,
+        pose: Pose,
+        opacity: f32,
+        target_style: Style,
+        tint: FigureTint,
+    ) -> Self {
+        let vertex_capacity = wireframe.vertex_count();
+        let edge_capacity = wireframe.edges().len();
         Self {
-            kind,
-            wireframe: Wireframe::build(kind),
+            source,
+            wireframe,
             pose,
             pitch: Smoother::new(pose.pitch),
             roll: Smoother::new(pose.roll),
@@ -2826,13 +3176,36 @@ impl FigureRuntime {
             entrance: opacity,
             opacity,
             history: VecDeque::with_capacity(MAX_HISTORY),
-            vertices: Vec::with_capacity(64),
-            world_vertices: Vec::with_capacity(64),
-            previous_screen: Vec::with_capacity(64),
-            velocity: Vec::with_capacity(64),
-            acceleration: Vec::with_capacity(64),
-            current: Vec::with_capacity(64),
+            vertices: Vec::with_capacity(vertex_capacity),
+            world_vertices: Vec::with_capacity(vertex_capacity),
+            previous_screen: Vec::with_capacity(vertex_capacity),
+            velocity: Vec::with_capacity(vertex_capacity),
+            acceleration: Vec::with_capacity(vertex_capacity),
+            current: Vec::with_capacity(edge_capacity),
         }
+    }
+
+    fn name(&self) -> &str {
+        self.source.name()
+    }
+
+    fn is_showcase(&self) -> bool {
+        self.source.is_model()
+    }
+
+    fn set_wireframe(&mut self, wireframe: Wireframe) {
+        assert!(
+            self.is_showcase(),
+            "only the weapon showcase changes its wireframe at runtime"
+        );
+        self.wireframe = wireframe;
+        self.history.clear();
+        self.current.clear();
+        self.vertices.clear();
+        self.world_vertices.clear();
+        self.previous_screen.clear();
+        self.velocity.clear();
+        self.acceleration.clear();
     }
 
     fn reset_temporal(&mut self) {
@@ -2919,13 +3292,18 @@ impl FigureRuntime {
         );
         let scale = entrance_scale * energy * self.style.zoom_bias * camera_zoom;
         self.pose.scale = soft_saturate(scale, 1.45).max(0.35);
-        let deformation = Deformation {
-            twist: gates.drive(Property::Twist, mixer.value(MixPoint::Twist, &context)),
-            bulge: gates.drive(Property::Bulge, mixer.value(MixPoint::Bulge, &context)),
-            ripple: gates.drive(Property::Ripple, mixer.value(MixPoint::Ripple, &context)),
-            shear: gates.drive(Property::Shear, mixer.value(MixPoint::Shear, &context)),
-            jitter: gates.drive(Property::Jitter, mixer.value(MixPoint::Jitter, &context)),
-            phase: self.phase,
+        let showcase = self.is_showcase();
+        let deformation = if showcase {
+            Deformation::default()
+        } else {
+            Deformation {
+                twist: gates.drive(Property::Twist, mixer.value(MixPoint::Twist, &context)),
+                bulge: gates.drive(Property::Bulge, mixer.value(MixPoint::Bulge, &context)),
+                ripple: gates.drive(Property::Ripple, mixer.value(MixPoint::Ripple, &context)),
+                shear: gates.drive(Property::Shear, mixer.value(MixPoint::Shear, &context)),
+                jitter: gates.drive(Property::Jitter, mixer.value(MixPoint::Jitter, &context)),
+                phase: self.phase,
+            }
         };
         self.deformation = deformation;
         self.line_energy = gates.drive(Property::Line, mixer.value(MixPoint::Line, &context));
@@ -2952,21 +3330,25 @@ impl FigureRuntime {
                     end_depth_opacity: depth_opacity.factor(b.depth),
                 }
             }));
-        if self.history.len() == MAX_HISTORY {
-            self.history.pop_front();
-        }
-        self.history.push_back(PoseSnapshot {
-            at: frame_end,
-            lines: self.current.clone(),
-        });
-        while self
-            .history
-            .front()
-            .is_some_and(|snapshot| frame_end.seconds_since(snapshot.at) > HISTORY_SECONDS)
-        {
-            self.history.pop_front();
-        }
-        let exposure = self.exposure_poses(exposure_start, frame_end);
+        let exposure = if showcase {
+            None
+        } else {
+            if self.history.len() == MAX_HISTORY {
+                self.history.pop_front();
+            }
+            self.history.push_back(PoseSnapshot {
+                at: frame_end,
+                lines: self.current.clone(),
+            });
+            while self
+                .history
+                .front()
+                .is_some_and(|snapshot| frame_end.seconds_since(snapshot.at) > HISTORY_SECONDS)
+            {
+                self.history.pop_front();
+            }
+            self.exposure_poses(exposure_start, frame_end)
+        };
         for (index, current) in self.current.iter().enumerate() {
             let rgb = self.tint.edge_rgb(index, palette);
             let base_opacity = self.line_energy.max(near_opacity);
@@ -2977,13 +3359,13 @@ impl FigureRuntime {
             let end_alpha = alpha * current.end_depth_opacity;
 
             let Some(exposure) = &exposure else {
-                out.push(LineInstance::shaded(
-                    current.start,
-                    current.end,
-                    [rgb[0], rgb[1], rgb[2], start_alpha],
-                    [rgb[0], rgb[1], rgb[2], end_alpha],
-                    width,
-                ));
+                let start_color = [rgb[0], rgb[1], rgb[2], start_alpha];
+                let end_color = [rgb[0], rgb[1], rgb[2], end_alpha];
+                out.push(if showcase {
+                    LineInstance::flat(current.start, current.end, start_color, end_color, width)
+                } else {
+                    LineInstance::shaded(current.start, current.end, start_color, end_color, width)
+                });
                 continue;
             };
             let first = exposure.first[index];
@@ -3343,12 +3725,20 @@ impl FigureTint {
     /// `accent` is the accent band value at spawn; it shifts the chosen theme
     /// color without making it follow the spectrum afterwards.
     fn spawn(kind: FigureKind, accent: f32, rng: &mut Rng) -> Self {
-        let offset = (accent.clamp(0.0, 1.0) * (Palette::VIVID_COUNT - 1) as f32).round() as usize;
+        let offset = accent_index(accent);
         let primary = (offset + rng.range(Palette::VIVID_COUNT)) % Palette::VIVID_COUNT;
         let secondary = kind
             .uses_two_accents()
             .then(|| (primary + 1 + rng.range(Palette::VIVID_COUNT - 1)) % Palette::VIVID_COUNT);
         Self { primary, secondary }
+    }
+
+    /// A model is one coherent object, so every edge shares the accent color.
+    fn solid(accent: f32) -> Self {
+        Self {
+            primary: accent_index(accent),
+            secondary: None,
+        }
     }
 
     /// RGB for one edge. The palette is sampled live so a theme crossfade
@@ -3370,6 +3760,10 @@ impl FigureTint {
 fn smoothstep(value: f32) -> f32 {
     let value = value.clamp(0.0, 1.0);
     value * value * (3.0 - 2.0 * value)
+}
+
+fn accent_index(accent: f32) -> usize {
+    (accent.clamp(0.0, 1.0) * (Palette::VIVID_COUNT - 1) as f32).round() as usize
 }
 
 struct Rng(u64);
@@ -3814,7 +4208,7 @@ mod tests {
         visualizer.handle_action(Action::Snare, 0.0);
         assert!((visualizer.flip_target - TAU * 0.5).abs() < 1e-5);
 
-        let before = visualizer.scene_name();
+        let before = visualizer.scene_name().to_owned();
         visualizer.handle_action(Action::Drop(1.0), 0.0);
         assert_ne!(
             visualizer.scene_name(),
@@ -4069,7 +4463,7 @@ mod tests {
     #[test]
     fn a_spawned_figure_keeps_its_edge_colors_while_the_music_changes() {
         let mut visualizer = Visualizer::new();
-        visualizer.scene.current.kind = FigureKind::Tesseract;
+        visualizer.scene.current.source = FigureSource::Procedural(FigureKind::Tesseract);
         visualizer.scene.current.wireframe = Wireframe::build(FigureKind::Tesseract);
         visualizer.scene.current.reset_temporal();
         visualizer.scene.current.tint =
@@ -4167,7 +4561,7 @@ mod tests {
     #[test]
     fn tesseract_vertices_move_continuously() {
         let mut visualizer = Visualizer::new();
-        visualizer.scene.current.kind = FigureKind::Tesseract;
+        visualizer.scene.current.source = FigureSource::Procedural(FigureKind::Tesseract);
         visualizer.scene.current.wireframe = Wireframe::build(FigureKind::Tesseract);
         visualizer.scene.current.reset_temporal();
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
@@ -4677,5 +5071,114 @@ mod tests {
             assert!(envelope.value >= 0.0);
             previous = envelope.value;
         }
+    }
+
+    #[test]
+    fn presentation_cycles_gauges_figures_and_weapon() {
+        assert_eq!(Presentation::Gauges.next(), Presentation::Visualizer);
+        assert_eq!(Presentation::Visualizer.next(), Presentation::Weapon);
+        assert_eq!(Presentation::Weapon.next(), Presentation::Gauges);
+        assert!(Presentation::Visualizer.shows_visualizer());
+        assert!(Presentation::Weapon.shows_visualizer());
+        assert!(!Presentation::Gauges.shows_visualizer());
+    }
+
+    #[test]
+    fn crease_threshold_steps_and_clamps() {
+        let mut threshold = CreaseThreshold::default();
+        assert_eq!(threshold.whole_degrees(), 45);
+        assert_eq!(threshold.adjusted(Adjustment::Decrease).whole_degrees(), 40);
+        for _ in 0..20 {
+            threshold = threshold.adjusted(Adjustment::Increase);
+        }
+        assert_eq!(threshold, CreaseThreshold::MAX);
+        for _ in 0..20 {
+            threshold = threshold.adjusted(Adjustment::Decrease);
+        }
+        assert_eq!(threshold, CreaseThreshold::MIN);
+        assert!(CreaseThreshold::try_from(9.0).is_err());
+        assert!(CreaseThreshold::try_from(81.0).is_err());
+        assert!(CreaseThreshold::try_from(f32::NAN).is_err());
+        assert_eq!(f32::from(CreaseThreshold::default()), 45.0);
+    }
+
+    #[test]
+    fn drops_and_the_hotkey_advance_the_showcase_model() {
+        let mut visualizer = Visualizer::new();
+        visualizer.set_presentation(Presentation::Weapon);
+        let (_, total) = visualizer
+            .model_position()
+            .expect("the showcase has loaded models");
+        if total < 2 {
+            return;
+        }
+        let first = visualizer.scene_name().to_owned();
+        visualizer.handle_action(Action::Drop(1.0), 0.0);
+        assert_ne!(visualizer.scene_name(), first);
+        assert!(visualizer.scene.outgoing.is_some());
+        visualizer.next_model();
+        assert_eq!(visualizer.scene_name(), first);
+    }
+
+    #[test]
+    fn weapon_showcase_swaps_figures_for_the_model_wireframe() -> anyhow::Result<()> {
+        let mut visualizer = Visualizer::new();
+        visualizer.set_presentation(Presentation::Weapon);
+        assert_eq!(visualizer.presentation, Presentation::Weapon);
+        assert_ne!(visualizer.scene_name(), "Cube");
+        assert!(!visualizer.scene_name().is_empty());
+        assert!(visualizer.scene.current.is_showcase());
+
+        let palette = Palette::from_theme(ThemeId::default());
+        let frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        visualizer.debug_music([0.6; BAND_COUNT], 0.6);
+        visualizer.update(
+            frame,
+            ShutterFrames::try_from(2.0)?,
+            1.0 / 60.0,
+            &palette,
+            (1280.0, 440.0),
+            1.0,
+            1.0,
+        );
+        let fine = {
+            let displayed = visualizer.frame();
+            let lines = displayed.lines.len() + displayed.model_lines.len();
+            assert!(lines > 1_000);
+            assert!(
+                displayed.ribbons.is_empty(),
+                "the rigid model does not sweep"
+            );
+            assert!(
+                displayed
+                    .model_lines
+                    .iter()
+                    .all(|line| line.style[1] == 1.0),
+                "the model wireframe uses flat caps"
+            );
+            assert!(
+                displayed.lines.iter().all(|line| line.style[1] == 0.0),
+                "diagnosis lines keep round caps"
+            );
+            lines
+        };
+        visualizer.set_crease_threshold(CreaseThreshold::try_from(70.0)?);
+        let next = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        visualizer.update(
+            next,
+            ShutterFrames::try_from(2.0)?,
+            1.0 / 60.0,
+            &palette,
+            (1280.0, 440.0),
+            1.0,
+            1.0,
+        );
+        let coarse = visualizer.frame();
+        assert!(coarse.lines.len() + coarse.model_lines.len() < fine);
+
+        visualizer.set_presentation(Presentation::Visualizer);
+        assert!(!visualizer.scene.current.is_showcase());
+        assert_eq!(visualizer.scene_name(), "Cube");
+        Ok(())
     }
 }

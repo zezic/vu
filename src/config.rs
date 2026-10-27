@@ -178,6 +178,7 @@ pub struct Config {
     pub detectors: crate::visualizer::DetectorSettings,
     pub depth_fade: crate::visualizer::DepthFade,
     pub near_opacity: crate::visualizer::NearOpacity,
+    pub crease_threshold: crate::visualizer::CreaseThreshold,
     pub tuning: crate::visualizer::VisualizerTuning,
 }
 

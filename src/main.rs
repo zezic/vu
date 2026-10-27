@@ -95,6 +95,7 @@ enum Setting {
     DropGapThreshold,
     DepthFade,
     NearOpacity,
+    CreaseThreshold,
 }
 
 struct App {
@@ -184,6 +185,10 @@ impl App {
             Setting::NearOpacity => {
                 settings.near_opacity = settings.near_opacity.adjusted(adjustment);
                 self.meter.set_near_opacity(settings.near_opacity);
+            }
+            Setting::CreaseThreshold => {
+                settings.crease_threshold = settings.crease_threshold.adjusted(adjustment);
+                self.meter.set_crease_threshold(settings.crease_threshold);
             }
         }
     }
@@ -359,7 +364,7 @@ impl App {
                             self.meter.set_debug(!self.meter.debug());
                         }
                         KeyCode::KeyF if !event.repeat => {
-                            let presentation = self.settings.presentation.toggled();
+                            let presentation = self.settings.presentation.next();
                             self.settings.edit().presentation = presentation;
                             self.meter.set_presentation(presentation);
                         }
@@ -387,6 +392,13 @@ impl App {
                         KeyCode::KeyI => {
                             self.adjust_setting(Setting::NearOpacity, Adjustment::Increase)
                         }
+                        KeyCode::Comma => {
+                            self.adjust_setting(Setting::CreaseThreshold, Adjustment::Decrease)
+                        }
+                        KeyCode::Period => {
+                            self.adjust_setting(Setting::CreaseThreshold, Adjustment::Increase)
+                        }
+                        KeyCode::Backslash if !event.repeat => self.meter.next_model(),
                         KeyCode::KeyM if !event.repeat => {
                             self.adjust_setting(Setting::Mode, Adjustment::Increase)
                         }

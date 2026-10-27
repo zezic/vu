@@ -8,6 +8,7 @@ A stereo audio meter with VU, quasi-peak PPM, RMS, and sample-peak modes.
 
 - Rust: https://rustup.rs/
 - A GPU with compute support for Vello's wgpu renderer.
+- Run from the project root so the weapon showcase can read `assets/models/`.
 
 ## Run
 
@@ -21,7 +22,8 @@ On macOS, allow system audio recording when prompted.
 and 1 Hz.
 - `D` - toggles the visualizer's analysis debug panel.
 - `Esc` - closes the analysis inspector without leaving the debug panel.
-- `F` - toggles between the physical gauges and the wireframe visualizer.
+- `F` - cycles the physical gauges, the evolving wireframe figures, and the
+weapon showcase.
 - `M` - cycles VU, BBC-style PPM, custom 300 ms RMS, and Sample Peak.
 - `N` - In PPM and Sample Peak, switches the physical needle between **Full Spec**
 and **Vintage FR**, the two Sifam response curves.
@@ -42,6 +44,11 @@ steps, from -1.0 to +1.0. Both detector settings persist in the config file.
 setting persists in the config file.
 - `U` / `I` - decrease or increase the minimum near-edge opacity in 5% steps, from
 60% to 100%. The setting persists in the config file.
+- `,` / `.` - decrease or increase the weapon showcase crease threshold in 5 degree
+steps, from 10 to 80 degrees. Lower values keep more mesh edges; the setting
+persists in the config file.
+- `\` - advance the weapon showcase to the next model. Energy drops advance it
+too.
 
 ## Modes
 
@@ -74,15 +81,31 @@ Double-click to reset both values to the default range (53.4 dB) and bend
 
 ![Abstract wireframe visualizer](./assets/visualizer.png)
 
-VU opens with a pseudo-3D wireframe scene; press `F` to switch to the physical
-gauges. The scene starts as a simple cube and evolves through an octahedron,
-icosahedron, tesseract, and
-torus as energy hits arrive. Each figure is projected in perspective and drawn as
-vector lines with uniform weight. Edge opacity follows vertex depth: nearest
-vertices use the adjustable near-opacity floor (60% by default, brightened by
-line energy), farther vertices fade by the adjustable depth-fade strength (50% by
-default), and every edge interpolates its opacity between those endpoints. Motion
-blur carries the same per-vertex opacities through the exposure.
+VU opens with a pseudo-3D wireframe scene; press `F` to cycle through the
+physical gauges and the weapon showcase. The scene starts as a simple cube and
+evolves through an octahedron, icosahedron, tesseract, and torus as energy hits
+arrive. Each figure is projected in perspective and drawn as vector lines with
+uniform weight. Edge opacity follows vertex depth: nearest vertices use the
+adjustable near-opacity floor (60% by default, brightened by line energy),
+farther vertices fade by the adjustable depth-fade strength (50% by default),
+and every edge interpolates its opacity between those endpoints. Motion blur
+carries the same per-vertex opacities through the exposure.
+
+Pressing `F` again replaces the figures with the weapon showcase. It loads every
+`.glb` model in `assets/models/` in name order, welds vertices that glTF split
+along UV and normal seams, and keeps boundary edges plus crease edges sharper
+than the adjustable crease threshold (45 degrees by default). `,` / `.` lowers or
+raises that threshold from 10 to 80 degrees while keeping the current pose; lower
+values keep more mesh edges. Energy drops and `\` advance to the next model,
+wrapping around, and the HUD reports the current model position. The model is
+centered and scaled to the same view radius as the figures, kept rigid, and
+driven by the same spin, pitch, roll, pulse, accent, and depth-opacity controls.
+Model edges use flat square caps instead of the round figure caps. The model
+composites additively on dark themes and multiplicatively on light themes; zero
+or full color components are nudged by one 8-bit step so every channel
+contributes. Motion-blur ribbons stay off for the model because it does not
+deform or sweep like the figures. The bottom-right HUD reports the live line
+count beside the shutter readout.
 
 A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The bands
 drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,
