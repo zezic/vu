@@ -42,8 +42,9 @@ steps, from -1.0 to +1.0. Both detector settings persist in the config file.
 - `O` / `P` - decrease or increase the depth opacity modulation in 5% steps, from
 0% (all vertices opaque) to 100% (the farthest vertices fully transparent). The
 setting persists in the config file.
-- `U` / `I` - decrease or increase the minimum near-edge opacity in 5% steps, from
-10% to 100%. The setting persists in the config file.
+- `U` / `I` - decrease or increase the minimum near-edge opacity. From 100% down
+to 10% the step is 5%; from 10% down to 1% it is 1%. The setting persists in the
+config file.
 - `,` / `.` - decrease or increase the weapon showcase crease threshold in 5 degree
 steps, from 10 to 80 degrees. Lower values keep more mesh edges; the setting
 persists in the config file.

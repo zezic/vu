@@ -171,10 +171,13 @@ impl From<DepthFade> for f32 {
 pub struct NearOpacity(f32);
 
 impl NearOpacity {
-    const MIN: f32 = 0.1;
+    const MIN: f32 = 0.01;
     const MAX: f32 = 1.0;
     const DEFAULT: f32 = 0.6;
     const STEP: f32 = 0.05;
+    const LOW_MAX: f32 = 0.1;
+    const LOW_STEP: f32 = 0.01;
+    const EPSILON: f32 = 1e-4;
 
     pub fn value(self) -> f32 {
         self.0
@@ -187,7 +190,9 @@ impl NearOpacity {
     #[must_use]
     pub fn adjusted(self, adjustment: Adjustment) -> Self {
         let delta = match adjustment {
+            Adjustment::Decrease if self.0 <= Self::LOW_MAX + Self::EPSILON => -Self::LOW_STEP,
             Adjustment::Decrease => -Self::STEP,
+            Adjustment::Increase if self.0 < Self::LOW_MAX - Self::EPSILON => Self::LOW_STEP,
             Adjustment::Increase => Self::STEP,
         };
         Self((self.0 + delta).clamp(Self::MIN, Self::MAX))
@@ -3664,7 +3669,11 @@ impl FigureRuntime {
         };
         for (index, current) in self.current.iter().enumerate() {
             let rgb = self.tint.edge_rgb(index, palette);
-            let base_opacity = self.line_energy.max(near_opacity);
+            let base_opacity = if near_opacity < computation::LINE_ENERGY_BASE {
+                self.line_energy * near_opacity / computation::LINE_ENERGY_BASE
+            } else {
+                self.line_energy.max(near_opacity)
+            };
             let alpha = self.opacity * base_opacity;
             let width = base_width * (1.0 + music.kick * 0.25);
             let alpha = alpha.clamp(0.0, 1.0);
@@ -4253,7 +4262,7 @@ mod tests {
     }
 
     #[test]
-    fn near_opacity_adjusts_in_five_percent_steps_and_stays_normalized() {
+    fn near_opacity_uses_five_percent_then_one_percent_steps() {
         let opacity = NearOpacity::default();
         assert_eq!(opacity.percent(), 60);
         assert_eq!(opacity.adjusted(Adjustment::Increase).percent(), 65);
@@ -4269,9 +4278,15 @@ mod tests {
         for _ in 0..20 {
             lowest = lowest.adjusted(Adjustment::Decrease);
         }
-        assert_eq!(lowest.percent(), 10);
+        assert_eq!(lowest.percent(), 1);
 
-        assert!(NearOpacity::try_from(0.09).is_err());
+        let ten = NearOpacity::try_from(0.10).expect("ten percent is valid");
+        assert_eq!(ten.adjusted(Adjustment::Decrease).percent(), 9);
+        assert_eq!(ten.adjusted(Adjustment::Increase).percent(), 15);
+        let nine = ten.adjusted(Adjustment::Decrease);
+        assert_eq!(nine.adjusted(Adjustment::Increase).percent(), 10);
+
+        assert!(NearOpacity::try_from(0.005).is_err());
         assert!(NearOpacity::try_from(1.01).is_err());
         assert!(NearOpacity::try_from(f32::NAN).is_err());
     }
@@ -4712,6 +4727,40 @@ mod tests {
         assert!(short_count > 0);
         assert!(long_count > 0);
         assert!(long_movement > short_movement);
+    }
+
+    #[test]
+    fn near_opacity_floor_scales_below_the_line_energy_base() {
+        fn peak_alpha(near_opacity: NearOpacity) -> f32 {
+            let mut visualizer = Visualizer::new();
+            visualizer.set_near_opacity(near_opacity);
+            visualizer.debug_music([0.0; BAND_COUNT], 0.0);
+            let palette = Palette::from_theme(crate::theme::ThemeId::default());
+            let frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+            visualizer.update(
+                frame,
+                ShutterFrames::try_from(1.0).unwrap(),
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            visualizer
+                .frame()
+                .lines
+                .iter()
+                .flat_map(|line| [line.start_color[3], line.end_color[3]])
+                .fold(0.0, f32::max)
+        }
+
+        let normal = peak_alpha(NearOpacity::default());
+        let low = peak_alpha(NearOpacity::try_from(0.01).unwrap());
+        assert!(normal > 0.0);
+        assert!(
+            low < normal * 0.1,
+            "a 1% near-opacity floor must scale the line opacity below the 60% line base"
+        );
     }
 
     #[test]

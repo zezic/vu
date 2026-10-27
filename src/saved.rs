@@ -208,7 +208,7 @@ mod tests {
             "(depth_fade: -0.1)",
             "(depth_fade: 1.1)",
             "(depth_fade: NaN)",
-            "(near_opacity: 0.05)",
+            "(near_opacity: 0.005)",
             "(near_opacity: 1.1)",
             "(near_opacity: NaN)",
             "(crease_threshold: 9.0)",

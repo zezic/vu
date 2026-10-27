@@ -5,6 +5,10 @@ use strum::{EnumCount, VariantArray};
 
 use super::{style_value, Property, Style, BAND_COUNT};
 
+/// Base term of the line-energy mix. The visualizer scales a near-opacity
+/// floor below this value against the line energy.
+pub const LINE_ENERGY_BASE: f32 = 0.6;
+
 /// Reject values that the inspector could never produce.
 pub(super) fn validate_value(
     value: f32,
@@ -2055,7 +2059,7 @@ static LINE_TERMS: [ContributionSpec; 2] = [
         Some(Gain::LineEnergy),
         Mix::Add,
     ),
-    constant_term(0.6, "BASE"),
+    constant_term(LINE_ENERGY_BASE, "BASE"),
 ];
 
 static PHASE_SPEED_TERMS: [ContributionSpec; 4] = [
