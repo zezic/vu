@@ -59,6 +59,9 @@ pub use renderer::Renderer;
 const MAX_PENDING_ACTIONS: usize = 64;
 const MAX_HISTORY: usize = 17;
 const HISTORY_SECONDS: f64 = 2.0;
+/// Below this screen-space movement, the swept ribbon is narrower than the
+/// line antialiasing, so the analytic line renderer is the better choice.
+const MOTION_BLUR_MIN_PIXELS: f32 = 1.0;
 /// Inspector traces are sampled independently of the panel refresh rate.
 const DEBUG_SAMPLE_INTERVAL: f32 = 1.0 / 60.0;
 const DEBUG_HISTORY_SECONDS: f32 = 4.0;
@@ -3542,6 +3545,16 @@ impl FigureRuntime {
             let distance_a = (last.start - first.start).length();
             let distance_b = (last.end - first.end).length();
             let movement = distance_a.max(distance_b);
+            if movement <= MOTION_BLUR_MIN_PIXELS {
+                let start_color = [rgb[0], rgb[1], rgb[2], alpha * middle.start_depth_opacity];
+                let end_color = [rgb[0], rgb[1], rgb[2], alpha * middle.end_depth_opacity];
+                out.push(if showcase {
+                    LineInstance::flat(middle.start, middle.end, start_color, end_color, width)
+                } else {
+                    LineInstance::shaded(middle.start, middle.end, start_color, end_color, width)
+                });
+                continue;
+            }
             let fade = |distance: f32| 0.35 + 0.65 * width / (width + distance);
             let start_alpha = alpha * fade(distance_a) * middle.start_depth_opacity;
             let end_alpha = alpha * fade(distance_b) * middle.end_depth_opacity;
@@ -5341,8 +5354,10 @@ mod tests {
         for _ in 0..4 {
             step(&mut visualizer);
         }
-        assert!(visualizer.frame().model_lines.is_empty());
-        assert!(!visualizer.frame().model_ribbons.is_empty());
+        assert!(
+            !visualizer.frame().model_ribbons.is_empty(),
+            "fast model edges should sweep"
+        );
         assert!(
             visualizer.line_count() > 1_000,
             "the logical line count survives the ribbon render path"
@@ -5352,6 +5367,39 @@ mod tests {
         step(&mut visualizer);
         assert!(!visualizer.frame().model_lines.is_empty());
         assert!(visualizer.frame().model_ribbons.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn slow_showcase_edges_use_the_analytic_line_fallback() -> anyhow::Result<()> {
+        let mut visualizer = Visualizer::new();
+        visualizer.set_presentation(Presentation::Weapon);
+        visualizer.set_model_motion(ModelMotion::Swept);
+        let palette = Palette::from_theme(ThemeId::default());
+        let shutter = ShutterFrames::try_from(1.0)?;
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        for _ in 0..30 {
+            visualizer.debug_music([0.0; BAND_COUNT], 0.0);
+            visualizer.update(
+                frame,
+                shutter,
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        }
+        let frame = visualizer.frame();
+        assert!(
+            !frame.model_lines.is_empty(),
+            "subpixel motion should fall back to analytic lines"
+        );
+        assert!(
+            frame.model_ribbons.is_empty(),
+            "subpixel motion should not emit swept ribbons"
+        );
         Ok(())
     }
 
