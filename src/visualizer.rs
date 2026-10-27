@@ -56,7 +56,6 @@ use spectrum::{Spectrum, SpectrumAnalyzer};
 
 pub use renderer::Renderer;
 
-const MAX_RIBBONS: usize = 8192;
 const MAX_PENDING_ACTIONS: usize = 64;
 const MAX_HISTORY: usize = 17;
 const HISTORY_SECONDS: f64 = 2.0;
@@ -163,14 +162,15 @@ impl From<DepthFade> for f32 {
     }
 }
 
-/// Minimum opacity at the nearest figure vertex before line-energy brightening.
+/// Minimum opacity at the nearest scene vertex before line-energy brightening.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "f32", into = "f32")]
 pub struct NearOpacity(f32);
 
 impl NearOpacity {
-    const MIN: f32 = 0.6;
+    const MIN: f32 = 0.1;
     const MAX: f32 = 1.0;
+    const DEFAULT: f32 = 0.6;
     const STEP: f32 = 0.05;
 
     pub fn value(self) -> f32 {
@@ -193,7 +193,7 @@ impl NearOpacity {
 
 impl Default for NearOpacity {
     fn default() -> Self {
-        Self(Self::MIN)
+        Self(Self::DEFAULT)
     }
 }
 
@@ -203,7 +203,9 @@ impl TryFrom<f32> for NearOpacity {
     fn try_from(value: f32) -> Result<Self, Self::Error> {
         anyhow::ensure!(
             value.is_finite() && (Self::MIN..=Self::MAX).contains(&value),
-            "near_opacity must be finite and between 0.6 and 1"
+            "near_opacity must be finite and between {MIN} and {MAX}",
+            MIN = Self::MIN,
+            MAX = Self::MAX
         );
         Ok(Self(value))
     }
@@ -269,6 +271,85 @@ impl TryFrom<f32> for CreaseThreshold {
 impl From<CreaseThreshold> for f32 {
     fn from(value: CreaseThreshold) -> Self {
         value.0
+    }
+}
+
+/// Base visualizer line-width multiplier. 1.0 is the viewport-derived width.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct LineWidth(f32);
+
+impl LineWidth {
+    pub const MIN: f32 = 0.1;
+    pub const MAX: f32 = 3.0;
+    const STEP: f32 = 0.1;
+
+    pub fn factor(self) -> f32 {
+        self.0
+    }
+
+    pub fn percent(self) -> u32 {
+        (self.0 * 100.0).round() as u32
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        let delta = match adjustment {
+            Adjustment::Decrease => -Self::STEP,
+            Adjustment::Increase => Self::STEP,
+        };
+        Self((self.0 + delta).clamp(Self::MIN, Self::MAX))
+    }
+}
+
+impl Default for LineWidth {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl TryFrom<f32> for LineWidth {
+    type Error = anyhow::Error;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        anyhow::ensure!(
+            value.is_finite() && (Self::MIN..=Self::MAX).contains(&value),
+            "line_width must be finite and between {MIN} and {MAX}",
+            MIN = Self::MIN,
+            MAX = Self::MAX
+        );
+        Ok(Self(value))
+    }
+}
+
+impl From<LineWidth> for f32 {
+    fn from(value: LineWidth) -> Self {
+        value.0
+    }
+}
+
+/// Whether the rigid weapon showcase uses the analytical exposure sweep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelMotion {
+    #[default]
+    Still,
+    Swept,
+}
+
+impl ModelMotion {
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Still => Self::Swept,
+            Self::Swept => Self::Still,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Still => "OFF",
+            Self::Swept => "ON",
+        }
     }
 }
 
@@ -1255,6 +1336,7 @@ pub struct Frame<'a> {
     pub lines: &'a [LineInstance],
     pub model_lines: &'a [LineInstance],
     pub ribbons: &'a [RibbonInstance],
+    pub model_ribbons: &'a [RibbonInstance],
     pub model_composite: ModelComposite,
 }
 
@@ -1281,6 +1363,9 @@ pub struct Visualizer {
     showcase: Showcase,
     model_composite: ModelComposite,
     model_lines: Vec<LineInstance>,
+    model_ribbons: Vec<RibbonInstance>,
+    line_width: LineWidth,
+    model_motion: ModelMotion,
     frames: ShutterWindow,
     kick: f32,
     kick_decay: f32,
@@ -1338,6 +1423,9 @@ impl Visualizer {
             showcase: Showcase::Unloaded,
             model_composite: ModelComposite::default(),
             model_lines: Vec::new(),
+            model_ribbons: Vec::new(),
+            line_width: LineWidth::default(),
+            model_motion: ModelMotion::default(),
             frames: ShutterWindow::default(),
             kick: 0.0,
             kick_decay: tuning.kick_decay,
@@ -1372,7 +1460,7 @@ impl Visualizer {
             diagnosis: Diagnosis::new(),
             debug_history: DebugHistory::default(),
             lines: Vec::with_capacity(2048),
-            ribbons: Vec::with_capacity(MAX_RIBBONS),
+            ribbons: Vec::with_capacity(2048),
         };
         visualizer
             .analyzer
@@ -1409,6 +1497,7 @@ impl Visualizer {
             self.scene.enter_showcase(
                 models.current(),
                 self.crease_threshold,
+                self.model_motion,
                 accent,
                 &self.style_tuning,
             );
@@ -1424,6 +1513,7 @@ impl Visualizer {
                 self.scene.enter_showcase(
                     models.current(),
                     self.crease_threshold,
+                    self.model_motion,
                     accent,
                     &self.style_tuning,
                 );
@@ -1445,8 +1535,12 @@ impl Visualizer {
         if !models.advance() {
             return;
         }
-        self.scene
-            .switch_showcase(models.current(), self.crease_threshold, accent);
+        self.scene.switch_showcase(
+            models.current(),
+            self.crease_threshold,
+            self.model_motion,
+            accent,
+        );
     }
 
     pub fn next_model(&mut self) {
@@ -1667,7 +1761,23 @@ impl Visualizer {
             lines: &self.lines,
             model_lines: &self.model_lines,
             ribbons: &self.ribbons,
+            model_ribbons: &self.model_ribbons,
             model_composite: self.model_composite,
+        }
+    }
+
+    /// Logical wireframe line count. Model edges stay counted while motion
+    /// blur renders them as swept ribbons; diagnosis lines are included.
+    pub fn line_count(&self) -> usize {
+        if self.scene.current.is_showcase() {
+            let outgoing = self
+                .scene
+                .outgoing
+                .as_ref()
+                .map_or(0, FigureRuntime::wireframe_edge_count);
+            self.lines.len() + self.scene.current.wireframe_edge_count() + outgoing
+        } else {
+            self.lines.len()
         }
     }
 
@@ -2214,6 +2324,20 @@ impl Visualizer {
         self.model_composite = composite;
     }
 
+    pub fn set_line_width(&mut self, width: LineWidth) {
+        self.line_width = width;
+    }
+
+    pub fn set_model_motion(&mut self, motion: ModelMotion) {
+        if self.model_motion == motion {
+            return;
+        }
+        self.model_motion = motion;
+        if self.scene.current.is_showcase() {
+            self.scene.set_model_motion(motion);
+        }
+    }
+
     pub fn diagnosis(&self) -> Option<&DiagnosisReadout> {
         if self.diagnosis.suppressed {
             None
@@ -2372,7 +2496,7 @@ impl Visualizer {
             phase: self.scene.current.phase.rem_euclid(TAU),
             entrance: self.scene.current.entrance,
             lines: self.lines.len() + self.model_lines.len(),
-            ribbons: self.ribbons.len(),
+            ribbons: self.ribbons.len() + self.model_ribbons.len(),
         }
     }
 
@@ -2439,7 +2563,8 @@ impl Visualizer {
             snare_onset: status.snare.flash,
             drop_onset: status.drop.flash,
         };
-        let width = (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * 1.4;
+        let width =
+            (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * 1.4 * self.line_width.factor();
         let quake_scale = (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * QUAKE_PIXELS;
         let flip_pitch = if self.property_gates.plays(Property::Flip) {
             self.flip.value()
@@ -2457,6 +2582,7 @@ impl Visualizer {
         self.lines.clear();
         self.model_lines.clear();
         self.ribbons.clear();
+        self.model_ribbons.clear();
         if self.presentation == Presentation::Weapon
             && matches!(&self.showcase, Showcase::Failed(_))
         {
@@ -2465,10 +2591,11 @@ impl Visualizer {
             self.record_debug_sample();
             return;
         }
-        let scene_lines = if self.scene.current.is_showcase() {
-            &mut self.model_lines
+        let showcase = self.scene.current.is_showcase();
+        let (scene_lines, scene_ribbons) = if showcase {
+            (&mut self.model_lines, &mut self.model_ribbons)
         } else {
-            &mut self.lines
+            (&mut self.lines, &mut self.ribbons)
         };
         self.scene.update(
             dt,
@@ -2488,14 +2615,8 @@ impl Visualizer {
             shake,
             self.time,
             scene_lines,
-            &mut self.ribbons,
+            scene_ribbons,
         );
-        debug_assert!(
-            self.ribbons.len() <= MAX_RIBBONS,
-            "the wireframe renderer ribbon budget is exhausted: {} ribbons",
-            self.ribbons.len()
-        );
-        self.ribbons.truncate(MAX_RIBBONS);
         self.record_debug_sample();
         let ui_scale = ui_scale.max(0.25);
         self.update_diagnosis(dt, viewport, self.palette, ui_scale);
@@ -2891,6 +3012,7 @@ impl Scene {
         &mut self,
         model: &model::Model,
         crease: CreaseThreshold,
+        motion: ModelMotion,
         accent: f32,
         style_tuning: &StyleTuning,
     ) {
@@ -2901,6 +3023,7 @@ impl Scene {
             model.wireframe(crease),
             style,
             FigureTint::solid(accent),
+            motion,
         );
         self.outgoing = None;
         self.transition = 1.0;
@@ -2915,7 +3038,13 @@ impl Scene {
     }
 
     /// Crossfades into another model while keeping the current orientation.
-    fn switch_showcase(&mut self, model: &model::Model, crease: CreaseThreshold, accent: f32) {
+    fn switch_showcase(
+        &mut self,
+        model: &model::Model,
+        crease: CreaseThreshold,
+        motion: ModelMotion,
+        accent: f32,
+    ) {
         assert!(
             self.current.is_showcase(),
             "only the weapon showcase switches models"
@@ -2925,6 +3054,7 @@ impl Scene {
             model.wireframe(crease),
             self.current.target_style,
             FigureTint::solid(accent),
+            motion,
         );
         entering.pose = self.current.pose;
         entering.pitch = self.current.pitch;
@@ -2933,6 +3063,21 @@ impl Scene {
         entering.phase = self.current.phase;
         self.outgoing = Some(std::mem::replace(&mut self.current, entering));
         self.transition = 0.0;
+    }
+
+    fn set_model_motion(&mut self, motion: ModelMotion) {
+        assert!(
+            self.current.is_showcase(),
+            "only the weapon showcase changes its motion blur"
+        );
+        self.current.set_motion_blur(motion == ModelMotion::Swept);
+        if let Some(outgoing) = &mut self.outgoing {
+            assert!(
+                outgoing.is_showcase(),
+                "the outgoing showcase model owns its motion blur"
+            );
+            outgoing.set_motion_blur(motion == ModelMotion::Swept);
+        }
     }
 
     fn leave_showcase(&mut self, rng: &mut Rng, accent: f32, style_tuning: &StyleTuning) {
@@ -3087,6 +3232,7 @@ struct FigureRuntime {
     line_energy: f32,
     entrance: f32,
     opacity: f32,
+    motion_blur: bool,
     history: VecDeque<PoseSnapshot>,
     vertices: Vec<Projected>,
     world_vertices: Vec<Vec3>,
@@ -3127,12 +3273,19 @@ impl FigureRuntime {
             opacity,
             target_style,
             tint,
+            true,
         )
     }
 
     /// A loaded model stays rigid and keeps a permanent label instead of
     /// evolving through the figure kinds.
-    fn showcase(name: String, wireframe: Wireframe, target_style: Style, tint: FigureTint) -> Self {
+    fn showcase(
+        name: String,
+        wireframe: Wireframe,
+        target_style: Style,
+        tint: FigureTint,
+        motion: ModelMotion,
+    ) -> Self {
         let pose = Pose {
             yaw: TAU * 0.25,
             ..Pose::default()
@@ -3144,6 +3297,7 @@ impl FigureRuntime {
             1.0,
             target_style,
             tint,
+            motion == ModelMotion::Swept,
         )
     }
 
@@ -3154,6 +3308,7 @@ impl FigureRuntime {
         opacity: f32,
         target_style: Style,
         tint: FigureTint,
+        motion_blur: bool,
     ) -> Self {
         let vertex_capacity = wireframe.vertex_count();
         let edge_capacity = wireframe.edges().len();
@@ -3175,6 +3330,7 @@ impl FigureRuntime {
             line_energy: 0.6,
             entrance: opacity,
             opacity,
+            motion_blur,
             history: VecDeque::with_capacity(MAX_HISTORY),
             vertices: Vec::with_capacity(vertex_capacity),
             world_vertices: Vec::with_capacity(vertex_capacity),
@@ -3189,8 +3345,20 @@ impl FigureRuntime {
         self.source.name()
     }
 
+    fn wireframe_edge_count(&self) -> usize {
+        self.wireframe.edges().len()
+    }
+
     fn is_showcase(&self) -> bool {
         self.source.is_model()
+    }
+
+    fn set_motion_blur(&mut self, enabled: bool) {
+        assert!(self.is_showcase(), "figure motion blur is always enabled");
+        self.motion_blur = enabled;
+        if !enabled {
+            self.history.clear();
+        }
     }
 
     fn set_wireframe(&mut self, wireframe: Wireframe) {
@@ -3330,9 +3498,7 @@ impl FigureRuntime {
                     end_depth_opacity: depth_opacity.factor(b.depth),
                 }
             }));
-        let exposure = if showcase {
-            None
-        } else {
+        let exposure = if self.motion_blur {
             if self.history.len() == MAX_HISTORY {
                 self.history.pop_front();
             }
@@ -3348,6 +3514,8 @@ impl FigureRuntime {
                 self.history.pop_front();
             }
             self.exposure_poses(exposure_start, frame_end)
+        } else {
+            None
         };
         for (index, current) in self.current.iter().enumerate() {
             let rgb = self.tint.edge_rgb(index, palette);
@@ -3933,7 +4101,7 @@ mod tests {
         let opacity = NearOpacity::default();
         assert_eq!(opacity.percent(), 60);
         assert_eq!(opacity.adjusted(Adjustment::Increase).percent(), 65);
-        assert_eq!(opacity.adjusted(Adjustment::Decrease).percent(), 60);
+        assert_eq!(opacity.adjusted(Adjustment::Decrease).percent(), 55);
 
         let mut highest = opacity;
         for _ in 0..30 {
@@ -3941,7 +4109,13 @@ mod tests {
         }
         assert_eq!(highest.value(), 1.0);
 
-        assert!(NearOpacity::try_from(0.59).is_err());
+        let mut lowest = opacity;
+        for _ in 0..20 {
+            lowest = lowest.adjusted(Adjustment::Decrease);
+        }
+        assert_eq!(lowest.percent(), 10);
+
+        assert!(NearOpacity::try_from(0.09).is_err());
         assert!(NearOpacity::try_from(1.01).is_err());
         assert!(NearOpacity::try_from(f32::NAN).is_err());
     }
@@ -5118,6 +5292,94 @@ mod tests {
         assert!(visualizer.scene.outgoing.is_some());
         visualizer.next_model();
         assert_eq!(visualizer.scene_name(), first);
+    }
+
+    #[test]
+    fn line_width_steps_and_clamps() {
+        let mut width = LineWidth::default();
+        assert_eq!(width.percent(), 100);
+        assert_eq!(width.adjusted(Adjustment::Decrease).percent(), 90);
+        for _ in 0..40 {
+            width = width.adjusted(Adjustment::Increase);
+        }
+        assert_eq!(width.factor(), LineWidth::MAX);
+        for _ in 0..40 {
+            width = width.adjusted(Adjustment::Decrease);
+        }
+        assert_eq!(width.factor(), LineWidth::MIN);
+        assert!(LineWidth::try_from(0.09).is_err());
+        assert!(LineWidth::try_from(3.1).is_err());
+        assert!(LineWidth::try_from(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn model_motion_blur_can_be_toggled() -> anyhow::Result<()> {
+        let mut visualizer = Visualizer::new();
+        visualizer.set_presentation(Presentation::Weapon);
+        let palette = Palette::from_theme(ThemeId::default());
+        let shutter = ShutterFrames::try_from(4.0)?;
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        let mut step = |visualizer: &mut Visualizer| {
+            visualizer.debug_music([0.6; BAND_COUNT], 0.6);
+            visualizer.update(
+                frame,
+                shutter,
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        };
+
+        step(&mut visualizer);
+        assert!(!visualizer.frame().model_lines.is_empty());
+        assert!(visualizer.frame().model_ribbons.is_empty());
+
+        visualizer.set_model_motion(ModelMotion::Swept);
+        for _ in 0..4 {
+            step(&mut visualizer);
+        }
+        assert!(visualizer.frame().model_lines.is_empty());
+        assert!(!visualizer.frame().model_ribbons.is_empty());
+        assert!(
+            visualizer.line_count() > 1_000,
+            "the logical line count survives the ribbon render path"
+        );
+
+        visualizer.set_model_motion(ModelMotion::Still);
+        step(&mut visualizer);
+        assert!(!visualizer.frame().model_lines.is_empty());
+        assert!(visualizer.frame().model_ribbons.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn line_width_scales_the_model_strokes() -> anyhow::Result<()> {
+        let mut visualizer = Visualizer::new();
+        visualizer.set_presentation(Presentation::Weapon);
+        let palette = Palette::from_theme(ThemeId::default());
+        let frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        let step = |visualizer: &mut Visualizer| {
+            visualizer.update(
+                frame,
+                ShutterFrames::try_from(2.0).expect("valid shutter"),
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            visualizer.frame().model_lines[0].style[0]
+        };
+
+        visualizer.set_line_width(LineWidth::try_from(1.0)?);
+        let normal = step(&mut visualizer);
+        visualizer.set_line_width(LineWidth::try_from(2.0)?);
+        let wide = step(&mut visualizer);
+        assert!((wide / normal - 2.0).abs() < 1e-4);
+        Ok(())
     }
 
     #[test]

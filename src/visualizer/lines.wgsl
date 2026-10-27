@@ -61,7 +61,7 @@ fn segment_distance(point: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
 }
 
 fn line_ink(vertex: VertexOutput) -> LineInk {
-    let width = max(vertex.style.x, 0.7);
+    let width = max(vertex.style.x, 0.05);
     let segment = vertex.endpoints.zw - vertex.endpoints.xy;
     let length_squared = dot(segment, segment);
     var coverage: f32;

@@ -43,6 +43,8 @@ pub struct Renderer {
     model_additive_pipeline: wgpu::RenderPipeline,
     model_multiplicative_pipeline: wgpu::RenderPipeline,
     ribbon_pipeline: wgpu::RenderPipeline,
+    model_additive_ribbon_pipeline: wgpu::RenderPipeline,
+    model_multiplicative_ribbon_pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     uniform_bindings: wgpu::BindGroup,
     uploaded_viewport: Option<[f32; 4]>,
@@ -226,6 +228,38 @@ impl Renderer {
             label: Some("Visualizer ribbons"),
             source: wgpu::ShaderSource::Wgsl(include_str!("ribbons.wgsl").into()),
         });
+        let ribbon_attributes = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 32,
+                shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 48,
+                shader_location: 3,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 64,
+                shader_location: 4,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 80,
+                shader_location: 5,
+            },
+        ];
         let ribbon_pipeline = instance_pipeline(
             device,
             format,
@@ -235,40 +269,35 @@ impl Renderer {
             "ribbon_fragment",
             &uniform_layout,
             std::mem::size_of::<RibbonInstance>() as u64,
-            &[
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 0,
-                    shader_location: 0,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 16,
-                    shader_location: 1,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 32,
-                    shader_location: 2,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 48,
-                    shader_location: 3,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 64,
-                    shader_location: 4,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 80,
-                    shader_location: 5,
-                },
-            ],
+            &ribbon_attributes,
             wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
             wgpu::ColorWrites::ALL,
+        );
+        let model_additive_ribbon_pipeline = instance_pipeline(
+            device,
+            format,
+            "Visualizer model additive ribbons",
+            &ribbon_shader,
+            "ribbon_vertex",
+            "ribbon_additive_fragment",
+            &uniform_layout,
+            std::mem::size_of::<RibbonInstance>() as u64,
+            &ribbon_attributes,
+            additive_blend,
+            wgpu::ColorWrites::COLOR,
+        );
+        let model_multiplicative_ribbon_pipeline = instance_pipeline(
+            device,
+            format,
+            "Visualizer model multiplicative ribbons",
+            &ribbon_shader,
+            "ribbon_vertex",
+            "ribbon_multiply_fragment",
+            &uniform_layout,
+            std::mem::size_of::<RibbonInstance>() as u64,
+            &ribbon_attributes,
+            multiplicative_blend,
+            wgpu::ColorWrites::COLOR,
         );
 
         let line_capacity = 256;
@@ -283,6 +312,8 @@ impl Renderer {
             model_additive_pipeline,
             model_multiplicative_pipeline,
             ribbon_pipeline,
+            model_additive_ribbon_pipeline,
+            model_multiplicative_ribbon_pipeline,
             uniforms,
             uniform_bindings,
             uploaded_viewport: None,
@@ -338,11 +369,27 @@ impl Renderer {
             );
             self.uploaded_viewport = Some(viewport);
         }
-        if !frame.ribbons.is_empty() {
-            self.ensure_ribbon_capacity(&device.device, frame.ribbons.len());
-            device
-                .queue
-                .write_buffer(&self.ribbon_buffer, 0, bytemuck::cast_slice(frame.ribbons));
+        let model_ribbon_count = frame.model_ribbons.len();
+        let ribbon_count = frame.ribbons.len();
+        let total_ribbons = model_ribbon_count + ribbon_count;
+        let ribbon_stride = std::mem::size_of::<RibbonInstance>() as u64;
+        let model_ribbon_bytes = model_ribbon_count as u64 * ribbon_stride;
+        if total_ribbons > 0 {
+            self.ensure_ribbon_capacity(&device.device, total_ribbons);
+            if model_ribbon_count > 0 {
+                device.queue.write_buffer(
+                    &self.ribbon_buffer,
+                    0,
+                    bytemuck::cast_slice(frame.model_ribbons),
+                );
+            }
+            if ribbon_count > 0 {
+                device.queue.write_buffer(
+                    &self.ribbon_buffer,
+                    model_ribbon_bytes,
+                    bytemuck::cast_slice(frame.ribbons),
+                );
+            }
         }
         let model_count = frame.model_lines.len();
         let line_count = frame.lines.len();
@@ -400,11 +447,21 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.line_buffer.slice(0..model_bytes));
             pass.draw(0..6, 0..model_count as u32);
         }
-        if !frame.ribbons.is_empty() {
+        if model_ribbon_count > 0 {
+            let pipeline = match frame.model_composite {
+                ModelComposite::Additive => &self.model_additive_ribbon_pipeline,
+                ModelComposite::Multiplicative => &self.model_multiplicative_ribbon_pipeline,
+            };
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &self.uniform_bindings, &[]);
+            pass.set_vertex_buffer(0, self.ribbon_buffer.slice(0..model_ribbon_bytes));
+            pass.draw(0..6, 0..model_ribbon_count as u32);
+        }
+        if ribbon_count > 0 {
             pass.set_pipeline(&self.ribbon_pipeline);
             pass.set_bind_group(0, &self.uniform_bindings, &[]);
-            pass.set_vertex_buffer(0, self.ribbon_buffer.slice(..));
-            pass.draw(0..6, 0..frame.ribbons.len() as u32);
+            pass.set_vertex_buffer(0, self.ribbon_buffer.slice(model_ribbon_bytes..));
+            pass.draw(0..6, 0..ribbon_count as u32);
         }
         if line_count > 0 {
             pass.set_pipeline(&self.line_pipeline);

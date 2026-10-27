@@ -139,6 +139,10 @@ mod tests {
         config.edit().crease_threshold = config
             .crease_threshold
             .adjusted(crate::frame_schedule::Adjustment::Increase);
+        config.edit().line_width = config
+            .line_width
+            .adjusted(crate::frame_schedule::Adjustment::Increase);
+        config.edit().model_motion = crate::visualizer::ModelMotion::Swept;
         config.edit().tuning.kick_decay = 4.5;
         config.edit().tuning.gains[crate::visualizer::Gain::SpinBand] = 2.5;
         config.edit().tuning.routing[crate::visualizer::BandComponent::Spin] = 9;
@@ -198,12 +202,16 @@ mod tests {
             "(depth_fade: -0.1)",
             "(depth_fade: 1.1)",
             "(depth_fade: NaN)",
-            "(near_opacity: 0.5)",
+            "(near_opacity: 0.05)",
             "(near_opacity: 1.1)",
             "(near_opacity: NaN)",
             "(crease_threshold: 9.0)",
             "(crease_threshold: 81.0)",
             "(crease_threshold: NaN)",
+            "(line_width: 0.09)",
+            "(line_width: 3.1)",
+            "(line_width: NaN)",
+            "(model_motion: Unknown)",
             "(tuning: (kick_decay: -1.0))",
             "(tuning: (kick_decay: 21.0))",
             "(tuning: (inputs: (power: (attack: 0.0, release: 4.5, \
@@ -250,6 +258,11 @@ mod tests {
         assert_eq!(
             missing.crease_threshold,
             crate::visualizer::CreaseThreshold::default()
+        );
+        assert_eq!(missing.line_width, crate::visualizer::LineWidth::default());
+        assert_eq!(
+            missing.model_motion,
+            crate::visualizer::ModelMotion::default()
         );
         assert_eq!(
             missing.tuning,

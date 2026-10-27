@@ -179,6 +179,8 @@ pub struct Config {
     pub depth_fade: crate::visualizer::DepthFade,
     pub near_opacity: crate::visualizer::NearOpacity,
     pub crease_threshold: crate::visualizer::CreaseThreshold,
+    pub line_width: crate::visualizer::LineWidth,
+    pub model_motion: crate::visualizer::ModelMotion,
     pub tuning: crate::visualizer::VisualizerTuning,
 }
 

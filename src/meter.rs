@@ -729,8 +729,9 @@ pub struct Meter {
     line_count: usize,
     line_count_value: Text,
     model_position: Option<(usize, usize)>,
-    model_readout: Readout,
-    model_value: Text,
+    line_width: visualizer::LineWidth,
+    model_motion: visualizer::ModelMotion,
+    line_status_value: Text,
     debug_readout: Readout,
     debug_value: Text,
     debug: bool,
@@ -811,12 +812,43 @@ pub struct Meter {
 }
 
 impl Meter {
-    fn layout_model_value(fonts: &mut Fonts, position: Option<(usize, usize)>) -> Text {
-        let label = position.map_or_else(
-            || "Model -".to_owned(),
-            |(current, total)| format!("Model {current}/{total}"),
+    fn line_status(
+        presentation: Presentation,
+        position: Option<(usize, usize)>,
+        motion: visualizer::ModelMotion,
+        width: visualizer::LineWidth,
+    ) -> String {
+        let mut parts = Vec::new();
+        if presentation == Presentation::Weapon {
+            if let Some((current, total)) = position {
+                parts.push(format!("MODEL [\\] {current}/{total}"));
+            }
+            parts.push(format!("BLUR [T] {}", motion.name()));
+        }
+        parts.push(format!("WIDTH [;] ['] {:>3}%", width.percent()));
+        parts.join("   ")
+    }
+
+    fn layout_line_status(
+        fonts: &mut Fonts,
+        presentation: Presentation,
+        position: Option<(usize, usize)>,
+        motion: visualizer::ModelMotion,
+        width: visualizer::LineWidth,
+    ) -> Text {
+        let status = Self::line_status(presentation, position, motion, width);
+        fonts.layout(&status, 11.0)
+    }
+
+    fn refresh_line_status(&mut self) {
+        self.line_status_value = Self::layout_line_status(
+            &mut self.fonts,
+            self.presentation,
+            self.model_position,
+            self.model_motion,
+            self.line_width,
         );
-        fonts.layout(&label, 12.0)
+        self.face_settings = None;
     }
 
     fn model_composite(theme: ThemeId) -> visualizer::ModelComposite {
@@ -871,6 +903,10 @@ impl Meter {
             &mut fonts,
             &format!("{:>3}", crease_threshold.whole_degrees()),
         );
+        let line_width = config.line_width;
+        visualizer.set_line_width(line_width);
+        let model_motion = config.model_motion;
+        visualizer.set_model_motion(model_motion);
         if presentation.shows_visualizer() {
             visualizer.set_presentation(presentation);
         }
@@ -879,8 +915,13 @@ impl Meter {
         let line_count = visualizer.frame().lines.len();
         let line_count_value = fonts.layout(&format!("LINES {line_count}"), 12.0);
         let model_position = visualizer.model_position();
-        let model_readout = Readout::inline(&mut fonts, ["[\\]"]);
-        let model_value = Self::layout_model_value(&mut fonts, model_position);
+        let line_status_value = Self::layout_line_status(
+            &mut fonts,
+            presentation,
+            model_position,
+            model_motion,
+            line_width,
+        );
         let mode_readout = Readout::gauge_inline(&mut fonts, ["[M]"]);
         let mode_value = Readout::gauge_value(&mut fonts, config.mode.name());
         let peak_movement_readout = Readout::gauge_inline(&mut fonts, ["[N]"]);
@@ -935,8 +976,9 @@ impl Meter {
             line_count,
             line_count_value,
             model_position,
-            model_readout,
-            model_value,
+            line_width,
+            model_motion,
+            line_status_value,
             debug_readout,
             debug_value,
             debug: false,
@@ -1594,7 +1636,8 @@ impl Meter {
             self.range_readout.opacity = 0.0;
             self.bend_readout.opacity = 0.0;
         }
-        self.face_settings = None;
+        self.model_position = self.visualizer.model_position();
+        self.refresh_line_status();
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
@@ -1719,6 +1762,24 @@ impl Meter {
         if self.presentation == Presentation::Weapon {
             self.visualizer.next_model();
         }
+    }
+
+    pub fn set_line_width(&mut self, width: visualizer::LineWidth) {
+        if self.line_width == width {
+            return;
+        }
+        self.line_width = width;
+        self.visualizer.set_line_width(width);
+        self.refresh_line_status();
+    }
+
+    pub fn set_model_motion(&mut self, motion: visualizer::ModelMotion) {
+        if self.model_motion == motion {
+            return;
+        }
+        self.model_motion = motion;
+        self.visualizer.set_model_motion(motion);
+        self.refresh_line_status();
     }
 
     pub fn repair_needles(&mut self) {
@@ -1860,6 +1921,8 @@ impl Meter {
                 )) * Affine::scale(ui);
                 let line_count_transform = shutter_transform
                     * Affine::translate((-(self.line_count_value.width() + 16.0), 0.0));
+                let line_status_transform = line_count_transform
+                    * Affine::translate((-(self.line_status_value.width() + 24.0), 0.0));
                 let top_left = Affine::translate((24.0 * ui, 32.0 * ui)) * Affine::scale(ui);
                 let palette = self.visualizer.palette();
                 let hud_colors = MeterColors {
@@ -1897,6 +1960,8 @@ impl Meter {
                     &hud_colors,
                     HintOrder::BeforeValue,
                 );
+                self.line_status_value
+                    .draw_left(scene, line_status_transform, hud_colors.readout);
                 self.line_count_value
                     .draw_left(scene, line_count_transform, hud_colors.readout);
                 self.shutter_readout.draw_inline(
@@ -1952,13 +2017,6 @@ impl Meter {
                         top_left * Affine::translate((0.0, 264.0)),
                         &self.crease_value,
                         &hud_colors,
-                    );
-                    self.model_readout.draw_inline(
-                        scene,
-                        top_left * Affine::translate((0.0, 308.0)),
-                        &self.model_value,
-                        &hud_colors,
-                        HintOrder::BeforeValue,
                     );
                 }
                 if self.debug {
@@ -2055,8 +2113,7 @@ impl Meter {
             self.scene_value = self.fonts.layout_ui(name, 12.0, UiFace::SemiBoldItalic);
             self.face_settings = None;
         }
-        let frame = self.visualizer.frame();
-        let line_count = frame.lines.len() + frame.model_lines.len();
+        let line_count = self.visualizer.line_count();
         if line_count != self.line_count {
             self.line_count = line_count;
             self.line_count_value = self.fonts.layout(&format!("LINES {line_count}"), 12.0);
@@ -2065,8 +2122,7 @@ impl Meter {
         let model_position = self.visualizer.model_position();
         if model_position != self.model_position {
             self.model_position = model_position;
-            self.model_value = Self::layout_model_value(&mut self.fonts, model_position);
-            self.face_settings = None;
+            self.refresh_line_status();
         }
         if self.debug {
             self.debug_clock += dt;
@@ -2312,6 +2368,12 @@ impl Meter {
     pub fn configure(&mut self, config: &Config) {
         if self.crease_threshold != config.crease_threshold {
             self.set_crease_threshold(config.crease_threshold);
+        }
+        if self.line_width != config.line_width {
+            self.set_line_width(config.line_width);
+        }
+        if self.model_motion != config.model_motion {
+            self.set_model_motion(config.model_motion);
         }
         if self.presentation != config.presentation {
             self.set_presentation(config.presentation);

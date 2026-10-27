@@ -60,8 +60,10 @@ fn cross2(a: vec2<f32>, b: vec2<f32>) -> f32 {
     return a.x * b.y - a.y * b.x;
 }
 
-@fragment
-fn ribbon_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
+const COLOR_STEP: f32 = 1.0 / 255.0;
+const COLOR_CEIL: f32 = 254.0 / 255.0;
+
+fn ribbon_ink(vertex: VertexOutput) -> vec4<f32> {
     if vertex.wing > 0.5 {
         // Outer A/B -> X edge stays at zero; the base-to-X edge keeps the
         // body-edge U/V -> 100 ramp.
@@ -87,4 +89,28 @@ fn ribbon_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
     }
     let alpha = vertex.blend_color.a;
     return vec4(vertex.blend_color.rgb * alpha, alpha);
+}
+
+@fragment
+fn ribbon_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
+    return ribbon_ink(vertex);
+}
+
+@fragment
+fn ribbon_additive_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
+    let ink = ribbon_ink(vertex);
+    let alpha = ink.a;
+    let color = ink.rgb / max(alpha, 1e-6);
+    let rgb = max(color, vec3<f32>(COLOR_STEP));
+    return vec4(rgb * alpha, alpha);
+}
+
+@fragment
+fn ribbon_multiply_fragment(vertex: VertexOutput) -> @location(0) vec4<f32> {
+    let ink = ribbon_ink(vertex);
+    let alpha = ink.a;
+    let color = ink.rgb / max(alpha, 1e-6);
+    let rgb = min(color, vec3<f32>(COLOR_CEIL));
+    let multiplier = mix(vec3<f32>(1.0), rgb, alpha);
+    return vec4(multiplier, 1.0);
 }

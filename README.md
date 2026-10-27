@@ -43,12 +43,16 @@ steps, from -1.0 to +1.0. Both detector settings persist in the config file.
 0% (all vertices opaque) to 100% (the farthest vertices fully transparent). The
 setting persists in the config file.
 - `U` / `I` - decrease or increase the minimum near-edge opacity in 5% steps, from
-60% to 100%. The setting persists in the config file.
+10% to 100%. The setting persists in the config file.
 - `,` / `.` - decrease or increase the weapon showcase crease threshold in 5 degree
 steps, from 10 to 80 degrees. Lower values keep more mesh edges; the setting
 persists in the config file.
 - `\` - advance the weapon showcase to the next model. Energy drops advance it
 too.
+- `T` - toggle analytical motion blur for the weapon showcase. The setting
+persists in the config file.
+- `;` / `'` - decrease or increase the base visualizer line width in 10% steps,
+from 10% to 300%. The setting persists in the config file.
 
 ## Modes
 
@@ -103,9 +107,11 @@ driven by the same spin, pitch, roll, pulse, accent, and depth-opacity controls.
 Model edges use flat square caps instead of the round figure caps. The model
 composites additively on dark themes and multiplicatively on light themes; zero
 or full color components are nudged by one 8-bit step so every channel
-contributes. Motion-blur ribbons stay off for the model because it does not
-deform or sweep like the figures. The bottom-right HUD reports the live line
-count beside the shutter readout.
+contributes. `T` optionally enables the same analytical motion-blur sweep for
+the model; the swept ribbons keep the theme composition. `;` / `'` adjusts the
+base line width for both figures and models. The bottom-right HUD reports the
+current model position, blur state, line width, and live line count beside the
+shutter readout.
 
 A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The bands
 drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,

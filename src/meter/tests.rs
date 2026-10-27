@@ -359,6 +359,29 @@ fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Resu
 }
 
 #[test]
+fn line_status_reports_model_motion_and_width() {
+    use crate::visualizer::{LineWidth, ModelMotion, Presentation};
+    assert_eq!(
+        Meter::line_status(
+            Presentation::Weapon,
+            Some((2, 3)),
+            ModelMotion::Swept,
+            LineWidth::default(),
+        ),
+        "MODEL [\\] 2/3   BLUR [T] ON   WIDTH [;] ['] 100%"
+    );
+    assert_eq!(
+        Meter::line_status(
+            Presentation::Visualizer,
+            None,
+            ModelMotion::Still,
+            LineWidth::default(),
+        ),
+        "WIDTH [;] ['] 100%"
+    );
+}
+
+#[test]
 fn theme_polarity_selects_the_model_composite_mode() {
     use crate::frame_schedule::Adjustment;
     use crate::visualizer::ModelComposite;
@@ -425,6 +448,20 @@ fn weapon_presentation_loads_the_model_and_replaces_the_figures() -> anyhow::Res
     assert!(!meter.scene_name.is_empty());
     assert!(lines > 1_000);
     assert_eq!(ribbons, 0);
+    assert!(meter.line_count > 1_000);
+
+    meter.set_model_motion(crate::visualizer::ModelMotion::Swept);
+    let _ = meter.draw(
+        &mut scene,
+        &view,
+        FrameRateLimit::Fps60,
+        None,
+        clock.frame(1.0 / 60.0),
+    );
+    assert!(
+        meter.line_count > 1_000,
+        "motion blur must not collapse the HUD line count to diagnosis lines"
+    );
 
     meter.set_crease_threshold(CreaseThreshold::try_from(70.0)?);
     let coarser = {
@@ -1772,6 +1809,7 @@ fn renders_visualizer_face_and_wireframe_with_hud() -> anyhow::Result<()> {
             lines: &lines,
             model_lines: &[],
             ribbons: &ribbons,
+            model_ribbons: &[],
             model_composite: Default::default(),
         },
     );

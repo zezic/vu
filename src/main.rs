@@ -96,6 +96,7 @@ enum Setting {
     DepthFade,
     NearOpacity,
     CreaseThreshold,
+    LineWidth,
 }
 
 struct App {
@@ -189,6 +190,10 @@ impl App {
             Setting::CreaseThreshold => {
                 settings.crease_threshold = settings.crease_threshold.adjusted(adjustment);
                 self.meter.set_crease_threshold(settings.crease_threshold);
+            }
+            Setting::LineWidth => {
+                settings.line_width = settings.line_width.adjusted(adjustment);
+                self.meter.set_line_width(settings.line_width);
             }
         }
     }
@@ -399,6 +404,21 @@ impl App {
                             self.adjust_setting(Setting::CreaseThreshold, Adjustment::Increase)
                         }
                         KeyCode::Backslash if !event.repeat => self.meter.next_model(),
+                        KeyCode::KeyT
+                            if !event.repeat
+                                && self.settings.presentation
+                                    == visualizer::Presentation::Weapon =>
+                        {
+                            let model_motion = self.settings.model_motion.toggled();
+                            self.settings.edit().model_motion = model_motion;
+                            self.meter.set_model_motion(model_motion);
+                        }
+                        KeyCode::Semicolon => {
+                            self.adjust_setting(Setting::LineWidth, Adjustment::Decrease)
+                        }
+                        KeyCode::Quote => {
+                            self.adjust_setting(Setting::LineWidth, Adjustment::Increase)
+                        }
                         KeyCode::KeyM if !event.repeat => {
                             self.adjust_setting(Setting::Mode, Adjustment::Increase)
                         }
