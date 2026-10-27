@@ -552,10 +552,6 @@ pub struct DepthOpacity {
 
 impl DepthOpacity {
     pub fn new(depths: impl IntoIterator<Item = f32>, fade: f32) -> Self {
-        assert!(
-            fade.is_finite() && (0.0..=1.0).contains(&fade),
-            "depth opacity fade must be finite and between 0 and 1"
-        );
         let mut closest = f32::INFINITY;
         let mut farthest = f32::NEG_INFINITY;
         for depth in depths {
@@ -565,6 +561,25 @@ impl DepthOpacity {
         assert!(
             closest <= farthest,
             "depth opacity needs at least one projected vertex"
+        );
+        Self::between(closest, farthest, fade)
+    }
+
+    /// Places the ramp on fixed planes `radius` either side of `center`.
+    /// Use this when the figure fits a known sphere, so the ramp stays on that
+    /// sphere instead of following the silhouette of the current pose.
+    pub fn centered(center: f32, radius: f32, fade: f32) -> Self {
+        assert!(
+            center.is_finite() && radius.is_finite() && radius >= 0.0,
+            "depth opacity planes need a finite center and a non-negative radius"
+        );
+        Self::between(center - radius, center + radius, fade)
+    }
+
+    fn between(closest: f32, farthest: f32, fade: f32) -> Self {
+        assert!(
+            fade.is_finite() && (0.0..=1.0).contains(&fade),
+            "depth opacity fade must be finite and between 0 and 1"
         );
         Self {
             closest,
@@ -691,6 +706,19 @@ mod tests {
 
         let flat = DepthOpacity::new([4.0, 4.0], 0.5);
         assert_eq!(flat.factor(4.0), 1.0);
+    }
+
+    #[test]
+    fn centered_depth_opacity_uses_fixed_planes() {
+        let ramp = DepthOpacity::centered(4.2, 1.0, 0.5);
+        assert!((ramp.factor(3.2) - 1.0).abs() < 1e-6);
+        assert!((ramp.factor(4.2) - 0.75).abs() < 1e-6);
+        assert!((ramp.factor(5.2) - 0.5).abs() < 1e-6);
+        assert!((ramp.factor(2.0) - 1.0).abs() < 1e-6);
+        assert!((ramp.factor(9.0) - 0.5).abs() < 1e-6);
+
+        let flat = DepthOpacity::centered(4.2, 0.0, 0.5);
+        assert!((flat.factor(4.2) - 1.0).abs() < 1e-6);
     }
 
     #[test]

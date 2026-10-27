@@ -3634,8 +3634,14 @@ impl FigureRuntime {
             self.vertices.push(camera.project(world, pose));
         }
         self.update_kinematics(dt);
-        let depth_opacity =
-            DepthOpacity::new(self.vertices.iter().map(|vertex| vertex.depth), depth_fade);
+        let depth_opacity = if self.is_showcase() {
+            // Showcase models are fitted to a unit radius, so `pose.scale` is
+            // the model radius in view space. Keep the planes on that fitted
+            // sphere instead of following the silhouette of the current pose.
+            DepthOpacity::centered(self.pose.distance, self.pose.scale, depth_fade)
+        } else {
+            DepthOpacity::new(self.vertices.iter().map(|vertex| vertex.depth), depth_fade)
+        };
         self.current.clear();
         self.current
             .extend(self.wireframe.edges().iter().map(|edge| {
