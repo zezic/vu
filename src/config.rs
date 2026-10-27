@@ -181,6 +181,8 @@ pub struct Config {
     pub crease_threshold: crate::visualizer::CreaseThreshold,
     pub line_width: crate::visualizer::LineWidth,
     pub model_motion: crate::visualizer::ModelMotion,
+    pub motion_opacity: crate::visualizer::MotionOpacity,
+    pub motion_fade_power: crate::visualizer::MotionFadePower,
     pub tuning: crate::visualizer::VisualizerTuning,
 }
 

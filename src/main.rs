@@ -97,6 +97,8 @@ enum Setting {
     NearOpacity,
     CreaseThreshold,
     LineWidth,
+    MotionOpacity,
+    MotionFadePower,
 }
 
 struct App {
@@ -194,6 +196,14 @@ impl App {
             Setting::LineWidth => {
                 settings.line_width = settings.line_width.adjusted(adjustment);
                 self.meter.set_line_width(settings.line_width);
+            }
+            Setting::MotionOpacity => {
+                settings.motion_opacity = settings.motion_opacity.adjusted(adjustment);
+                self.meter.set_motion_opacity(settings.motion_opacity);
+            }
+            Setting::MotionFadePower => {
+                settings.motion_fade_power = settings.motion_fade_power.adjusted(adjustment);
+                self.meter.set_motion_fade_power(settings.motion_fade_power);
             }
         }
     }
@@ -418,6 +428,20 @@ impl App {
                         }
                         KeyCode::Quote => {
                             self.adjust_setting(Setting::LineWidth, Adjustment::Increase)
+                        }
+                        KeyCode::KeyL => {
+                            self.adjust_setting(Setting::MotionOpacity, Adjustment::Decrease)
+                        }
+                        KeyCode::KeyR => {
+                            self.adjust_setting(Setting::MotionOpacity, Adjustment::Increase)
+                        }
+                        KeyCode::KeyY => {
+                            let adjustment = if self.modifiers.shift_key() {
+                                Adjustment::Decrease
+                            } else {
+                                Adjustment::Increase
+                            };
+                            self.adjust_setting(Setting::MotionFadePower, adjustment)
                         }
                         KeyCode::KeyM if !event.repeat => {
                             self.adjust_setting(Setting::Mode, Adjustment::Increase)

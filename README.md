@@ -53,6 +53,13 @@ too.
 persists in the config file.
 - `;` / `'` - decrease or increase the base visualizer line width in 10% steps,
 from 10% to 300%. The setting persists in the config file.
+- `L` / `R` - decrease or increase the motion-blur opacity floor in 5% steps,
+from 0% to 100%. The factory floor is 35%. The setting persists in the config
+file.
+- `Y` / `Shift+Y` - increase or decrease the motion-blur fade power from 0.1 to
+4.0 in 0.1 steps. Higher powers lower the opacity at middle speeds; values below
+1.0 keep middle speeds brighter. The factory power is 1.0. The setting persists
+in the config file.
 
 ## Modes
 
@@ -109,9 +116,11 @@ composites additively on dark themes and multiplicatively on light themes; zero
 or full color components are nudged by one 8-bit step so every channel
 contributes. `T` optionally enables the same analytical motion-blur sweep for
 the model; the swept ribbons keep the theme composition. `;` / `'` adjusts the
-base line width for both figures and models. The bottom-right HUD reports the
-current model position, blur state, line width, and live line count beside the
-shutter readout.
+base line width for both figures and models. The motion-blur intensity is
+`floor + (1 - floor) * (1 - speed)^power`: `L` / `R` move the opacity floor and
+`Y` / `Shift+Y` shape the speed curve. The bottom-right HUD reports the current
+model position, blur state, line width, opacity floor, fade power, and live line
+count beside the shutter readout.
 
 A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The bands
 drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,

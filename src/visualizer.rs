@@ -356,6 +356,128 @@ impl ModelMotion {
     }
 }
 
+/// Opacity floor reached by edges at high motion-blur speed.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct MotionOpacity(f32);
+
+impl MotionOpacity {
+    pub const MIN: f32 = 0.0;
+    pub const MAX: f32 = 1.0;
+    pub const DEFAULT: f32 = 0.35;
+    const STEP: f32 = 0.05;
+
+    pub fn value(self) -> f32 {
+        self.0
+    }
+
+    pub fn percent(self) -> u32 {
+        (self.0 * 100.0).round() as u32
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        let delta = match adjustment {
+            Adjustment::Decrease => -Self::STEP,
+            Adjustment::Increase => Self::STEP,
+        };
+        Self((self.0 + delta).clamp(Self::MIN, Self::MAX))
+    }
+}
+
+impl Default for MotionOpacity {
+    fn default() -> Self {
+        Self(Self::DEFAULT)
+    }
+}
+
+impl TryFrom<f32> for MotionOpacity {
+    type Error = anyhow::Error;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        anyhow::ensure!(
+            value.is_finite() && (Self::MIN..=Self::MAX).contains(&value),
+            "motion_opacity must be finite and between {MIN} and {MAX}",
+            MIN = Self::MIN,
+            MAX = Self::MAX
+        );
+        Ok(Self(value))
+    }
+}
+
+impl From<MotionOpacity> for f32 {
+    fn from(value: MotionOpacity) -> Self {
+        value.0
+    }
+}
+
+/// Exponent of the motion-blur retention term. Higher values lower the
+/// opacity at middle speeds, making the falloff more aggressive.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct MotionFadePower(f32);
+
+impl MotionFadePower {
+    pub const MIN: f32 = 0.1;
+    pub const MAX: f32 = 4.0;
+    pub const DEFAULT: f32 = 1.0;
+    const STEP: f32 = 0.1;
+
+    pub fn power(self) -> f32 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        let delta = match adjustment {
+            Adjustment::Decrease => -Self::STEP,
+            Adjustment::Increase => Self::STEP,
+        };
+        Self((self.0 + delta).clamp(Self::MIN, Self::MAX))
+    }
+}
+
+impl Default for MotionFadePower {
+    fn default() -> Self {
+        Self(Self::DEFAULT)
+    }
+}
+
+impl TryFrom<f32> for MotionFadePower {
+    type Error = anyhow::Error;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        anyhow::ensure!(
+            value.is_finite() && (Self::MIN..=Self::MAX).contains(&value),
+            "motion_fade_power must be finite and between {MIN} and {MAX}",
+            MIN = Self::MIN,
+            MAX = Self::MAX
+        );
+        Ok(Self(value))
+    }
+}
+
+impl From<MotionFadePower> for f32 {
+    fn from(value: MotionFadePower) -> Self {
+        value.0
+    }
+}
+
+/// Floor and exponent applied to the motion-blur intensity falloff.
+#[derive(Clone, Copy)]
+struct MotionFade {
+    opacity: MotionOpacity,
+    power: MotionFadePower,
+}
+
+impl MotionFade {
+    fn factor(self, distance: f32, width: f32) -> f32 {
+        let speed = distance / (width + distance);
+        let keep = (1.0 - speed).powf(self.power.power());
+        self.opacity.value() + (1.0 - self.opacity.value()) * keep
+    }
+}
+
 /// Persisted envelope times and pre-envelope shaping for one analysis input.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1369,6 +1491,8 @@ pub struct Visualizer {
     model_ribbons: Vec<RibbonInstance>,
     line_width: LineWidth,
     model_motion: ModelMotion,
+    motion_opacity: MotionOpacity,
+    motion_fade_power: MotionFadePower,
     frames: ShutterWindow,
     kick: f32,
     kick_decay: f32,
@@ -1429,6 +1553,8 @@ impl Visualizer {
             model_ribbons: Vec::new(),
             line_width: LineWidth::default(),
             model_motion: ModelMotion::default(),
+            motion_opacity: MotionOpacity::default(),
+            motion_fade_power: MotionFadePower::default(),
             frames: ShutterWindow::default(),
             kick: 0.0,
             kick_decay: tuning.kick_decay,
@@ -2341,6 +2467,14 @@ impl Visualizer {
         }
     }
 
+    pub fn set_motion_opacity(&mut self, opacity: MotionOpacity) {
+        self.motion_opacity = opacity;
+    }
+
+    pub fn set_motion_fade_power(&mut self, power: MotionFadePower) {
+        self.motion_fade_power = power;
+    }
+
     pub fn diagnosis(&self) -> Option<&DiagnosisReadout> {
         if self.diagnosis.suppressed {
             None
@@ -2613,6 +2747,10 @@ impl Visualizer {
             &self.palette,
             self.depth_fade.strength(),
             self.near_opacity.value(),
+            MotionFade {
+                opacity: self.motion_opacity,
+                power: self.motion_fade_power,
+            },
             width,
             flip_pitch,
             shake,
@@ -3118,6 +3256,7 @@ impl Scene {
         palette: &Palette,
         depth_fade: f32,
         near_opacity: f32,
+        motion_fade: MotionFade,
         width: f32,
         flip_pitch: f32,
         shake: Vec2,
@@ -3162,6 +3301,7 @@ impl Scene {
             palette,
             depth_fade,
             near_opacity,
+            motion_fade,
             width,
             flip_pitch,
             shake,
@@ -3183,6 +3323,7 @@ impl Scene {
                 palette,
                 depth_fade,
                 near_opacity,
+                motion_fade,
                 width,
                 flip_pitch,
                 shake,
@@ -3402,6 +3543,7 @@ impl FigureRuntime {
         palette: &Palette,
         depth_fade: f32,
         near_opacity: f32,
+        motion_fade: MotionFade,
         base_width: f32,
         flip_pitch: f32,
         shake: Vec2,
@@ -3555,11 +3697,13 @@ impl FigureRuntime {
                 });
                 continue;
             }
-            let fade = |distance: f32| 0.35 + 0.65 * width / (width + distance);
+            let fade = |distance: f32| motion_fade.factor(distance, width);
             let start_alpha = alpha * fade(distance_a) * middle.start_depth_opacity;
             let end_alpha = alpha * fade(distance_b) * middle.end_depth_opacity;
-            let peak_x_alpha =
-                alpha * (middle.start_depth_opacity + middle.end_depth_opacity) * 0.5;
+            let peak_x_alpha = alpha
+                * motion_fade.factor(movement, width)
+                * (middle.start_depth_opacity + middle.end_depth_opacity)
+                * 0.5;
 
             if segment_intersection(first.start, first.end, last.start, last.end).is_some() {
                 let direction = (middle.end - middle.start).normalized();
@@ -3629,8 +3773,7 @@ impl FigureRuntime {
 
             // A fast edge spreads the same ink over more pixels, so its peak
             // opacity is lower. Even a motionless edge keeps the central body.
-            let spread = movement / (width + movement);
-            let peak = alpha * (0.35 + 0.65 * (1.0 - spread));
+            let peak = alpha * motion_fade.factor(movement, width);
             let direction = (middle.end - middle.start).normalized();
             let mut normal = if direction.length() > 0.0 {
                 direction.perpendicular()
@@ -5323,6 +5466,67 @@ mod tests {
         assert!(LineWidth::try_from(0.09).is_err());
         assert!(LineWidth::try_from(3.1).is_err());
         assert!(LineWidth::try_from(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn motion_opacity_steps_and_clamps() {
+        let mut opacity = MotionOpacity::default();
+        assert_eq!(opacity.percent(), 35);
+        assert_eq!(opacity.adjusted(Adjustment::Decrease).percent(), 30);
+        for _ in 0..20 {
+            opacity = opacity.adjusted(Adjustment::Decrease);
+        }
+        assert_eq!(opacity.value(), MotionOpacity::MIN);
+        for _ in 0..30 {
+            opacity = opacity.adjusted(Adjustment::Increase);
+        }
+        assert_eq!(opacity.value(), MotionOpacity::MAX);
+        assert!(MotionOpacity::try_from(-0.01).is_err());
+        assert!(MotionOpacity::try_from(1.01).is_err());
+        assert!(MotionOpacity::try_from(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn motion_fade_power_steps_and_clamps() {
+        let mut power = MotionFadePower::default();
+        assert!((power.adjusted(Adjustment::Decrease).power() - 0.9).abs() < 1e-6);
+        assert!((power.adjusted(Adjustment::Increase).power() - 1.1).abs() < 1e-6);
+        for _ in 0..50 {
+            power = power.adjusted(Adjustment::Decrease);
+        }
+        assert_eq!(power.power(), MotionFadePower::MIN);
+        for _ in 0..50 {
+            power = power.adjusted(Adjustment::Increase);
+        }
+        assert_eq!(power.power(), MotionFadePower::MAX);
+        assert!(MotionFadePower::try_from(0.09).is_err());
+        assert!(MotionFadePower::try_from(4.1).is_err());
+        assert!(MotionFadePower::try_from(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn higher_fade_power_lowers_the_mid_speed_opacity() -> anyhow::Result<()> {
+        let opacity = MotionOpacity::try_from(0.35)?;
+        let base = MotionFade {
+            opacity,
+            power: MotionFadePower::try_from(1.0)?,
+        };
+        let late = MotionFade {
+            opacity,
+            power: MotionFadePower::try_from(1.5)?,
+        };
+        assert!((base.factor(0.0, 1.0) - 1.0).abs() < 1e-6);
+        assert!((late.factor(0.0, 1.0) - 1.0).abs() < 1e-6);
+        assert!(late.factor(1.0, 1.0) < base.factor(1.0, 1.0));
+        assert!((base.factor(1_000_000.0, 1.0) - 0.35).abs() < 1e-4);
+        assert!((late.factor(1_000_000.0, 1.0) - 0.35).abs() < 1e-4);
+
+        let clear = MotionFade {
+            opacity: MotionOpacity::try_from(0.0)?,
+            power: MotionFadePower::try_from(4.0)?,
+        };
+        assert!(clear.factor(1_000_000.0, 1.0).abs() < 1e-4);
+        Ok(())
     }
 
     #[test]

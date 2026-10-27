@@ -360,15 +360,17 @@ fn needle_motion_reuses_the_base_while_readout_fades_update_it() -> anyhow::Resu
 
 #[test]
 fn line_status_reports_model_motion_and_width() {
-    use crate::visualizer::{LineWidth, ModelMotion, Presentation};
+    use crate::visualizer::{LineWidth, ModelMotion, MotionFadePower, MotionOpacity, Presentation};
     assert_eq!(
         Meter::line_status(
             Presentation::Weapon,
             Some((2, 3)),
             ModelMotion::Swept,
             LineWidth::default(),
+            MotionOpacity::default(),
+            MotionFadePower::default(),
         ),
-        "MODEL [\\] 2/3   BLUR [T] ON   WIDTH [;] ['] 100%"
+        "MODEL [\\] 2/3   BLUR [T] ON   WIDTH [;] ['] 100%   FLOOR [L] [R]  35%   POWER [Y] 1.0"
     );
     assert_eq!(
         Meter::line_status(
@@ -376,8 +378,10 @@ fn line_status_reports_model_motion_and_width() {
             None,
             ModelMotion::Still,
             LineWidth::default(),
+            MotionOpacity::default(),
+            MotionFadePower::default(),
         ),
-        "WIDTH [;] ['] 100%"
+        "WIDTH [;] ['] 100%   FLOOR [L] [R]  35%   POWER [Y] 1.0"
     );
 }
 

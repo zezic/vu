@@ -143,6 +143,12 @@ mod tests {
             .line_width
             .adjusted(crate::frame_schedule::Adjustment::Increase);
         config.edit().model_motion = crate::visualizer::ModelMotion::Swept;
+        config.edit().motion_opacity = config
+            .motion_opacity
+            .adjusted(crate::frame_schedule::Adjustment::Decrease);
+        config.edit().motion_fade_power = config
+            .motion_fade_power
+            .adjusted(crate::frame_schedule::Adjustment::Increase);
         config.edit().tuning.kick_decay = 4.5;
         config.edit().tuning.gains[crate::visualizer::Gain::SpinBand] = 2.5;
         config.edit().tuning.routing[crate::visualizer::BandComponent::Spin] = 9;
@@ -212,6 +218,11 @@ mod tests {
             "(line_width: 3.1)",
             "(line_width: NaN)",
             "(model_motion: Unknown)",
+            "(motion_opacity: -0.01)",
+            "(motion_opacity: 1.01)",
+            "(motion_opacity: NaN)",
+            "(motion_fade_power: 0.09)",
+            "(motion_fade_power: 4.1)",
             "(tuning: (kick_decay: -1.0))",
             "(tuning: (kick_decay: 21.0))",
             "(tuning: (inputs: (power: (attack: 0.0, release: 4.5, \
@@ -263,6 +274,14 @@ mod tests {
         assert_eq!(
             missing.model_motion,
             crate::visualizer::ModelMotion::default()
+        );
+        assert_eq!(
+            missing.motion_opacity,
+            crate::visualizer::MotionOpacity::default()
+        );
+        assert_eq!(
+            missing.motion_fade_power,
+            crate::visualizer::MotionFadePower::default()
         );
         assert_eq!(
             missing.tuning,

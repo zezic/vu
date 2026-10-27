@@ -731,6 +731,8 @@ pub struct Meter {
     model_position: Option<(usize, usize)>,
     line_width: visualizer::LineWidth,
     model_motion: visualizer::ModelMotion,
+    motion_opacity: visualizer::MotionOpacity,
+    motion_fade_power: visualizer::MotionFadePower,
     line_status_value: Text,
     debug_readout: Readout,
     debug_value: Text,
@@ -817,6 +819,8 @@ impl Meter {
         position: Option<(usize, usize)>,
         motion: visualizer::ModelMotion,
         width: visualizer::LineWidth,
+        opacity: visualizer::MotionOpacity,
+        power: visualizer::MotionFadePower,
     ) -> String {
         let mut parts = Vec::new();
         if presentation == Presentation::Weapon {
@@ -826,6 +830,8 @@ impl Meter {
             parts.push(format!("BLUR [T] {}", motion.name()));
         }
         parts.push(format!("WIDTH [;] ['] {:>3}%", width.percent()));
+        parts.push(format!("FLOOR [L] [R] {:>3}%", opacity.percent()));
+        parts.push(format!("POWER [Y] {:.1}", power.power()));
         parts.join("   ")
     }
 
@@ -835,8 +841,10 @@ impl Meter {
         position: Option<(usize, usize)>,
         motion: visualizer::ModelMotion,
         width: visualizer::LineWidth,
+        opacity: visualizer::MotionOpacity,
+        power: visualizer::MotionFadePower,
     ) -> Text {
-        let status = Self::line_status(presentation, position, motion, width);
+        let status = Self::line_status(presentation, position, motion, width, opacity, power);
         fonts.layout(&status, 11.0)
     }
 
@@ -847,6 +855,8 @@ impl Meter {
             self.model_position,
             self.model_motion,
             self.line_width,
+            self.motion_opacity,
+            self.motion_fade_power,
         );
         self.face_settings = None;
     }
@@ -907,6 +917,10 @@ impl Meter {
         visualizer.set_line_width(line_width);
         let model_motion = config.model_motion;
         visualizer.set_model_motion(model_motion);
+        let motion_opacity = config.motion_opacity;
+        visualizer.set_motion_opacity(motion_opacity);
+        let motion_fade_power = config.motion_fade_power;
+        visualizer.set_motion_fade_power(motion_fade_power);
         if presentation.shows_visualizer() {
             visualizer.set_presentation(presentation);
         }
@@ -921,6 +935,8 @@ impl Meter {
             model_position,
             model_motion,
             line_width,
+            motion_opacity,
+            motion_fade_power,
         );
         let mode_readout = Readout::gauge_inline(&mut fonts, ["[M]"]);
         let mode_value = Readout::gauge_value(&mut fonts, config.mode.name());
@@ -978,6 +994,8 @@ impl Meter {
             model_position,
             line_width,
             model_motion,
+            motion_opacity,
+            motion_fade_power,
             line_status_value,
             debug_readout,
             debug_value,
@@ -1773,6 +1791,24 @@ impl Meter {
         self.refresh_line_status();
     }
 
+    pub fn set_motion_opacity(&mut self, opacity: visualizer::MotionOpacity) {
+        if self.motion_opacity == opacity {
+            return;
+        }
+        self.motion_opacity = opacity;
+        self.visualizer.set_motion_opacity(opacity);
+        self.refresh_line_status();
+    }
+
+    pub fn set_motion_fade_power(&mut self, power: visualizer::MotionFadePower) {
+        if self.motion_fade_power == power {
+            return;
+        }
+        self.motion_fade_power = power;
+        self.visualizer.set_motion_fade_power(power);
+        self.refresh_line_status();
+    }
+
     pub fn set_model_motion(&mut self, motion: visualizer::ModelMotion) {
         if self.model_motion == motion {
             return;
@@ -2374,6 +2410,12 @@ impl Meter {
         }
         if self.model_motion != config.model_motion {
             self.set_model_motion(config.model_motion);
+        }
+        if self.motion_opacity != config.motion_opacity {
+            self.set_motion_opacity(config.motion_opacity);
+        }
+        if self.motion_fade_power != config.motion_fade_power {
+            self.set_motion_fade_power(config.motion_fade_power);
         }
         if self.presentation != config.presentation {
             self.set_presentation(config.presentation);
