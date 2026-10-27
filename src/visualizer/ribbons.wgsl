@@ -23,6 +23,7 @@ struct VertexOutput {
     @location(5) @interpolate(flat) tri_b: vec2<f32>,
     @location(6) @interpolate(flat) tri_c: vec2<f32>,
     @location(7) blend_color: vec4<f32>,
+    @location(8) @interpolate(flat) coverage_edges: f32,
 }
 
 @vertex
@@ -53,6 +54,7 @@ fn ribbon_vertex(
         instance.start.zw,
         instance.end.xy,
         colors[vertex_index],
+        instance.style.y,
     );
 }
 
@@ -60,10 +62,44 @@ fn cross2(a: vec2<f32>, b: vec2<f32>) -> f32 {
     return a.x * b.y - a.y * b.x;
 }
 
+fn segment_distance(point: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let along = b - a;
+    let length_squared = max(dot(along, along), 1e-6);
+    let fraction = clamp(dot(point - a, along) / length_squared, 0.0, 1.0);
+    return distance(point, a + along * fraction);
+}
+
+/// Analytic coverage for the support edges marked by the CPU. Edges are
+/// selected with bit 0 for a-b, bit 1 for b-c, and bit 2 for c-a.
+fn edge_coverage(edges: f32, point: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
+    let mask = u32(edges);
+    if mask == 0u {
+        return 1.0;
+    }
+    var nearest = 1e6;
+    if ((mask & 1u) != 0u) {
+        nearest = min(nearest, segment_distance(point, a, b));
+    }
+    if ((mask & 2u) != 0u) {
+        nearest = min(nearest, segment_distance(point, b, c));
+    }
+    if ((mask & 4u) != 0u) {
+        nearest = min(nearest, segment_distance(point, c, a));
+    }
+    return clamp(0.5 + nearest, 0.0, 1.0);
+}
+
 const COLOR_STEP: f32 = 1.0 / 255.0;
 const COLOR_CEIL: f32 = 254.0 / 255.0;
 
 fn ribbon_ink(vertex: VertexOutput) -> vec4<f32> {
+    let coverage = edge_coverage(
+        vertex.coverage_edges,
+        vertex.position.xy,
+        vertex.tri_a,
+        vertex.tri_b,
+        vertex.tri_c,
+    );
     if vertex.wing > 0.5 {
         // Outer A/B -> X edge stays at zero; the base-to-X edge keeps the
         // body-edge U/V -> 100 ramp.
@@ -84,10 +120,10 @@ fn ribbon_ink(vertex: VertexOutput) -> vec4<f32> {
         // At the shared X endpoint the body edge is at peak; keep the wing
         // base at peak there too. Away from X the outer edge remains zero.
         let mask = select(1.0, base_weight / max(edge_weight, 1e-6), edge_weight > 1e-6);
-        let alpha = base_alpha * mask;
+        let alpha = base_alpha * mask * coverage;
         return vec4(vertex.start_color.rgb * alpha, alpha);
     }
-    let alpha = vertex.blend_color.a;
+    let alpha = vertex.blend_color.a * coverage;
     return vec4(vertex.blend_color.rgb * alpha, alpha);
 }
 

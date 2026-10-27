@@ -59,9 +59,6 @@ pub use renderer::Renderer;
 const MAX_PENDING_ACTIONS: usize = 64;
 const MAX_HISTORY: usize = 17;
 const HISTORY_SECONDS: f64 = 2.0;
-/// Below this screen-space movement, the swept ribbon is narrower than the
-/// line antialiasing, so the analytic line renderer is the better choice.
-const MOTION_BLUR_MIN_PIXELS: f32 = 1.0;
 /// Inspector traces are sampled independently of the panel refresh rate.
 const DEBUG_SAMPLE_INTERVAL: f32 = 1.0 / 60.0;
 const DEBUG_HISTORY_SECONDS: f32 = 4.0;
@@ -1329,7 +1326,7 @@ pub struct RibbonInstance {
     pub end_color: [f32; 4],
     /// Tint and opacity at the third vertex.
     pub third_color: [f32; 4],
-    /// Wing-mask flag, padding, padding, padding.
+    /// Wing-mask flag, coverage edge mask, padding, padding.
     pub style: [f32; 4],
 }
 
@@ -1354,6 +1351,15 @@ impl RibbonInstance {
         let mut ribbon = Self::triangle(points, colors);
         ribbon.style[0] = 1.0;
         ribbon
+    }
+
+    /// Marks the triangle edges that need analytic coverage. Bit 0 selects
+    /// a-b, bit 1 selects b-c, and bit 2 selects c-a. Only support edges with
+    /// non-zero alpha are marked; shared or clear edges are left alone.
+    #[must_use]
+    fn coverage(mut self, edges: u32) -> Self {
+        self.style[1] = edges as f32;
+        self
     }
 }
 
@@ -3706,24 +3712,22 @@ impl FigureRuntime {
             // A fast edge spreads the same ink over more pixels, so its peak
             // opacity is lower. Even a motionless edge keeps the central body.
             let peak = alpha * fade(movement);
-            // The analytic fallback stands in for that body, so it takes the
-            // same peak fade and the alpha stays continuous at the sub-pixel
-            // threshold.
-            if movement <= MOTION_BLUR_MIN_PIXELS {
-                let start_color = [rgb[0], rgb[1], rgb[2], peak * middle.start_depth_opacity];
-                let end_color = [rgb[0], rgb[1], rgb[2], peak * middle.end_depth_opacity];
-                out.push(if showcase {
-                    LineInstance::flat(middle.start, middle.end, start_color, end_color, width)
-                } else {
-                    LineInstance::shaded(middle.start, middle.end, start_color, end_color, width)
-                });
-                continue;
-            }
-            let start_alpha = alpha * fade(distance_a) * middle.start_depth_opacity;
-            let end_alpha = alpha * fade(distance_b) * middle.end_depth_opacity;
+            let opaque_start = [rgb[0], rgb[1], rgb[2], peak * middle.start_depth_opacity];
+            let opaque_end = [rgb[0], rgb[1], rgb[2], peak * middle.end_depth_opacity];
             let peak_x_alpha = peak * (middle.start_depth_opacity + middle.end_depth_opacity) * 0.5;
+            let half = (width * 0.5).max(0.5);
+            // Until the exposure strokes leave the body cross-section, the
+            // wings lie inside the body and only brighten its edges. Suppress
+            // them; at movement == half the wing has zero width and appears
+            // continuously.
+            let wings_clear = movement > half;
 
-            if segment_intersection(first.start, first.end, last.start, last.end).is_some() {
+            // A crossing smaller than the stroke itself is not a meaningful
+            // crossing. The non-crossing body keeps a uniform fill; the X
+            // body would add its endpoint-to-centre depth ramp there.
+            let crossing = wings_clear
+                && segment_intersection(first.start, first.end, last.start, last.end).is_some();
+            if crossing {
                 let direction = (middle.end - middle.start).normalized();
                 let mut normal = if direction.length() > 0.0 {
                     direction.perpendicular()
@@ -3737,24 +3741,23 @@ impl FigureRuntime {
                 {
                     normal = normal * -1.0;
                 }
-                let body_half = (width * 0.5).max(0.5);
-                let l_top = middle.start + normal * body_half;
-                let l_bottom = middle.start - normal * body_half;
-                let r_top = middle.end + normal * body_half;
-                let r_bottom = middle.end - normal * body_half;
+                let l_top = middle.start + normal * half;
+                let l_bottom = middle.start - normal * half;
+                let r_top = middle.end + normal * half;
+                let r_bottom = middle.end - normal * half;
                 let x1 = (l_top + r_top) * 0.5;
                 let x2 = (l_bottom + r_bottom) * 0.5;
                 let clear = [rgb[0], rgb[1], rgb[2], 0.0];
-                let am = [rgb[0], rgb[1], rgb[2], start_alpha];
-                let bm = [rgb[0], rgb[1], rgb[2], end_alpha];
+                let am = opaque_start;
+                let bm = opaque_end;
                 let peak_x = [rgb[0], rgb[1], rgb[2], peak_x_alpha];
 
                 // The body is two flat-capped quads; the shared long-edge
-                // gradients are the same U -> X -> V ramps as the wings.
-                out_ribbons.push(RibbonInstance::triangle(
-                    [l_top, l_bottom, x2],
-                    [am, am, peak_x],
-                ));
+                // gradients are the same U -> X -> V ramps as the wings. Only
+                // the body caps and the wing outer edges are free boundaries.
+                out_ribbons.push(
+                    RibbonInstance::triangle([l_top, l_bottom, x2], [am, am, peak_x]).coverage(1),
+                );
                 out_ribbons.push(RibbonInstance::triangle(
                     [l_top, x2, x1],
                     [am, peak_x, peak_x],
@@ -3763,29 +3766,28 @@ impl FigureRuntime {
                     [x1, x2, r_bottom],
                     [peak_x, peak_x, bm],
                 ));
-                out_ribbons.push(RibbonInstance::triangle(
-                    [x1, r_bottom, r_top],
-                    [peak_x, bm, bm],
-                ));
+                out_ribbons.push(
+                    RibbonInstance::triangle([x1, r_bottom, r_top], [peak_x, bm, bm]).coverage(2),
+                );
                 // Top wings attach to the top long edge and meet at X1. Their
                 // outer-to-X edges are masked to zero by the wing shader.
-                out_ribbons.push(RibbonInstance::wing_triangle(
-                    [first.start, l_top, x1],
-                    [clear, am, peak_x],
-                ));
-                out_ribbons.push(RibbonInstance::wing_triangle(
-                    [last.end, r_top, x1],
-                    [clear, bm, peak_x],
-                ));
+                out_ribbons.push(
+                    RibbonInstance::wing_triangle([first.start, l_top, x1], [clear, am, peak_x])
+                        .coverage(1),
+                );
+                out_ribbons.push(
+                    RibbonInstance::wing_triangle([last.end, r_top, x1], [clear, bm, peak_x])
+                        .coverage(1),
+                );
                 // Bottom wings attach to the bottom long edge and meet at X2.
-                out_ribbons.push(RibbonInstance::wing_triangle(
-                    [last.start, l_bottom, x2],
-                    [clear, am, peak_x],
-                ));
-                out_ribbons.push(RibbonInstance::wing_triangle(
-                    [first.end, r_bottom, x2],
-                    [clear, bm, peak_x],
-                ));
+                out_ribbons.push(
+                    RibbonInstance::wing_triangle([last.start, l_bottom, x2], [clear, am, peak_x])
+                        .coverage(1),
+                );
+                out_ribbons.push(
+                    RibbonInstance::wing_triangle([first.end, r_bottom, x2], [clear, bm, peak_x])
+                        .coverage(1),
+                );
                 continue;
             }
 
@@ -3800,42 +3802,66 @@ impl FigureRuntime {
             if normal.x * motion.x + normal.y * motion.y < 0.0 {
                 normal = normal * -1.0;
             }
-            let half = (width * 0.5).max(0.5);
             let back_start = middle.start - normal * half;
             let back_end = middle.end - normal * half;
             let front_start = middle.start + normal * half;
             let front_end = middle.end + normal * half;
             let clear = [rgb[0], rgb[1], rgb[2], 0.0];
-            let opaque_start = [rgb[0], rgb[1], rgb[2], peak * middle.start_depth_opacity];
-            let opaque_end = [rgb[0], rgb[1], rgb[2], peak * middle.end_depth_opacity];
 
             // One continuous strip: incoming gradient, body, outgoing
             // gradient. The body is the middle band, so the boundary vertices
-            // and colors are shared exactly with the gradient sections.
-            out_ribbons.push(RibbonInstance::triangle(
-                [first.start, first.end, back_end],
-                [clear, clear, opaque_end],
-            ));
-            out_ribbons.push(RibbonInstance::triangle(
-                [first.start, back_end, back_start],
-                [clear, opaque_end, opaque_start],
-            ));
-            out_ribbons.push(RibbonInstance::triangle(
-                [back_start, back_end, front_end],
-                [opaque_start, opaque_end, opaque_end],
-            ));
-            out_ribbons.push(RibbonInstance::triangle(
-                [back_start, front_end, front_start],
-                [opaque_start, opaque_end, opaque_start],
-            ));
-            out_ribbons.push(RibbonInstance::triangle(
-                [front_start, front_end, last.end],
-                [opaque_start, opaque_end, clear],
-            ));
-            out_ribbons.push(RibbonInstance::triangle(
-                [front_start, last.end, last.start],
-                [opaque_start, clear, clear],
-            ));
+            // and colors are shared exactly with the gradient sections. While
+            // the wings are suppressed the body long edges are free boundaries
+            // and need their own coverage; once the wings are outside, they
+            // cover those edges and only the outer wing edges need coverage.
+            let shared_bc = if wings_clear { 0 } else { 2 };
+            let shared_ab = if wings_clear { 0 } else { 1 };
+            if wings_clear {
+                out_ribbons.push(
+                    RibbonInstance::triangle(
+                        [first.start, first.end, back_end],
+                        [clear, clear, opaque_end],
+                    )
+                    .coverage(2),
+                );
+                out_ribbons.push(
+                    RibbonInstance::triangle(
+                        [first.start, back_end, back_start],
+                        [clear, opaque_end, opaque_start],
+                    )
+                    .coverage(4),
+                );
+            }
+            out_ribbons.push(
+                RibbonInstance::triangle(
+                    [back_start, back_end, front_end],
+                    [opaque_start, opaque_end, opaque_end],
+                )
+                .coverage(2 | shared_ab),
+            );
+            out_ribbons.push(
+                RibbonInstance::triangle(
+                    [back_start, front_end, front_start],
+                    [opaque_start, opaque_end, opaque_start],
+                )
+                .coverage(4 | shared_bc),
+            );
+            if wings_clear {
+                out_ribbons.push(
+                    RibbonInstance::triangle(
+                        [front_start, front_end, last.end],
+                        [opaque_start, opaque_end, clear],
+                    )
+                    .coverage(2),
+                );
+                out_ribbons.push(
+                    RibbonInstance::triangle(
+                        [front_start, last.end, last.start],
+                        [opaque_start, clear, clear],
+                    )
+                    .coverage(4),
+                );
+            }
         }
     }
 
@@ -5585,6 +5611,70 @@ mod tests {
     }
 
     #[test]
+    fn motion_blur_draws_covered_ribbons_at_rest() -> anyhow::Result<()> {
+        let mut visualizer = Visualizer::new();
+        let palette = Palette::from_theme(ThemeId::default());
+        let shutter = ShutterFrames::try_from(2.0)?;
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        for _ in 0..30 {
+            visualizer.debug_music([0.0; BAND_COUNT], 0.0);
+            visualizer.update(
+                frame,
+                shutter,
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        }
+        let frame = visualizer.frame();
+        assert!(
+            frame.lines.is_empty(),
+            "figure motion blur draws swept ribbons at every speed"
+        );
+        assert!(!frame.ribbons.is_empty());
+        assert!(
+            frame.ribbons.iter().any(|ribbon| ribbon.style[1] != 0.0),
+            "support edges carry analytic coverage masks"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn slow_wide_edges_keep_only_the_body() -> anyhow::Result<()> {
+        let mut visualizer = Visualizer::new();
+        visualizer.set_line_width(LineWidth::try_from(3.0)?);
+        let palette = Palette::from_theme(ThemeId::default());
+        let shutter = ShutterFrames::try_from(2.0)?;
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        for _ in 0..300 {
+            visualizer.debug_music([0.0; BAND_COUNT], 0.0);
+            visualizer.update(
+                frame,
+                shutter,
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        }
+        let frame = visualizer.frame();
+        assert!(!frame.ribbons.is_empty());
+        assert!(
+            frame
+                .ribbons
+                .iter()
+                .all(|ribbon| ribbon.style[1] == 3.0 || ribbon.style[1] == 6.0),
+            "slow wide edges must emit only the covered body, not wings inside it"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn model_motion_blur_can_be_toggled() -> anyhow::Result<()> {
         let mut visualizer = Visualizer::new();
         visualizer.set_presentation(Presentation::Weapon);
@@ -5626,39 +5716,6 @@ mod tests {
         step(&mut visualizer);
         assert!(!visualizer.frame().model_lines.is_empty());
         assert!(visualizer.frame().model_ribbons.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn slow_showcase_edges_use_the_analytic_line_fallback() -> anyhow::Result<()> {
-        let mut visualizer = Visualizer::new();
-        visualizer.set_presentation(Presentation::Weapon);
-        visualizer.set_model_motion(ModelMotion::Swept);
-        let palette = Palette::from_theme(ThemeId::default());
-        let shutter = ShutterFrames::try_from(1.0)?;
-        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
-        for _ in 0..30 {
-            visualizer.debug_music([0.0; BAND_COUNT], 0.0);
-            visualizer.update(
-                frame,
-                shutter,
-                1.0 / 60.0,
-                &palette,
-                (1280.0, 440.0),
-                1.0,
-                1.0,
-            );
-            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
-        }
-        let frame = visualizer.frame();
-        assert!(
-            !frame.model_lines.is_empty(),
-            "subpixel motion should fall back to analytic lines"
-        );
-        assert!(
-            frame.model_ribbons.is_empty(),
-            "subpixel motion should not emit swept ribbons"
-        );
         Ok(())
     }
 
