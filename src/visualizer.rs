@@ -3696,9 +3696,16 @@ impl FigureRuntime {
             let distance_a = (last.start - first.start).length();
             let distance_b = (last.end - first.end).length();
             let movement = distance_a.max(distance_b);
+            let fade = |distance: f32| motion_fade.factor(distance, width);
+            // A fast edge spreads the same ink over more pixels, so its peak
+            // opacity is lower. Even a motionless edge keeps the central body.
+            let peak = alpha * fade(movement);
+            // The analytic fallback stands in for that body, so it takes the
+            // same peak fade and the alpha stays continuous at the sub-pixel
+            // threshold.
             if movement <= MOTION_BLUR_MIN_PIXELS {
-                let start_color = [rgb[0], rgb[1], rgb[2], alpha * middle.start_depth_opacity];
-                let end_color = [rgb[0], rgb[1], rgb[2], alpha * middle.end_depth_opacity];
+                let start_color = [rgb[0], rgb[1], rgb[2], peak * middle.start_depth_opacity];
+                let end_color = [rgb[0], rgb[1], rgb[2], peak * middle.end_depth_opacity];
                 out.push(if showcase {
                     LineInstance::flat(middle.start, middle.end, start_color, end_color, width)
                 } else {
@@ -3706,13 +3713,9 @@ impl FigureRuntime {
                 });
                 continue;
             }
-            let fade = |distance: f32| motion_fade.factor(distance, width);
             let start_alpha = alpha * fade(distance_a) * middle.start_depth_opacity;
             let end_alpha = alpha * fade(distance_b) * middle.end_depth_opacity;
-            let peak_x_alpha = alpha
-                * motion_fade.factor(movement, width)
-                * (middle.start_depth_opacity + middle.end_depth_opacity)
-                * 0.5;
+            let peak_x_alpha = peak * (middle.start_depth_opacity + middle.end_depth_opacity) * 0.5;
 
             if segment_intersection(first.start, first.end, last.start, last.end).is_some() {
                 let direction = (middle.end - middle.start).normalized();
@@ -3780,9 +3783,6 @@ impl FigureRuntime {
                 continue;
             }
 
-            // A fast edge spreads the same ink over more pixels, so its peak
-            // opacity is lower. Even a motionless edge keeps the central body.
-            let peak = alpha * motion_fade.factor(movement, width);
             let direction = (middle.end - middle.start).normalized();
             let mut normal = if direction.length() > 0.0 {
                 direction.perpendicular()
