@@ -137,7 +137,7 @@ impl Model {
                     let size = node.transform.scale() * model_scale;
                     Anchor {
                         center,
-                        radius: 0.5 * size.length(),
+                        radius: size.length(),
                         size,
                         part: None,
                     }
@@ -231,7 +231,8 @@ impl Model {
 pub struct Anchor {
     /// Bounds center in normalized model space.
     pub center: Vec3,
-    /// Bounding-sphere radius in normalized model space.
+    /// Radius used to frame the anchor. Mesh anchors use the farthest vertex
+    /// from the bounds center; empty anchors use the full scaled-box diagonal.
     pub radius: f32,
     /// Full box or mesh AABB dimensions in normalized model space.
     pub size: Vec3,
@@ -705,6 +706,19 @@ fn triangle_normal(a: Vec3, b: Vec3, c: Vec3) -> Option<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_anchor_radius_uses_the_full_scaled_diagonal() -> anyhow::Result<()> {
+        let models = ModelSet::load()?;
+        let model = models.current();
+        let empty = model
+            .anchors
+            .values()
+            .find(|anchor| anchor.part.is_none())
+            .expect("the bundled model has an empty anchor");
+        assert!((empty.radius - empty.size.length()).abs() < 1e-6);
+        Ok(())
+    }
 
     #[test]
     fn bundled_models_load_as_lean_wireframes() -> anyhow::Result<()> {

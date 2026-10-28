@@ -1638,11 +1638,21 @@ impl Visualizer {
         {
             for poi in &weapon.poi {
                 if let Some(anchor) = model.anchor(&poi.anchor.name) {
-                    pois.push(FocusPoi::new(
+                    let mut focus = FocusPoi::new(
                         poi.anchor.name.clone(),
                         anchor,
                         poi.id == "ejection_port" && anchor.part.is_none(),
-                    ));
+                    );
+                    if anchor.part.is_some() {
+                        let children = model
+                            .node_parts(&poi.anchor.name)
+                            .iter()
+                            .copied()
+                            .filter(|part| Some(*part) != anchor.part)
+                            .collect();
+                        focus = focus.with_children(children);
+                    }
+                    pois.push(focus);
                 }
             }
         }
@@ -2325,10 +2335,12 @@ impl Visualizer {
             Parameter::KickSequenceEvery => self.detectors.kick_sequence_every as f32,
             Parameter::SnareFlipEvery => self.detectors.snare_flip_every as f32,
             Parameter::SnarePoiSwitches => self.detectors.snare_poi_switches as f32,
+            Parameter::PoiSwitchGap => self.showcase.settings().poi_switch_gap,
             Parameter::FocusStiffness => self.showcase.settings().focus_stiffness,
             Parameter::FocusDamping => self.showcase.settings().focus_damping,
             Parameter::MotionStiffness => self.showcase.settings().motion_stiffness,
             Parameter::MotionDamping => self.showcase.settings().motion_damping,
+            Parameter::KickAttack => self.showcase.settings().kick_attack,
             Parameter::OrbitStepMin => self.showcase.settings().orbit_step_min,
             Parameter::OrbitStepMax => self.showcase.settings().orbit_step_max,
             Parameter::FovStepMin => self.showcase.settings().fov_step_min,
@@ -2341,6 +2353,7 @@ impl Visualizer {
             Parameter::DollyStiffness => self.showcase.settings().dolly_stiffness,
             Parameter::DollyDamping => self.showcase.settings().dolly_damping,
             Parameter::SelectorAttenuation => self.showcase.settings().selector_attenuation,
+            Parameter::PoiAttenuation => self.showcase.settings().poi_attenuation,
             Parameter::SelectorFadeIn => self.showcase.settings().selector_fade_in,
             Parameter::SelectorFadeOut => self.showcase.settings().selector_fade_out,
             Parameter::SelectorColorChance => self.showcase.settings().selector_color_chance,
@@ -2446,6 +2459,9 @@ impl Visualizer {
             Parameter::SnarePoiSwitches => {
                 self.detectors.snare_poi_switches = value.round() as u32;
             }
+            Parameter::PoiSwitchGap => {
+                self.showcase.settings_mut().poi_switch_gap = value;
+            }
             Parameter::FocusStiffness => {
                 self.showcase.settings_mut().focus_stiffness = value;
             }
@@ -2457,6 +2473,9 @@ impl Visualizer {
             }
             Parameter::MotionDamping => {
                 self.showcase.settings_mut().motion_damping = value;
+            }
+            Parameter::KickAttack => {
+                self.showcase.settings_mut().kick_attack = value;
             }
             Parameter::OrbitStepMin => {
                 let maximum = self.showcase.settings().orbit_step_max;
@@ -2497,6 +2516,9 @@ impl Visualizer {
             }
             Parameter::SelectorAttenuation => {
                 self.showcase.settings_mut().selector_attenuation = value;
+            }
+            Parameter::PoiAttenuation => {
+                self.showcase.settings_mut().poi_attenuation = value;
             }
             Parameter::SelectorFadeIn => {
                 self.showcase.settings_mut().selector_fade_in = value;
@@ -3952,7 +3974,9 @@ impl ModelRuntime {
             } else {
                 showcase.selector.attenuation
             };
-            let focus_alpha = if showcase.highlight_part.is_some_and(|poi| poi != part) {
+            let focus_alpha = if showcase.highlight_part.is_some_and(|poi| poi != part)
+                && showcase.focus_child != Some(part)
+            {
                 showcase.mesh_attenuation
             } else {
                 1.0
@@ -5204,6 +5228,7 @@ mod tests {
                 freeze_motion,
             },
             highlight_part: None,
+            focus_child: None,
             mesh_attenuation: 1.0,
             slide_offset: Vec3::new(0.0, 0.0, 0.0),
             selector: showcase::SelectorView::NONE,
@@ -5272,28 +5297,39 @@ mod tests {
     fn mesh_poi_attenuates_every_line_in_other_parts() {
         let wireframe = Wireframe::from_parts(
             vec![
-                Vec3::new(-0.6, 0.2, 0.1),
-                Vec3::new(-0.2, 0.2, 0.1),
-                Vec3::new(0.2, 0.2, 0.1),
-                Vec3::new(0.6, 0.2, 0.1),
+                Vec3::new(-0.8, 0.2, 0.1),
+                Vec3::new(-0.4, 0.2, 0.1),
+                Vec3::new(-0.1, 0.2, 0.1),
+                Vec3::new(0.3, 0.2, 0.1),
+                Vec3::new(0.5, 0.2, 0.1),
+                Vec3::new(0.9, 0.2, 0.1),
             ],
-            vec![[0, 1], [2, 3]],
-            vec![0, 0, 1, 1],
-            vec![0, 1],
-            2,
+            vec![[0, 1], [2, 3], [4, 5]],
+            vec![0, 0, 1, 1, 2, 2],
+            vec![0, 1, 2],
+            3,
         );
         let mut runtime = test_runtime_with(wireframe);
         let mut showcase = test_showcase_frame(1.0, true, 0.0);
         showcase.highlight_part = Some(0);
+        showcase.focus_child = Some(1);
         showcase.mesh_attenuation = 0.2;
         let lines = step_runtime(&mut runtime, &showcase);
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         let alpha = |line: &LineInstance| line.start_color[3] + line.end_color[3];
+        assert!(alpha(&lines[0]) > alpha(&lines[2]) * 2.0);
+        assert!(alpha(&lines[1]) > alpha(&lines[2]) * 2.0);
+        assert!((alpha(&lines[0]) - alpha(&lines[1])).abs() < 1e-6);
+
+        showcase.focus_child = None;
+        let lines = step_runtime(&mut runtime, &showcase);
         assert!(alpha(&lines[0]) > alpha(&lines[1]) * 2.0);
+        assert!(alpha(&lines[0]) > alpha(&lines[2]) * 2.0);
 
         showcase.highlight_part = None;
         let lines = step_runtime(&mut runtime, &showcase);
         assert!((alpha(&lines[0]) - alpha(&lines[1])).abs() < 1e-6);
+        assert!((alpha(&lines[0]) - alpha(&lines[2])).abs() < 1e-6);
     }
 
     #[test]

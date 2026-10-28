@@ -76,39 +76,49 @@ switching to another POI: the new target is chosen within the range and placed o
 angular path from the current angle, so accumulated rotation is not carried
 into the next POI. The FOV stays inside 30-120 deg. The FOV and camera distance move
 together, so the POI keeps its size while the surrounding model undergoes a
-dolly zoom. Kicks are ignored until the entry spring has settled, so the
+dolly zoom. `KICK ATTACK` (default 4/s) adds an initial velocity to the yaw,
+pitch, and FOV springs when a kick sets a new target, so the move starts
+immediately instead of waiting for the spring to accelerate from rest. Kicks
+are ignored until the entry spring has settled, so the
 initial flight is never interrupted by a kick-driven orbit or FOV change. After settling,
 POI mode also runs a slow continuous yaw orbit (`ORBIT SPEED`, default 6 deg/s)
 and a slow in/out dolly (`DOLLY DEPTH`, default 15%, over `DOLLY TIME`, default
 12 s). Kicks do not shake the camera while the showcase is in POI mode.
 Empty POIs use their scaled cube as the framing volume; mesh POIs are framed
 and drawn in a contrasting color. When the focused POI is a mesh, every other
-mesh part fades to the selector attenuation (`SEL ATTEN`, default 12%) using
-the selector fade-in/fade-out times, while the POI mesh keeps full opacity.
-Empty POIs leave all meshes at full opacity. The `ejection_port` empty also
+mesh part fades to `POI ATTEN` (default 12%) using the selector
+fade-in/fade-out times, while the POI mesh keeps full opacity. If the POI mesh
+has more than two child mesh parts, one child also keeps full opacity; `HAT`
+triggers advance that child through the child list in order. Empty POIs leave
+all meshes at full opacity. The `ejection_port` empty also
 pulls the `slide` mesh and its children backward by the port length.
 
 Snares drive the mode cycle. The `NORMAL FLIPS` setting counts the flips before
 POI mode starts, and `POI SWITCHES` counts the POI changes before normal mode
-returns. A confirmed drop also toggles the mode: normal switches to POI focus,
+returns. `POI GAP` (default 1 s, in the `SNARE` panel) starts when POI mode
+is entered and after every switch. A snare that arrives before the gap expires
+is handled as a kick instead: it applies the normal orbit/FOV step but does not
+advance the switch or exit cycle. A confirmed drop also toggles the mode: normal switches to POI focus,
 and POI focus returns to normal. The drop still advances the model, so the
 entry is resolved against the newly selected model; if that model has no
 resolvable POIs, normal mode remains. A gap-confidence entry always returns to
 normal mode and resets the cycle. All cycle and spring settings live in the
 analyzer panel: `SNARE` holds the two counters, and the `SCENE` panel holds
 separate motion, focus, orbit, and dolly springs, the slow orbit/dolly controls,
-the per-kick step ranges, and the selector timing and attenuation controls.
+the per-kick step ranges, the kick attack, and the selector timing and
+attenuation controls.
 
 The selector effect is available only in normal mode. A kick enables it. While
 active it keeps one mesh at full opacity, fades the other meshes to the
-configured attenuation (the same amount used for mesh POIs), and has a 25% chance to color the selected mesh
+configured attenuation (`SEL ATTEN`), and has a 25% chance to color the selected mesh
 differently. Kicks and snares count toward an exit threshold (`SEL EXIT N`,
 default 20); the trigger that reaches the threshold turns the selector off. A
 drop or a model change turns it off immediately. Gap-confidence entry no longer
 turns it off: the selector turns off only after the gap-confidence latch stays
 armed continuously for `SEL GAP s` (default 10 s), and clearing the gap resets
 that timer. The `HAT` detector only changes the selected mesh and never exits
-the selector. Snares do not flip the model while the selector is active; the
+the selector; in POI mode it advances the full-opacity child of a mesh POI
+instead. Snares do not flip the model while the selector is active; the
 snare that reaches the exit threshold also does not add a flip. The `HAT`
 detector has its own pattern editor and is independent of the snare and drop
 detectors.

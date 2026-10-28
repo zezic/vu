@@ -91,6 +91,7 @@ impl Detector {
                 Parameter::OnsetSuppression(Detector::Snare),
                 Parameter::SnareFlipEvery,
                 Parameter::SnarePoiSwitches,
+                Parameter::PoiSwitchGap,
                 Parameter::SnareChoke,
                 Parameter::FlipStiffness,
                 Parameter::FlipDamping,
@@ -808,6 +809,7 @@ pub enum Parameter {
     KickSequenceEvery,
     SnareFlipEvery,
     SnarePoiSwitches,
+    PoiSwitchGap,
     SnareChoke,
     FlipStiffness,
     FlipDamping,
@@ -823,6 +825,7 @@ pub enum Parameter {
     FocusDamping,
     MotionStiffness,
     MotionDamping,
+    KickAttack,
     OrbitStepMin,
     OrbitStepMax,
     FovStepMin,
@@ -835,6 +838,7 @@ pub enum Parameter {
     DollyStiffness,
     DollyDamping,
     SelectorAttenuation,
+    PoiAttenuation,
     SelectorFadeIn,
     SelectorFadeOut,
     SelectorColorChance,
@@ -875,6 +879,7 @@ impl Parameter {
             Self::KickSequenceEvery => "SEQUENCE N",
             Self::SnareFlipEvery => "NORMAL FLIPS",
             Self::SnarePoiSwitches => "POI SWITCHES",
+            Self::PoiSwitchGap => "POI GAP",
             Self::SnareChoke => "CHOKE s",
             Self::FlipStiffness => "FLIP K",
             Self::FlipDamping => "FLIP D",
@@ -890,6 +895,7 @@ impl Parameter {
             Self::FocusDamping => "FOCUS D",
             Self::MotionStiffness => "MOTION K",
             Self::MotionDamping => "MOTION D",
+            Self::KickAttack => "KICK ATTACK",
             Self::OrbitStepMin => "ORBIT MIN",
             Self::OrbitStepMax => "ORBIT MAX",
             Self::FovStepMin => "FOV MIN",
@@ -902,6 +908,7 @@ impl Parameter {
             Self::DollyStiffness => "DOLLY K",
             Self::DollyDamping => "DOLLY D",
             Self::SelectorAttenuation => "SEL ATTEN",
+            Self::PoiAttenuation => "POI ATTEN",
             Self::SelectorFadeIn => "SEL FADE IN",
             Self::SelectorFadeOut => "SEL FADE OUT",
             Self::SelectorColorChance => "SEL COLOR %",
@@ -953,6 +960,10 @@ impl Parameter {
                 super::SEQUENCE_EVERY_MIN as f32,
                 super::SEQUENCE_EVERY_MAX as f32,
             ),
+            Self::PoiSwitchGap => (
+                super::showcase::POI_SWITCH_GAP_MIN,
+                super::showcase::POI_SWITCH_GAP_MAX,
+            ),
             Self::SnareChoke => (super::CHOKE_MIN, super::CHOKE_MAX),
             Self::FlipStiffness
             | Self::QuakeStiffness
@@ -966,6 +977,10 @@ impl Parameter {
             | Self::MotionDamping
             | Self::OrbitDamping
             | Self::DollyDamping => (super::SPRING_DAMPING_MIN, super::SPRING_DAMPING_MAX),
+            Self::KickAttack => (
+                super::showcase::KICK_ATTACK_MIN,
+                super::showcase::KICK_ATTACK_MAX,
+            ),
             Self::OrbitStepMin | Self::OrbitStepMax => (0.0, super::showcase::POI_ORBIT_STEP_MAX),
             Self::FovStepMin | Self::FovStepMax => (0.0, super::showcase::POI_FOV_STEP_MAX),
             Self::OrbitSpeed => (0.0, super::showcase::POI_ORBIT_SPEED_MAX),
@@ -974,7 +989,9 @@ impl Parameter {
                 super::showcase::POI_DOLLY_PERIOD_MIN,
                 super::showcase::POI_DOLLY_PERIOD_MAX,
             ),
-            Self::SelectorAttenuation | Self::SelectorColorChance => (0.0, 1.0),
+            Self::SelectorAttenuation | Self::PoiAttenuation | Self::SelectorColorChance => {
+                (0.0, 1.0)
+            }
             Self::SelectorFadeIn => (
                 super::showcase::SELECTOR_FADE_IN_MIN,
                 super::showcase::SELECTOR_FADE_IN_MAX,
@@ -1029,6 +1046,7 @@ impl Parameter {
             Self::OnsetFlux(_, setting) => setting.step(),
             Self::OnsetSuppression(_) => 0.01,
             Self::KickSequenceEvery | Self::SnareFlipEvery | Self::SnarePoiSwitches => 1.0,
+            Self::PoiSwitchGap => 0.05,
             Self::DropGapWindow
             | Self::DropGapGain
             | Self::DropGapThreshold
@@ -1053,13 +1071,14 @@ impl Parameter {
             | Self::DollyDamping => 0.5,
             Self::SelectorFadeIn | Self::SelectorFadeOut | Self::SelectorGapTimeout => 0.005,
             Self::SelectorExitTriggers => 1.0,
+            Self::KickAttack => 0.5,
             Self::OrbitStepMin | Self::OrbitStepMax | Self::FovStepMin | Self::FovStepMax => {
                 std::f32::consts::PI / 180.0
             }
             Self::OrbitSpeed => std::f32::consts::PI / 360.0,
             Self::DollyDepth => 0.01,
             Self::DollyPeriod => 0.5,
-            Self::SelectorAttenuation | Self::SelectorColorChance => 0.01,
+            Self::SelectorAttenuation | Self::PoiAttenuation | Self::SelectorColorChance => 0.01,
             Self::Attack(_) | Self::Release(_) => 0.5,
             Self::KickDecay => 0.1,
             Self::Style(_) => 0.01,
@@ -1094,10 +1113,11 @@ impl Parameter {
             | Self::OrbitDamping
             | Self::DollyDamping => format!("{value:.1}"),
             Self::SelectorFadeIn | Self::SelectorFadeOut => format!("{:.0}ms", value * 1000.0),
-            Self::SelectorAttenuation | Self::SelectorColorChance => {
+            Self::SelectorAttenuation | Self::PoiAttenuation | Self::SelectorColorChance => {
                 format!("{:.0}%", value * 100.0)
             }
             Self::SelectorExitTriggers => format!("{value:.0}"),
+            Self::KickAttack => format!("{value:.1}/s"),
             Self::OrbitStepMin | Self::OrbitStepMax | Self::FovStepMin | Self::FovStepMax => {
                 format!("{:.0}deg", value.to_degrees())
             }
@@ -1109,6 +1129,7 @@ impl Parameter {
             Self::KickSequenceEvery | Self::SnareFlipEvery | Self::SnarePoiSwitches => {
                 format!("{value:.0}")
             }
+            Self::PoiSwitchGap => format!("{value:.2}s"),
             Self::Attack(_) | Self::Release(_) => format!("{value:.1}"),
             Self::InputCurve(_) => Curve::from_index(value.round() as usize).name().to_owned(),
             Self::ExtraSource(_) => Input::from_selectable(value.round() as usize)
