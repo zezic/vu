@@ -15,6 +15,10 @@ impl Vec2 {
         self.x.hypot(self.y)
     }
 
+    pub fn dot(self, other: Self) -> f32 {
+        self.x * other.x + self.y * other.y
+    }
+
     pub fn lerp(self, other: Self, fraction: f32) -> Self {
         Self::new(
             self.x + (other.x - self.x) * fraction,

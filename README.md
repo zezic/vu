@@ -221,9 +221,11 @@ inner center line, so the crossing keeps the full body thickness.
 The outer wing edges `A1-X1`, `B2-X1`, `A2-X2`, and `B1-X2` stay fully
 transparent. The wing shader masks the outer-to-X edge to zero while preserving
 the body-edge `U/V -> 100` ramp on the attached base.
-There is no convexity or small-displacement gate on the two ramps: any edge with
-nonzero screen displacement emits both. An edge with zero screen displacement
-keeps only its central line, because there is no spread to draw.
+The two ramps appear only after both exposure poses have cleared the body
+cross-section. Until then the sweep is the central body alone: a ramp drawn
+inside the body would double the ink and take away the body's long-edge
+coverage. Only displacement across the stroke clears the body, so an edge moving
+along its own direction also keeps just the body.
 
 The animation phase runs on a continuous clock and is rebased only at a period
 that is an integer number of cycles for every phase-driven deformation and

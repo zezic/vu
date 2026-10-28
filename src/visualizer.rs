@@ -3411,6 +3411,16 @@ struct LineGeometry {
     end_depth_opacity: f32,
 }
 
+/// Per-edge ink for one screen-space exposure sweep.
+#[derive(Clone, Copy)]
+struct SweepInk {
+    rgb: [f32; 3],
+    /// Edge opacity before the motion fade.
+    alpha: f32,
+    /// Stroke width in physical pixels.
+    width: f32,
+}
+
 #[derive(Clone, Copy)]
 struct VertexDiagnosis {
     screen: Vec2,
@@ -3679,22 +3689,19 @@ impl FigureRuntime {
         } else {
             None
         };
+        let base_opacity = if near_opacity < computation::LINE_ENERGY_BASE {
+            self.line_energy * near_opacity / computation::LINE_ENERGY_BASE
+        } else {
+            self.line_energy.max(near_opacity)
+        };
+        let alpha = (self.opacity * base_opacity).clamp(0.0, 1.0);
+        let width = base_width * (1.0 + music.kick * 0.25);
         for (index, current) in self.current.iter().enumerate() {
             let rgb = self.tint.edge_rgb(index, palette);
-            let base_opacity = if near_opacity < computation::LINE_ENERGY_BASE {
-                self.line_energy * near_opacity / computation::LINE_ENERGY_BASE
-            } else {
-                self.line_energy.max(near_opacity)
-            };
-            let alpha = self.opacity * base_opacity;
-            let width = base_width * (1.0 + music.kick * 0.25);
-            let alpha = alpha.clamp(0.0, 1.0);
-            let start_alpha = alpha * current.start_depth_opacity;
-            let end_alpha = alpha * current.end_depth_opacity;
 
             let Some(exposure) = &exposure else {
-                let start_color = [rgb[0], rgb[1], rgb[2], start_alpha];
-                let end_color = [rgb[0], rgb[1], rgb[2], end_alpha];
+                let start_color = [rgb[0], rgb[1], rgb[2], alpha * current.start_depth_opacity];
+                let end_color = [rgb[0], rgb[1], rgb[2], alpha * current.end_depth_opacity];
                 out.push(if showcase {
                     LineInstance::flat(current.start, current.end, start_color, end_color, width)
                 } else {
@@ -3702,166 +3709,14 @@ impl FigureRuntime {
                 });
                 continue;
             };
-            let first = exposure.first[index];
-            let last = exposure.last[index];
-            let middle = lerp_line(first, last, 0.5);
-            let distance_a = (last.start - first.start).length();
-            let distance_b = (last.end - first.end).length();
-            let movement = distance_a.max(distance_b);
-            let fade = |distance: f32| motion_fade.factor(distance, width);
-            // A fast edge spreads the same ink over more pixels, so its peak
-            // opacity is lower. Even a motionless edge keeps the central body.
-            let peak = alpha * fade(movement);
-            let opaque_start = [rgb[0], rgb[1], rgb[2], peak * middle.start_depth_opacity];
-            let opaque_end = [rgb[0], rgb[1], rgb[2], peak * middle.end_depth_opacity];
-            let peak_x_alpha = peak * (middle.start_depth_opacity + middle.end_depth_opacity) * 0.5;
-            let half = (width * 0.5).max(0.5);
-            // Until the exposure strokes leave the body cross-section, the
-            // wings lie inside the body and only brighten its edges. Suppress
-            // them; at movement == half the wing has zero width and appears
-            // continuously.
-            let wings_clear = movement > half;
 
-            // A crossing smaller than the stroke itself is not a meaningful
-            // crossing. The non-crossing body keeps a uniform fill; the X
-            // body would add its endpoint-to-centre depth ramp there.
-            let crossing = wings_clear
-                && segment_intersection(first.start, first.end, last.start, last.end).is_some();
-            if crossing {
-                let direction = (middle.end - middle.start).normalized();
-                let mut normal = if direction.length() > 0.0 {
-                    direction.perpendicular()
-                } else {
-                    Vec2::new(0.0, 1.0)
-                };
-                // Keep A1 on the X1 side regardless of projected edge order.
-                if (first.start - middle.start).x * normal.x
-                    + (first.start - middle.start).y * normal.y
-                    < 0.0
-                {
-                    normal = normal * -1.0;
-                }
-                let l_top = middle.start + normal * half;
-                let l_bottom = middle.start - normal * half;
-                let r_top = middle.end + normal * half;
-                let r_bottom = middle.end - normal * half;
-                let x1 = (l_top + r_top) * 0.5;
-                let x2 = (l_bottom + r_bottom) * 0.5;
-                let clear = [rgb[0], rgb[1], rgb[2], 0.0];
-                let am = opaque_start;
-                let bm = opaque_end;
-                let peak_x = [rgb[0], rgb[1], rgb[2], peak_x_alpha];
-
-                // The body is two flat-capped quads; the shared long-edge
-                // gradients are the same U -> X -> V ramps as the wings. Only
-                // the body caps and the wing outer edges are free boundaries.
-                out_ribbons.push(
-                    RibbonInstance::triangle([l_top, l_bottom, x2], [am, am, peak_x]).coverage(1),
-                );
-                out_ribbons.push(RibbonInstance::triangle(
-                    [l_top, x2, x1],
-                    [am, peak_x, peak_x],
-                ));
-                out_ribbons.push(RibbonInstance::triangle(
-                    [x1, x2, r_bottom],
-                    [peak_x, peak_x, bm],
-                ));
-                out_ribbons.push(
-                    RibbonInstance::triangle([x1, r_bottom, r_top], [peak_x, bm, bm]).coverage(2),
-                );
-                // Top wings attach to the top long edge and meet at X1. Their
-                // outer-to-X edges are masked to zero by the wing shader.
-                out_ribbons.push(
-                    RibbonInstance::wing_triangle([first.start, l_top, x1], [clear, am, peak_x])
-                        .coverage(1),
-                );
-                out_ribbons.push(
-                    RibbonInstance::wing_triangle([last.end, r_top, x1], [clear, bm, peak_x])
-                        .coverage(1),
-                );
-                // Bottom wings attach to the bottom long edge and meet at X2.
-                out_ribbons.push(
-                    RibbonInstance::wing_triangle([last.start, l_bottom, x2], [clear, am, peak_x])
-                        .coverage(1),
-                );
-                out_ribbons.push(
-                    RibbonInstance::wing_triangle([first.end, r_bottom, x2], [clear, bm, peak_x])
-                        .coverage(1),
-                );
-                continue;
-            }
-
-            let direction = (middle.end - middle.start).normalized();
-            let mut normal = if direction.length() > 0.0 {
-                direction.perpendicular()
-            } else {
-                Vec2::new(0.0, 1.0)
-            };
-            // Point the body normal from the first pose toward the last pose.
-            let motion = ((last.start - first.start) + (last.end - first.end)) * 0.5;
-            if normal.x * motion.x + normal.y * motion.y < 0.0 {
-                normal = normal * -1.0;
-            }
-            let back_start = middle.start - normal * half;
-            let back_end = middle.end - normal * half;
-            let front_start = middle.start + normal * half;
-            let front_end = middle.end + normal * half;
-            let clear = [rgb[0], rgb[1], rgb[2], 0.0];
-
-            // One continuous strip: incoming gradient, body, outgoing
-            // gradient. The body is the middle band, so the boundary vertices
-            // and colors are shared exactly with the gradient sections. While
-            // the wings are suppressed the body long edges are free boundaries
-            // and need their own coverage; once the wings are outside, they
-            // cover those edges and only the outer wing edges need coverage.
-            let shared_bc = if wings_clear { 0 } else { 2 };
-            let shared_ab = if wings_clear { 0 } else { 1 };
-            if wings_clear {
-                out_ribbons.push(
-                    RibbonInstance::triangle(
-                        [first.start, first.end, back_end],
-                        [clear, clear, opaque_end],
-                    )
-                    .coverage(2),
-                );
-                out_ribbons.push(
-                    RibbonInstance::triangle(
-                        [first.start, back_end, back_start],
-                        [clear, opaque_end, opaque_start],
-                    )
-                    .coverage(4),
-                );
-            }
-            out_ribbons.push(
-                RibbonInstance::triangle(
-                    [back_start, back_end, front_end],
-                    [opaque_start, opaque_end, opaque_end],
-                )
-                .coverage(2 | shared_ab),
+            push_sweep(
+                exposure.first[index],
+                exposure.last[index],
+                SweepInk { rgb, alpha, width },
+                motion_fade,
+                out_ribbons,
             );
-            out_ribbons.push(
-                RibbonInstance::triangle(
-                    [back_start, front_end, front_start],
-                    [opaque_start, opaque_end, opaque_start],
-                )
-                .coverage(4 | shared_bc),
-            );
-            if wings_clear {
-                out_ribbons.push(
-                    RibbonInstance::triangle(
-                        [front_start, front_end, last.end],
-                        [opaque_start, opaque_end, clear],
-                    )
-                    .coverage(2),
-                );
-                out_ribbons.push(
-                    RibbonInstance::triangle(
-                        [front_start, last.end, last.start],
-                        [opaque_start, clear, clear],
-                    )
-                    .coverage(4),
-                );
-            }
         }
     }
 
@@ -3990,6 +3845,176 @@ fn lerp_line(from: LineGeometry, to: LineGeometry, fraction: f32) -> LineGeometr
             + (to.end_depth_opacity - from.end_depth_opacity) * fraction,
     }
 }
+
+/// Appends the ribbon triangles for one edge swept between its exposure poses.
+/// The body is the median pose. The incoming and outgoing gradients exist only
+/// after both poses have cleared the body cross-section; inside it they would
+/// overdraw the body and take its long-edge coverage with them.
+fn push_sweep(
+    first: LineGeometry,
+    last: LineGeometry,
+    ink: SweepInk,
+    motion_fade: MotionFade,
+    out: &mut Vec<RibbonInstance>,
+) {
+    let middle = lerp_line(first, last, 0.5);
+    let movement = (last.start - first.start)
+        .length()
+        .max((last.end - first.end).length());
+    // A fast edge spreads the same ink over more pixels, so its peak opacity
+    // is lower. Even a motionless edge keeps the central body.
+    let peak = ink.alpha * motion_fade.factor(movement, ink.width);
+    let opaque_start = [
+        ink.rgb[0],
+        ink.rgb[1],
+        ink.rgb[2],
+        peak * middle.start_depth_opacity,
+    ];
+    let opaque_end = [
+        ink.rgb[0],
+        ink.rgb[1],
+        ink.rgb[2],
+        peak * middle.end_depth_opacity,
+    ];
+    let peak_x_alpha = peak * (middle.start_depth_opacity + middle.end_depth_opacity) * 0.5;
+    let half = (ink.width * 0.5).max(0.5);
+    let direction = (middle.end - middle.start).normalized();
+    let normal = if direction.length() > 0.0 {
+        direction.perpendicular()
+    } else {
+        Vec2::new(0.0, 1.0)
+    };
+    // A wing spans from a pose to the body edge, so both poses must clear the
+    // body before either wing is visible. Only displacement across the stroke
+    // changes that distance; movement along the stroke never clears it.
+    let start_reach = 0.5 * (last.start - first.start).dot(normal).abs();
+    let end_reach = 0.5 * (last.end - first.end).dot(normal).abs();
+    let wings_clear = start_reach.min(end_reach) > half;
+
+    // A crossing smaller than the stroke itself is not a meaningful
+    // crossing. The non-crossing body keeps a uniform fill; the X
+    // body would add its endpoint-to-centre depth ramp there.
+    let crossing =
+        wings_clear && segment_intersection(first.start, first.end, last.start, last.end).is_some();
+    if crossing {
+        let mut normal = normal;
+        // Keep A1 on the X1 side regardless of projected edge order.
+        if (first.start - middle.start).dot(normal) < 0.0 {
+            normal = normal * -1.0;
+        }
+        let l_top = middle.start + normal * half;
+        let l_bottom = middle.start - normal * half;
+        let r_top = middle.end + normal * half;
+        let r_bottom = middle.end - normal * half;
+        let x1 = (l_top + r_top) * 0.5;
+        let x2 = (l_bottom + r_bottom) * 0.5;
+        let clear = [ink.rgb[0], ink.rgb[1], ink.rgb[2], 0.0];
+        let am = opaque_start;
+        let bm = opaque_end;
+        let peak_x = [ink.rgb[0], ink.rgb[1], ink.rgb[2], peak_x_alpha];
+
+        // The body is two flat-capped quads; the shared long-edge
+        // gradients are the same U -> X -> V ramps as the wings. Only
+        // the body caps and the wing outer edges are free boundaries.
+        out.push(RibbonInstance::triangle([l_top, l_bottom, x2], [am, am, peak_x]).coverage(1));
+        out.push(RibbonInstance::triangle(
+            [l_top, x2, x1],
+            [am, peak_x, peak_x],
+        ));
+        out.push(RibbonInstance::triangle(
+            [x1, x2, r_bottom],
+            [peak_x, peak_x, bm],
+        ));
+        out.push(RibbonInstance::triangle([x1, r_bottom, r_top], [peak_x, bm, bm]).coverage(2));
+        // Top wings attach to the top long edge and meet at X1. Their
+        // outer-to-X edges are masked to zero by the wing shader.
+        out.push(
+            RibbonInstance::wing_triangle([first.start, l_top, x1], [clear, am, peak_x])
+                .coverage(1),
+        );
+        out.push(
+            RibbonInstance::wing_triangle([last.end, r_top, x1], [clear, bm, peak_x]).coverage(1),
+        );
+        // Bottom wings attach to the bottom long edge and meet at X2.
+        out.push(
+            RibbonInstance::wing_triangle([last.start, l_bottom, x2], [clear, am, peak_x])
+                .coverage(1),
+        );
+        out.push(
+            RibbonInstance::wing_triangle([first.end, r_bottom, x2], [clear, bm, peak_x])
+                .coverage(1),
+        );
+        return;
+    }
+
+    let mut normal = normal;
+    // Point the body normal from the first pose toward the last pose.
+    let motion = ((last.start - first.start) + (last.end - first.end)) * 0.5;
+    if normal.dot(motion) < 0.0 {
+        normal = normal * -1.0;
+    }
+    let back_start = middle.start - normal * half;
+    let back_end = middle.end - normal * half;
+    let front_start = middle.start + normal * half;
+    let front_end = middle.end + normal * half;
+    let clear = [ink.rgb[0], ink.rgb[1], ink.rgb[2], 0.0];
+
+    // One continuous strip: incoming gradient, body, outgoing
+    // gradient. The body is the middle band, so the boundary vertices
+    // and colors are shared exactly with the gradient sections. While
+    // the wings are suppressed the body long edges are free boundaries
+    // and need their own coverage; once the wings are outside, they
+    // cover those edges and only the outer wing edges need coverage.
+    let shared_bc = if wings_clear { 0 } else { 2 };
+    let shared_ab = if wings_clear { 0 } else { 1 };
+    if wings_clear {
+        out.push(
+            RibbonInstance::triangle(
+                [first.start, first.end, back_end],
+                [clear, clear, opaque_end],
+            )
+            .coverage(2),
+        );
+        out.push(
+            RibbonInstance::triangle(
+                [first.start, back_end, back_start],
+                [clear, opaque_end, opaque_start],
+            )
+            .coverage(4),
+        );
+    }
+    out.push(
+        RibbonInstance::triangle(
+            [back_start, back_end, front_end],
+            [opaque_start, opaque_end, opaque_end],
+        )
+        .coverage(2 | shared_ab),
+    );
+    out.push(
+        RibbonInstance::triangle(
+            [back_start, front_end, front_start],
+            [opaque_start, opaque_end, opaque_start],
+        )
+        .coverage(4 | shared_bc),
+    );
+    if wings_clear {
+        out.push(
+            RibbonInstance::triangle(
+                [front_start, front_end, last.end],
+                [opaque_start, opaque_end, clear],
+            )
+            .coverage(2),
+        );
+        out.push(
+            RibbonInstance::triangle(
+                [front_start, last.end, last.start],
+                [opaque_start, clear, clear],
+            )
+            .coverage(4),
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Style {
     axis: Vec3,
@@ -5672,6 +5697,112 @@ mod tests {
             "slow wide edges must emit only the covered body, not wings inside it"
         );
         Ok(())
+    }
+
+    fn sweep_line(start: Vec2, end: Vec2) -> LineGeometry {
+        LineGeometry {
+            start,
+            end,
+            start_depth_opacity: 1.0,
+            end_depth_opacity: 1.0,
+        }
+    }
+
+    fn sweep_ribbons(first: LineGeometry, last: LineGeometry) -> Vec<RibbonInstance> {
+        let mut ribbons = Vec::new();
+        push_sweep(
+            first,
+            last,
+            SweepInk {
+                rgb: [0.5, 0.75, 1.0],
+                alpha: 1.0,
+                width: 1.4,
+            },
+            MotionFade {
+                opacity: MotionOpacity::default(),
+                power: MotionFadePower::default(),
+            },
+            &mut ribbons,
+        );
+        ribbons
+    }
+
+    #[test]
+    fn sweep_waits_for_the_body_clearance_before_wings() {
+        let horizontal = |y: f32| sweep_line(Vec2::new(0.0, y), Vec2::new(100.0, y));
+        // The 1.4px stroke is clear only once each pose is 0.7px from the
+        // median line, which is a 1.4px shutter displacement.
+        for movement in [0.0, 0.7, 1.0, 1.4] {
+            let ribbons = sweep_ribbons(horizontal(-0.5 * movement), horizontal(0.5 * movement));
+            assert_eq!(
+                ribbons.len(),
+                2,
+                "movement {movement} must keep the covered body only"
+            );
+            assert_eq!(ribbons[0].style[1], 3.0, "movement {movement}");
+            assert_eq!(ribbons[1].style[1], 6.0, "movement {movement}");
+        }
+
+        let ribbons = sweep_ribbons(horizontal(-0.75), horizontal(0.75));
+        assert_eq!(ribbons.len(), 6);
+        assert_eq!(
+            ribbons
+                .iter()
+                .map(|ribbon| ribbon.style[1])
+                .collect::<Vec<_>>(),
+            [2.0, 4.0, 2.0, 4.0, 2.0, 4.0],
+            "clear wings take the long-edge coverage from the body"
+        );
+    }
+
+    #[test]
+    fn sweep_along_the_stroke_keeps_only_the_body() {
+        // Moving along the stroke never clears the cross-section, so it must
+        // not emit wings perpendicular to the stroke.
+        let first = sweep_line(Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0));
+        let last = sweep_line(Vec2::new(50.0, 0.0), Vec2::new(150.0, 0.0));
+        let ribbons = sweep_ribbons(first, last);
+        assert_eq!(ribbons.len(), 2);
+        assert_eq!(ribbons[0].style[1], 3.0);
+        assert_eq!(ribbons[1].style[1], 6.0);
+    }
+
+    #[test]
+    fn crossing_sweep_waits_for_the_same_clearance() {
+        // Two symmetric poses of a segment through the origin. Their
+        // perpendicular reach is `reach`, and the segments always cross.
+        let crossing_pair = |reach: f32| {
+            let radius = 100.0_f32;
+            let cos = (radius * radius - reach * reach).sqrt() / radius;
+            let first = sweep_line(
+                Vec2::new(radius * cos, -reach),
+                Vec2::new(-radius * cos, reach),
+            );
+            let last = sweep_line(
+                Vec2::new(radius * cos, reach),
+                Vec2::new(-radius * cos, -reach),
+            );
+            (first, last)
+        };
+
+        let (first, last) = crossing_pair(0.5);
+        assert_eq!(
+            sweep_ribbons(first, last).len(),
+            2,
+            "the butterfly must wait for the body clearance"
+        );
+
+        let (first, last) = crossing_pair(1.0);
+        let ribbons = sweep_ribbons(first, last);
+        assert_eq!(ribbons.len(), 8, "the butterfly takes over once clear");
+        assert_eq!(
+            ribbons
+                .iter()
+                .filter(|ribbon| ribbon.style[0] > 0.5)
+                .count(),
+            4,
+            "the crossing body keeps four masked wings"
+        );
     }
 
     #[test]
