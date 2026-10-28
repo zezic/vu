@@ -1,9 +1,9 @@
 {
-  "schema_version": "3.2.0",
-  "description": "Weapon visualizer data with real-world-family specifications, POIs, and authored MLG / Surreal / Troll Fact gag beats.",
+  "schema_version": "4.0.0",
+  "description": "Weapon visualizer data with real-world-family specifications, POIs, and authored MLG / Surreal gag beats.",
   "provenance": {
     "physical": "Representative real-world weapon families, not configuration-specific certification. Price is null except when a documented manufacturer listing maps to a specific variant.",
-    "jokes": "Original montage, surreal, and counterfeit-fact satire; deliberately impossible statements must not be read as real technical specifications.",
+    "jokes": "Original montage and surreal satire; deliberately impossible statements must not be read as real technical specifications.",
     "model": "Semantic mesh-part anchors require mapping to supplied 3D meshes. Some speculative prop parts may not exist on the asset."
   },
   "sources": [
@@ -114,17 +114,17 @@
             {
               "id": "c4_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The keypad knows every number except the correct one.",
+              "text": "KEYPAD COMBO x999",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -195,17 +195,17 @@
             {
               "id": "c4_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The battery is running on yesterday.",
+              "text": "the battery has become the sun",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -276,17 +276,17 @@
             {
               "id": "c4_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The adhesive has been holding time together.",
+              "text": "TAPE.EXE HAS STOPPED RESPONDING",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -413,17 +413,17 @@
             {
               "id": "eq_eholster_elite_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The right pouch is technically the left pouch from behind.",
+              "text": "RIGHT POUCH REVEAL",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -494,17 +494,17 @@
             {
               "id": "eq_eholster_elite_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "Every stitch is legally a very small belt.",
+              "text": "s t i t c h  b e i n g",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -575,17 +575,17 @@
             {
               "id": "eq_eholster_elite_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "Fold the edge far enough and the holster becomes inside-out.",
+              "text": "EDGE CAMERA GOT LOST",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -712,17 +712,17 @@
             {
               "id": "eq_flashbang_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The seam divides the flash into two equal halves.",
+              "text": "SEAM CAM ULTRA HD",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -793,17 +793,17 @@
             {
               "id": "eq_flashbang_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The safety pin weighs exactly one anxiety.",
+              "text": "p i n  o f  s a f e",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -874,17 +874,17 @@
             {
               "id": "eq_flashbang_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The bottom is immune to looking down.",
+              "text": "BOTTOM OF THE FLASHBANG REVEALED",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -1011,17 +1011,17 @@
             {
               "id": "eq_fraggrenade_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The seam is the equator of a very angry planet.",
+              "text": "SEAM HIGHLIGHT 420%",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -1092,17 +1092,17 @@
             {
               "id": "eq_fraggrenade_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The pin is the smallest member of the safety committee.",
+              "text": "p i n  h a s  a s c e n d e d",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -1173,17 +1173,17 @@
             {
               "id": "eq_fraggrenade_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "A sphere has no preferred direction. Suspicious.",
+              "text": "BOTTOM VIEW WORLD PREMIERE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -1310,17 +1310,17 @@
             {
               "id": "eq_smokegrenade_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The seam is where the smoke learns to be smoke.",
+              "text": "CYLINDER SEAM MONTAGE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -1391,17 +1391,17 @@
             {
               "id": "eq_smokegrenade_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The pin is the only thing here that likes staying put.",
+              "text": "the pin remains",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -1472,17 +1472,17 @@
             {
               "id": "eq_smokegrenade_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The base is an anti-cloud platform.",
+              "text": "BASE CAM THROUGH THE SMOKE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -1609,17 +1609,17 @@
             {
               "id": "mach_m249para_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The front sight has seen approximately one hundred opinions.",
+              "text": "FRONT SIGHT LOCKED ON",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -1690,17 +1690,17 @@
             {
               "id": "mach_m249para_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The belt is a mechanical centipede with a supply chain.",
+              "text": "the belt travels to the void",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -1771,17 +1771,17 @@
             {
               "id": "mach_m249para_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The bipod is a folding argument with gravity.",
+              "text": "BIPOD DEPLOYMENT MONTAGE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -1908,17 +1908,17 @@
             {
               "id": "pist_deagle_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The slide is an apartment for an unusually ambitious bolt.",
+              "text": "SLIDE REPLAY x999",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -1989,17 +1989,17 @@
             {
               "id": "pist_deagle_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The frame is carrying a pistol-sized engineering disagreement.",
+              "text": "f r a m e  o f  g o d",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -2070,17 +2070,17 @@
             {
               "id": "pist_deagle_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The grip has signed up for a very loud hobby.",
+              "text": "GRIP CAM. AIRHORN IMMEDIATELY",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -2207,17 +2207,17 @@
             {
               "id": "pist_elite_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The two slides are synchronized by mutual admiration.",
+              "text": "DOUBLE SLIDE SPLIT-SCREEN",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -2288,17 +2288,17 @@
             {
               "id": "pist_elite_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "Two frames means twice as many places for gravity to work.",
+              "text": "the frames have become one",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -2369,17 +2369,17 @@
             {
               "id": "pist_elite_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The grips are in a committed bilateral relationship.",
+              "text": "DUAL GRIP CINEMATIC",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -2506,17 +2506,17 @@
             {
               "id": "pist_elite_single_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The slide still thinks it has a twin.",
+              "text": "SLIDE SOLO MONTAGE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -2587,17 +2587,17 @@
             {
               "id": "pist_elite_single_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The frame is taking the solo career seriously.",
+              "text": "the frame misses its twin",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -2668,17 +2668,17 @@
             {
               "id": "pist_elite_single_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The grip is waiting for its other hand to arrive.",
+              "text": "GRIP CAM. JUST ONE THIS TIME",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -2805,17 +2805,17 @@
             {
               "id": "pist_fiveseven_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The slide travels in units of five-point-seven.",
+              "text": "SLIDE ZOOM 5.7X",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -2886,17 +2886,17 @@
             {
               "id": "pist_fiveseven_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The frame has rounded all corners to the nearest Belgium.",
+              "text": "f r a m e  f i v e",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -2967,17 +2967,17 @@
             {
               "id": "pist_fiveseven_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The grip measures fingers in decimal.",
+              "text": "GRIP REVEAL. 5.7 SECOND CUT",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -3104,17 +3104,17 @@
             {
               "id": "pist_glock18_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The slide returns faster when nobody is watching.",
+              "text": "SLIDE INFINITE REPLAY",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -3185,17 +3185,17 @@
             {
               "id": "pist_glock18_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The polymer frame refuses to participate in metal arguments.",
+              "text": "p o l y m e r  e x i s t e n c e",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -3266,17 +3266,17 @@
             {
               "id": "pist_glock18_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The grip knows how many fingers are on it.",
+              "text": "GLOCK GRIP IN 4K",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -3403,17 +3403,17 @@
             {
               "id": "pist_p228_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The slide is compact but has a full-sized schedule.",
+              "text": "COMPACT SLIDE WORLD RECORD",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -3484,17 +3484,17 @@
             {
               "id": "pist_p228_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The frame was designed with very little spare room for nonsense.",
+              "text": "the frame is shrinking",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -3565,17 +3565,17 @@
             {
               "id": "pist_p228_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The grip has been professionally downsized.",
+              "text": "GRIP CAM 228 FPS",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -3702,17 +3702,17 @@
             {
               "id": "pist_usp_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The slide has a strict back-and-forth lifestyle.",
+              "text": "USP SLIDE MONTAGE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -3783,17 +3783,17 @@
             {
               "id": "pist_usp_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The frame is made of structural seriousness.",
+              "text": "f r a m e  a s c e n d s",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -3864,17 +3864,17 @@
             {
               "id": "pist_usp_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The grip has achieved advanced palm compatibility.",
+              "text": "GRIP INSPECTION 360",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -4001,17 +4001,17 @@
             {
               "id": "pist_usp_silencer_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The slide moves at an officially indoor voice.",
+              "text": "SLIDE REPLAY (MUTED)",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -4082,17 +4082,17 @@
             {
               "id": "pist_usp_silencer_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The frame has been asked to keep this confidential.",
+              "text": "the frame is whispering",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -4163,17 +4163,17 @@
             {
               "id": "pist_usp_silencer_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The grip is the only part that still shakes hands.",
+              "text": "SILENT GRIP CAM",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -4300,17 +4300,17 @@
             {
               "id": "rif_ak47_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel is a straight answer to a curved magazine.",
+              "text": "BARREL CAM GOES TOO FAR",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -4381,17 +4381,17 @@
             {
               "id": "rif_ak47_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The charging handle returns to its previous address.",
+              "text": "the charging handle is elsewhere",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -4462,17 +4462,17 @@
             {
               "id": "rif_ak47_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The curved magazine is a banana with qualifications.",
+              "text": "CURVED MAGAZINE 360 REVEAL",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -4599,17 +4599,17 @@
             {
               "id": "rif_aug_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel lives in the present; the action lives behind it.",
+              "text": "BULLPUP BARREL ZOOM",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -4680,17 +4680,17 @@
             {
               "id": "rif_aug_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The charging handle has a commute across the bullpup.",
+              "text": "c h a r g e  i n  r e v e r s e",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -4761,17 +4761,17 @@
             {
               "id": "rif_aug_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine is in the back seat for aerodynamic reasons.",
+              "text": "MAGAZINE BEHIND THE TRIGGER REPLAY",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -4898,17 +4898,17 @@
             {
               "id": "rif_famas_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel filed a complaint about the carry handle blocking the view.",
+              "text": "FAMAS BARREL MONTAGE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -4979,17 +4979,17 @@
             {
               "id": "rif_famas_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The charging handle works underneath a French architectural project.",
+              "text": "the handle has become architectural",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -5060,17 +5060,17 @@
             {
               "id": "rif_famas_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The 25-round magazine is allergic to round numbers.",
+              "text": "25 ROUND MAGAZINE REVEAL",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -5197,17 +5197,17 @@
             {
               "id": "rif_galil_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel is not impressed by the extra five rounds.",
+              "text": "GALIL BARREL CAM",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -5278,17 +5278,17 @@
             {
               "id": "rif_galil_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The charging handle looks like it has somewhere to be.",
+              "text": "c h a r g i n g  f o r e v e r",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -5359,17 +5359,17 @@
             {
               "id": "rif_galil_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine thinks 30 is an oddly specific limitation.",
+              "text": "35 ROUND MAGAZINE GETS AIRHORN",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -5496,17 +5496,17 @@
             {
               "id": "rif_m4a1_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel has been offered seventeen optional accessories.",
+              "text": "BARREL ACCESSORY ZOOM",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -5577,17 +5577,17 @@
             {
               "id": "rif_m4a1_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The charging handle can technically charge nothing financial.",
+              "text": "the charging handle is infinite",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -5658,17 +5658,17 @@
             {
               "id": "rif_m4a1_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine is removable, unlike the attachment obsession.",
+              "text": "MAGAZINE INSERT: SLOW MOTION x64",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -5795,17 +5795,17 @@
             {
               "id": "rif_m4a1_silencer_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel is wearing a very long indoor voice.",
+              "text": "SILENCED BARREL CAM (LOUD AIRHORN)",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -5876,17 +5876,17 @@
             {
               "id": "rif_m4a1_silencer_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The charging handle did not receive a suppressor. Rude.",
+              "text": "the handle is trying to be quiet",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -5957,17 +5957,17 @@
             {
               "id": "rif_m4a1_silencer_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine has no opinion about sound levels.",
+              "text": "MAGAZINE REVEAL WITH NO SOUND",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -6094,17 +6094,17 @@
             {
               "id": "rif_sg552_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel is shorter because Switzerland was measuring carefully.",
+              "text": "COMPACT BARREL INSPECTION",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -6175,17 +6175,17 @@
             {
               "id": "rif_sg552_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The charging handle is also compact, emotionally.",
+              "text": "c h a r g i n g  i n  s w i s s",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -6256,17 +6256,17 @@
             {
               "id": "rif_sg552_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine has applied for Swiss residency.",
+              "text": "MAGAZINE REVEAL 552%",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -6393,17 +6393,17 @@
             {
               "id": "shot_m3super90_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The front sight supervises a small committee of pellets.",
+              "text": "FRONT SIGHT PELLET CAM",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -6474,17 +6474,17 @@
             {
               "id": "shot_m3super90_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The ejection port is legally a shell departure lounge.",
+              "text": "shells leaving reality",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -6555,17 +6555,17 @@
             {
               "id": "shot_m3super90_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The tube magazine is an underground shell railway.",
+              "text": "TUBE MAGAZINE HAS A THEME SONG",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -6692,17 +6692,17 @@
             {
               "id": "shot_xm1014_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The front sight takes credit for all six pellets.",
+              "text": "FRONT SIGHT x6",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -6773,17 +6773,17 @@
             {
               "id": "shot_xm1014_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The ejection port operates a strict one-way-door policy.",
+              "text": "e j e c t i o n  p o r t a l",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -6854,17 +6854,17 @@
             {
               "id": "shot_xm1014_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The tube magazine has been mistaken for plumbing.",
+              "text": "SHOTGUN TUBE MONTAGE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -6991,17 +6991,17 @@
             {
               "id": "smg_mac10_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel was drawn with the same ruler as the receiver.",
+              "text": "BARREL REVEAL. STILL A BOX",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -7072,17 +7072,17 @@
             {
               "id": "smg_mac10_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The selector is a switch in a box in a box.",
+              "text": "the selector is a rectangle",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -7153,17 +7153,17 @@
             {
               "id": "smg_mac10_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine contributes most of the vertical architecture.",
+              "text": "MAC MAGAZINE CAM 240 FPS",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -7290,17 +7290,17 @@
             {
               "id": "smg_mp5_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel is not one of the rollers.",
+              "text": "MP5 BARREL REPLAY",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -7371,17 +7371,17 @@
             {
               "id": "smg_mp5_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The selector is responsible for exactly zero HK slaps.",
+              "text": "s e l e c t o r  o f  t i m e",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -7452,17 +7452,17 @@
             {
               "id": "smg_mp5_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine bends gracefully under enormous paperwork.",
+              "text": "CURVED MAGAZINE IN SLOW MOTION",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -7589,17 +7589,17 @@
             {
               "id": "smg_p90_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel is the only part that points the usual direction.",
+              "text": "P90 BARREL ZOOM",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -7670,17 +7670,17 @@
             {
               "id": "smg_p90_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The selector is not responsible for the magazine gymnastics.",
+              "text": "the selector has rotated away",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -7751,17 +7751,17 @@
             {
               "id": "smg_p90_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine has a ninety-degree personality.",
+              "text": "TOP MAG 50 ROUND CAM",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -7888,17 +7888,17 @@
             {
               "id": "smg_tmp_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel occasionally rotates to admire itself.",
+              "text": "ROTATING BARREL FIDGET SPINNER",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -7969,17 +7969,17 @@
             {
               "id": "smg_tmp_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The selector cannot select a larger receiver.",
+              "text": "the selector is sleeping",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -8050,17 +8050,17 @@
             {
               "id": "smg_tmp_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine is longer than some of the decisions here.",
+              "text": "TMP MAGAZINE IN 144P",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -8187,17 +8187,17 @@
             {
               "id": "smg_ump45_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The barrel has requested a polymer jacket.",
+              "text": "UMP BARREL CLOSE-UP",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -8268,17 +8268,17 @@
             {
               "id": "smg_ump45_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The selector runs a very small election.",
+              "text": "s e l e c t o r  f o r m",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -8349,17 +8349,17 @@
             {
               "id": "smg_ump45_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine has 25 opinions and no spare seats.",
+              "text": "25 ROUND MAGAZINE MONTAGE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -8486,17 +8486,17 @@
             {
               "id": "snip_awp_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The front lens can see the next lens coming.",
+              "text": "SCOPE OBJECTIVE 360 NO SCOPE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -8567,17 +8567,17 @@
             {
               "id": "snip_awp_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The receiver is where the bolt action lives rent-free.",
+              "text": "the receiver is a distant planet",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -8648,17 +8648,17 @@
             {
               "id": "snip_awp_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine only invites ten guests.",
+              "text": "10 ROUND MAGAZINE GETS BASS DROP",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -8785,17 +8785,17 @@
             {
               "id": "snip_g3sg1_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The objective lens has a very narrow social circle.",
+              "text": "SCOPE WITHIN SCOPE REVEAL",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -8866,17 +8866,17 @@
             {
               "id": "snip_g3sg1_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The receiver keeps a roller-delayed secret.",
+              "text": "r e c e i v e r  o f  l o n g",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -8947,17 +8947,17 @@
             {
               "id": "snip_g3sg1_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine does not believe in single-digit counts.",
+              "text": "20 ROUND MAGAZINE MONTAGE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -9084,17 +9084,17 @@
             {
               "id": "snip_scout_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The objective lens is heavier than its expression.",
+              "text": "SCOPE ZOOM INTO SCOPE",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -9165,17 +9165,17 @@
             {
               "id": "snip_scout_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The receiver is on a strict weight-loss program.",
+              "text": "the receiver has no mass",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -9246,17 +9246,17 @@
             {
               "id": "snip_scout_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine travels with a party of five.",
+              "text": "SCOUT MAGAZINE SPEEDRUN",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -9383,17 +9383,17 @@
             {
               "id": "snip_sg550_j03",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The objective lens is professionally distant.",
+              "text": "SWISS OPTIC REPLAY x550",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -9464,17 +9464,17 @@
             {
               "id": "snip_sg550_j06",
               "styles": [
-                "troll_fact"
+                "surreal"
               ],
-              "text": "The receiver has a Swiss appointment at precisely now.",
+              "text": "r e c e i v e r  o r b i t",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "slow_impossible_dolly",
+                "overlay": "low_poly_meme_head_or_warped_text",
+                "audio": "detuned_drone_or_silence",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "absurd_meme_logic"
             }
           ]
         },
@@ -9545,17 +9545,17 @@
             {
               "id": "snip_sg550_j09",
               "styles": [
-                "troll_fact"
+                "mlg"
               ],
-              "text": "The magazine counts to twenty and calls it a day.",
+              "text": "MAGAZINE CINEMATIC 60 FPS",
               "presentation": {
-                "camera": "deadpan_hold",
-                "overlay": "counterfeit_fact_label",
-                "audio": "dry_click_or_silence",
+                "camera": "punch_zoom",
+                "overlay": "hitmarker_or_caption",
+                "audio": "airhorn_or_bass_hit",
                 "duration_ms": 1800,
                 "optional": true
               },
-              "intent": "counterfeit_fact"
+              "intent": "montage_overreaction"
             }
           ]
         },
@@ -9619,21 +9619,11 @@
           "ASCEND"
         ],
         "logic": "Broken language, bad 3D, impossible but unremarked visual transformations."
-      },
-      "troll_fact": {
-        "keywords": [
-          "FACT",
-          "SCIENTIFICALLY",
-          "OBVIOUSLY",
-          "ALLEGEDLY"
-        ],
-        "logic": "One short stupid statement presented as a fact. Some are nearly obvious; some are impossible. No steps, no pretend tutorials."
       }
     },
     "writing_rules": [
       "The line may be nonsense; the zoom, pause and sound can provide the punchline.",
       "A POI must be visible and must motivate the gag.",
-      "Troll Fact is a short deadpan fake fact, never a step-by-step instruction.",
       "No viewer-directed humiliation.",
       "Do not turn meme vocabulary into polished marketing slogans.",
       "Physical claims are in specs; impossible statements in jokes are satire.",

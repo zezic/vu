@@ -9,6 +9,7 @@ pub mod shutter;
 pub mod text;
 pub mod theme;
 pub mod visualizer;
+pub mod weapon;
 
 pub enum AudioEvent {
     Config {

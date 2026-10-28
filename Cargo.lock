@@ -2920,6 +2920,7 @@ dependencies = [
  "ron",
  "rustfft",
  "serde",
+ "serde_json",
  "strum",
  "tempfile",
  "vello",
