@@ -35,7 +35,10 @@ pub const FLUX_ATTACK_MAX: f32 = 0.1;
 pub const FLUX_RELEASE_MIN: f32 = 0.005;
 pub const FLUX_RELEASE_MAX: f32 = 0.5;
 pub const FLUX_AVERAGE_MIN: f32 = 0.05;
-pub const FLUX_AVERAGE_MAX: f32 = 1.0;
+pub const FLUX_AVERAGE_MAX: f32 = 4.0;
+/// Largest number of onset peaks the adaptive reference reserves room for.
+/// The time window bounds the count in practice.
+const PEAK_WINDOW_CAPACITY: usize = 256;
 pub const FLUX_SENSITIVITY_MIN: f32 = 0.5;
 pub const FLUX_SENSITIVITY_MAX: f32 = 5.0;
 pub const FLUX_THRESHOLD_MIN: f32 = 0.0;
@@ -721,9 +724,9 @@ impl Default for DetectorSettings {
             kick_onset_pre_gain: 0.49823883,
             kick_onset_attack: 0.001,
             kick_onset_release: 0.010084573,
-            kick_onset_average: 0.05,
+            kick_onset_average: 2.0,
             kick_onset_sensitivity: 0.5,
-            kick_onset_min_threshold: 0.125,
+            kick_onset_min_threshold: 0.01,
             kick_onset_min_interval: 0.09514833,
             kick_onset_suppression: 0.5,
             kick_snare_choke: 0.099999994,
@@ -734,9 +737,9 @@ impl Default for DetectorSettings {
             snare_onset_pre_gain: 1.0054638,
             snare_onset_attack: 0.001,
             snare_onset_release: 0.005,
-            snare_onset_average: 0.05,
+            snare_onset_average: 2.0,
             snare_onset_sensitivity: 0.5,
-            snare_onset_min_threshold: 0.125,
+            snare_onset_min_threshold: 0.01,
             snare_onset_min_interval: 0.100148335,
             snare_onset_suppression: 0.32999998,
             snare_flip_every: 1,
@@ -748,9 +751,9 @@ impl Default for DetectorSettings {
             hat_onset_pre_gain: 1.0054638,
             hat_onset_attack: 0.001,
             hat_onset_release: 0.005,
-            hat_onset_average: 0.05,
+            hat_onset_average: 1.5,
             hat_onset_sensitivity: 0.5,
-            hat_onset_min_threshold: 0.125,
+            hat_onset_min_threshold: 0.01,
             hat_onset_min_interval: 0.06,
             hat_onset_suppression: 0.32999998,
             drop_kernels: DropKernels::default(),
@@ -1639,8 +1642,13 @@ pub struct DetectorEvents {
 pub struct FluxSettings {
     pub attack: f32,
     pub release: f32,
+    /// Reference memory in seconds: the time constant of the flux-level
+    /// average and the window of the peak median.
     pub average: f32,
+    /// Threshold as a fraction of the reference.
     pub sensitivity: f32,
+    /// Absolute threshold floor. The peak median also admits only peaks above
+    /// this value.
     pub min_threshold: f32,
     pub min_interval: f32,
 }
@@ -1698,11 +1706,153 @@ impl OnsetRecipe {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+/// One peak of the smoothed onset flow and the time it was seen.
+#[derive(Clone, Copy, Debug)]
+struct OnsetPeak {
+    at: f32,
+    amplitude: f32,
+}
+
+/// Median amplitude of the onset peaks inside a rolling time window.
+///
+/// The median ignores a single loud crash, so the threshold follows the
+/// track's typical onset amplitude instead of its loudest moment. When the
+/// window is empty the tracker falls back to its absolute threshold.
+#[derive(Debug)]
+struct PeakMedianWindow {
+    peaks: VecDeque<OnsetPeak>,
+    scratch: Vec<f32>,
+    median: Option<f32>,
+}
+
+impl Default for PeakMedianWindow {
+    fn default() -> Self {
+        Self {
+            peaks: VecDeque::with_capacity(PEAK_WINDOW_CAPACITY),
+            scratch: Vec::with_capacity(PEAK_WINDOW_CAPACITY),
+            median: None,
+        }
+    }
+}
+
+impl PeakMedianWindow {
+    /// Drops the peaks that left the window and records the peak that appeared
+    /// on this hop.
+    fn advance(&mut self, now: f32, peak_at: f32, window: f32, candidate: Option<f32>) {
+        let mut changed = self.prune(now, window);
+        if let Some(amplitude) = candidate {
+            self.peaks.push_back(OnsetPeak {
+                at: peak_at,
+                amplitude,
+            });
+            changed = true;
+        }
+        if changed {
+            self.update();
+        }
+    }
+
+    fn prune(&mut self, now: f32, window: f32) -> bool {
+        let mut changed = false;
+        while let Some(peak) = self.peaks.front() {
+            if now - peak.at <= window {
+                break;
+            }
+            self.peaks.pop_front();
+            changed = true;
+        }
+        changed
+    }
+
+    fn update(&mut self) {
+        if self.peaks.is_empty() {
+            self.median = None;
+            return;
+        }
+        self.scratch.clear();
+        self.scratch
+            .extend(self.peaks.iter().map(|peak| peak.amplitude));
+        let middle = self.scratch.len() / 2;
+        let (_, median, _) = self.scratch.select_nth_unstable_by(middle, f32::total_cmp);
+        self.median = Some(*median);
+    }
+
+    fn clear(&mut self) {
+        self.peaks.clear();
+        self.median = None;
+    }
+}
+
+/// Where a composite detector's onset threshold comes from.
+#[derive(Debug)]
+enum OnsetReference {
+    /// Slow mean of the smoothed flow. The drop detector keeps this reference
+    /// until its own onset story is revisited.
+    FluxLevel(f32),
+    /// Median of the recent onset peaks. Kick, snare, and hi-hat use this
+    /// reference so the threshold follows the track's own onset amplitude.
+    PeakMedian(PeakMedianWindow),
+}
+
+impl OnsetReference {
+    fn value(&self) -> Option<f32> {
+        match self {
+            Self::FluxLevel(average) => Some(*average),
+            Self::PeakMedian(window) => window.median,
+        }
+    }
+
+    fn advance(
+        &mut self,
+        smoothed: f32,
+        now: f32,
+        dt: f32,
+        settings: &FluxSettings,
+        candidate: Option<f32>,
+    ) {
+        match self {
+            Self::FluxLevel(average) => {
+                let alpha = (-dt / settings.average).exp();
+                *average = alpha * *average + (1.0 - alpha) * smoothed;
+            }
+            Self::PeakMedian(window) => {
+                window.advance(now, now - dt, settings.average, candidate);
+            }
+        }
+    }
+
+    /// Strength of a confirmed onset relative to the reference that judged it.
+    fn power(&self, peak: f32, threshold: f32) -> f32 {
+        match self {
+            // The drop detector keeps reporting strength over its threshold.
+            Self::FluxLevel(_) => peak / threshold.max(1e-6),
+            // A track-relative strength of one is the typical onset amplitude.
+            Self::PeakMedian(window) => match window.median {
+                Some(reference) if reference > 0.0 => peak / reference,
+                _ => 1.0,
+            },
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::FluxLevel(average) => *average = 0.0,
+            Self::PeakMedian(window) => window.clear(),
+        }
+    }
+}
+
+/// One composite detector's onset tracker.
+///
+/// The attack/release envelope turns the projected flow into a peaky signal.
+/// The threshold is `max(reference * sensitivity, min_threshold)`. The peak
+/// test uses the threshold from the previous hop, so a peak cannot raise its
+/// own bar.
+#[derive(Debug)]
 struct FluxTracker {
     raw: f32,
     smoothed: f32,
-    average: f32,
+    reference: OnsetReference,
     previous_smoothed: f32,
     before_previous_smoothed: f32,
     threshold: f32,
@@ -1710,15 +1860,42 @@ struct FluxTracker {
     primed: bool,
 }
 
+impl Default for FluxTracker {
+    /// Kick, snare, and hi-hat start on the peak-median reference.
+    fn default() -> Self {
+        Self::with_reference(OnsetReference::PeakMedian(PeakMedianWindow::default()))
+    }
+}
+
 impl FluxTracker {
+    /// The drop detector keeps the flux-level reference.
+    fn level() -> Self {
+        Self::with_reference(OnsetReference::FluxLevel(0.0))
+    }
+
+    fn with_reference(reference: OnsetReference) -> Self {
+        Self {
+            raw: 0.0,
+            smoothed: 0.0,
+            reference,
+            previous_smoothed: 0.0,
+            before_previous_smoothed: 0.0,
+            threshold: 0.0,
+            last_onset: 0.0,
+            primed: false,
+        }
+    }
+
     fn observe(&mut self, flux: f32, now: f32, dt: f32, settings: &FluxSettings) -> Option<f32> {
         self.raw = flux;
         if !self.primed {
             self.smoothed = flux;
-            self.average = flux;
             self.previous_smoothed = flux;
             self.before_previous_smoothed = flux;
-            self.threshold = (self.average * settings.sensitivity).max(settings.min_threshold);
+            if let OnsetReference::FluxLevel(average) = &mut self.reference {
+                *average = flux;
+            }
+            self.threshold = self.reference_threshold(settings);
             self.last_onset = f32::NEG_INFINITY;
             self.primed = true;
             return None;
@@ -1731,32 +1908,42 @@ impl FluxTracker {
             release_alpha
         };
         self.smoothed = alpha * self.smoothed + (1.0 - alpha) * flux;
-        let average_alpha = (-dt / settings.average).exp();
-        self.average = average_alpha * self.average + (1.0 - average_alpha) * self.smoothed;
-        let threshold = (self.average * settings.sensitivity).max(settings.min_threshold);
 
         let previous = self.previous_smoothed;
-        let before_previous = self.before_previous_smoothed;
-        let previous_threshold = self.threshold;
-        let peak = previous >= before_previous
-            && previous > self.smoothed
-            && previous >= previous_threshold
+        let threshold = self.threshold;
+        let local_peak = previous >= self.before_previous_smoothed && previous > self.smoothed;
+        let onset = local_peak
+            && previous >= threshold
             && now - dt - self.last_onset >= settings.min_interval;
-        self.before_previous_smoothed = previous;
-        self.previous_smoothed = self.smoothed;
-        self.threshold = threshold;
-        if peak {
+        let power = if onset {
             self.last_onset = now - dt;
-            // Strength over the adaptive threshold keeps the confirmed
-            // detectors independent of the absolute FFT magnitude scale.
-            Some(previous / previous_threshold.max(1e-6))
+            Some(self.reference.power(previous, threshold))
         } else {
             None
-        }
+        };
+        let candidate = (local_peak && previous >= settings.min_threshold).then_some(previous);
+        self.reference
+            .advance(self.smoothed, now, dt, settings, candidate);
+        self.threshold = self.reference_threshold(settings);
+        self.before_previous_smoothed = previous;
+        self.previous_smoothed = self.smoothed;
+        power
+    }
+
+    fn reference_threshold(&self, settings: &FluxSettings) -> f32 {
+        let reference = self.reference.value().unwrap_or(0.0);
+        (reference * settings.sensitivity).max(settings.min_threshold)
     }
 
     fn reset(&mut self) {
-        *self = Self::default();
+        self.raw = 0.0;
+        self.smoothed = 0.0;
+        self.reference.reset();
+        self.previous_smoothed = 0.0;
+        self.before_previous_smoothed = 0.0;
+        self.threshold = 0.0;
+        self.last_onset = 0.0;
+        self.primed = false;
     }
 }
 
@@ -1904,7 +2091,7 @@ impl DropTracker {
     fn new() -> Self {
         Self {
             window: GapWindow::with_capacity(GAP_WINDOW_CAPACITY),
-            onset: FluxTracker::default(),
+            onset: FluxTracker::level(),
             low: 0.0,
             high: 0.0,
             low_lp: 0.0,
@@ -2203,6 +2390,7 @@ fn onset_flux_status(tracker: &FluxTracker, projection: OnsetProjection) -> Onse
     OnsetFluxStatus {
         flux: tracker.raw,
         smoothed: tracker.smoothed,
+        reference: tracker.reference.value(),
         threshold: tracker.threshold,
         inhibition: projection.inhibition,
         suppressed: projection.suppressed,
@@ -2259,6 +2447,10 @@ pub struct DropStatus {
 pub struct OnsetFluxStatus {
     pub flux: f32,
     pub smoothed: f32,
+    /// Median of the recent onset peaks, or the slow flux level for the drop
+    /// detector. Threshold is derived from it; `None` before the reference has
+    /// any data.
+    pub reference: Option<f32>,
     pub threshold: f32,
     /// Inverted-kernel weighted tracked flux before the suppression weight.
     pub inhibition: f32,
@@ -2393,6 +2585,41 @@ mod tests {
         DetectorSettings::default()
     }
 
+    /// Peak-tracking settings with the fast envelope of the real detectors.
+    fn adaptive_settings() -> FluxSettings {
+        FluxSettings {
+            attack: 0.001,
+            release: 0.005,
+            average: 2.0,
+            sensitivity: 0.5,
+            min_threshold: 0.01,
+            min_interval: 0.05,
+        }
+    }
+
+    /// One hit followed by seven silent hops, so pulses stay independent.
+    fn pulse_train(amplitude: f32, hits: usize) -> Vec<f32> {
+        let mut flux = Vec::new();
+        for _ in 0..hits {
+            flux.push(amplitude);
+            flux.extend(std::iter::repeat_n(0.0, 7));
+        }
+        flux
+    }
+
+    fn feed(tracker: &mut FluxTracker, settings: &FluxSettings, train: &[f32]) -> Vec<f32> {
+        let dt = 1.0 / 86.0;
+        let mut now = 0.0;
+        let mut onsets = Vec::new();
+        for &flux in train {
+            now += dt;
+            if let Some(power) = tracker.observe(flux, now, dt, settings) {
+                onsets.push(power);
+            }
+        }
+        onsets
+    }
+
     #[test]
     fn abl_scales_the_high_reference_before_the_curve() {
         let settings = BandOnsetSettings {
@@ -2471,6 +2698,106 @@ mod tests {
             fires, 1,
             "the second pulse lands inside the minimum interval"
         );
+    }
+
+    #[test]
+    fn the_peak_median_threshold_follows_the_track_scale() {
+        let settings = adaptive_settings();
+        let loud = feed(
+            &mut FluxTracker::default(),
+            &settings,
+            &pulse_train(0.32, 12),
+        );
+        let quiet = feed(
+            &mut FluxTracker::default(),
+            &settings,
+            &pulse_train(0.04, 12),
+        );
+        assert_eq!(loud.len(), 12);
+        assert_eq!(
+            quiet.len(),
+            12,
+            "a quiet track keeps the same hit count as a loud one"
+        );
+    }
+
+    #[test]
+    fn one_loud_peak_does_not_raise_the_median_threshold() {
+        let settings = adaptive_settings();
+        let mut flux = pulse_train(0.1, 8);
+        flux.extend(pulse_train(1.0, 1));
+        flux.extend(pulse_train(0.1, 8));
+        let onsets = feed(&mut FluxTracker::default(), &settings, &flux);
+        assert_eq!(
+            onsets.len(),
+            17,
+            "the median must ignore the single loud crash"
+        );
+        for power in &onsets[9..] {
+            assert!(
+                (power - 1.0).abs() < 0.05,
+                "the peaks after the crash stay at the median"
+            );
+        }
+    }
+
+    #[test]
+    fn the_onset_power_is_relative_to_the_peak_median() {
+        let settings = adaptive_settings();
+        let mut flux = pulse_train(0.1, 8);
+        flux.extend(pulse_train(0.06, 1));
+        let onsets = feed(&mut FluxTracker::default(), &settings, &flux);
+        assert_eq!(onsets.len(), 9);
+        assert!(
+            (onsets[8] - 0.6).abs() < 1e-3,
+            "a 60% peak reports 60% of the median"
+        );
+    }
+
+    #[test]
+    fn the_peak_median_forgets_peaks_outside_its_window() {
+        let settings = FluxSettings {
+            average: 0.1,
+            ..adaptive_settings()
+        };
+        let mut flux = pulse_train(0.3, 4);
+        flux.extend(std::iter::repeat_n(0.0, 32));
+        flux.extend(pulse_train(0.02, 1));
+        let onsets = feed(&mut FluxTracker::default(), &settings, &flux);
+        assert_eq!(
+            onsets.len(),
+            5,
+            "the quiet hit after the gap must confirm against the absolute floor"
+        );
+    }
+
+    #[test]
+    fn the_onset_status_reports_the_peak_median_reference() {
+        let settings = adaptive_settings();
+        let mut tracker = FluxTracker::default();
+        feed(&mut tracker, &settings, &pulse_train(0.1, 4));
+        let status = onset_flux_status(&tracker, OnsetProjection::default());
+        let reference = status.reference.expect("the peaks filled the median");
+        assert!((reference - 0.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_flux_level_reference_averages_the_smoothed_flow() {
+        let settings = FluxSettings {
+            average: 0.1,
+            sensitivity: 2.0,
+            min_threshold: 0.0,
+            ..adaptive_settings()
+        };
+        let mut tracker = FluxTracker::level();
+        let dt = 1.0 / 86.0;
+        let mut now = 0.0;
+        for _ in 0..100 {
+            now += dt;
+            tracker.observe(0.5, now, dt, &settings);
+        }
+        assert!((tracker.threshold - 1.0).abs() < 1e-3);
+        assert!(matches!(tracker.reference, OnsetReference::FluxLevel(_)));
     }
 
     #[test]
@@ -3082,7 +3409,7 @@ mod tests {
     }
 
     #[test]
-    fn the_onset_power_is_the_smoothed_flux_at_the_peak() {
+    fn a_flux_pulse_reports_a_positive_onset_power() {
         let settings = FluxSettings::default();
         let mut tracker = FluxTracker::default();
         let dt = 1.0 / 86.0;

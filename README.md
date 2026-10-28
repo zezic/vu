@@ -160,25 +160,34 @@ default), giving `ABL`. The continuous per-band onset flow is
 amount, but the onset detector reads the FFT bins directly and does not use the
 band curve.
 
-The kick and snare detectors use 0.5 s temporal onset templates. A template is
-defined by two polygons in the normalized time-by-band plane: the inner polygon
-is the maximum, the outer polygon is the zero boundary, and the field between
-them is interpolated. The resulting field is matched against the recent
-per-band onset stream with a normalized dot product. A second, independently
-editable suppression kernel supplies the inhibition projection, scaled by the
-detector's `ONS SUPPRESS` control (0.5 by default). The residual flow runs
-through the detector's own attack/release envelope, slow adaptive average, and
-local-peak detector; only the composite detectors emit boolean onsets. Their
-local-peak threshold and minimum gap are the `ONS THRESH` and `ONS GAP`
-controls, with factory gaps of 95 ms for kick, 100 ms for snare, and 140 ms for
-drop. Each detector also has an `ONS PRE` trim on the matched projection before
-tracking, so a loud projection can be brought into the tracker's range.
-`KERNEL AREA` limits the template from its start up to the chosen fraction, so
-the leftmost part of the kernel is always kept; the end of that effective area
-is faded out over 10% of its length. The factory templates are hand-tuned
-polygons over the half-second canvas: the kick template spans the whole band
-range, the snare template covers bands 04-15, and both suppression kernels
-concentrate on the low bands.
+The kick, snare, and hi-hat detectors use 0.5 s temporal onset templates. A
+template is defined by two polygons in the normalized time-by-band plane: the
+inner polygon is the maximum, the outer polygon is the zero boundary, and the
+field between them is interpolated. The resulting field is matched against the
+recent per-band onset stream with a normalized dot product. A second,
+independently editable suppression kernel supplies the inhibition projection,
+scaled by the detector's `ONS SUPPRESS` control (0.5 by default). The residual
+flow runs through the detector's own attack/release envelope and local-peak
+detector; only the composite detectors emit boolean onsets. The kick, snare,
+and hi-hat threshold follows the median amplitude of the onset peaks seen in
+the last `ONS AVERAGE` seconds, so tracks with different dynamic range trigger
+on their own onset scale instead of an absolute level. `ONS SENS` sets the
+fraction of that median a peak must reach (0.5 by default), and `ONS THRESH`
+is the absolute floor: a peak below it neither confirms nor enters the median.
+`ONS GAP` is the minimum spacing between confirmed onsets, with factory gaps
+of 95 ms for kick, 100 ms for snare, and 60 ms for hi-hat. A confirmed onset
+reports its strength relative to the median, so a typical hit is 1.0 and a
+half-strength hit is 0.5. The drop detector keeps the flux-level average
+instead: its threshold follows a slow mean of the same residual, with
+`ONS AVERAGE` as that mean's time constant. Each detector also has an
+`ONS PRE` trim on the matched projection before tracking, so a loud projection
+can be brought into the tracker's range. `KERNEL AREA` limits the template
+from its start up to the chosen fraction, so the leftmost part of the kernel is
+always kept; the end of that effective area is faded out over 10% of its
+length. The factory templates are hand-tuned polygons over the half-second
+canvas: the kick template spans the whole band range, the snare template covers
+bands 04-15, the hi-hat template covers the top bands, and the suppression
+kernels concentrate on the low bands.
 
 The drop detector projects the 16 unfitted linear band magnitudes through two
 drawable kernels: a low kernel and a high kernel. Each projection is normalized
@@ -194,8 +203,8 @@ third, independent onset kernel can clear it and confirm the drop. A short deep
 gap and a long medium gap therefore contribute to the same confidence budget,
 and the threshold may be negative. Its onset kernel multiplies the continuous
 per-band onset flow, subtracts its own inverted-kernel projection (0.5 by
-default), and runs through the same attack/release envelope, slow adaptive
-average, and local-peak detector as the other composite detectors, with its own
+default), and runs through the same attack/release envelope and local-peak
+detector as the other composite detectors, with its own flux-level average and
 dedicated onset settings. A kick emits a sequenced quake impulse and drives the
 kick envelope; a snare flips the model's pitch baseline every Nth detection and
 chokes the kick; a drop always changes the model, emits a vertical quake, and
@@ -267,8 +276,8 @@ renders:
   twist, bulge, ripple, shear, zoom, accent, line energy, jitter, phase, kick,
   flip, quake, crossfade, style morph, and entrance
 - broadband, bass, and treble envelopes with raw levels in the footer, plus
-  kick, snare, and drop hit totals, their trigger flashes, model name, and line
-  and ribbon counts
+  kick, snare, hat, and drop hit totals, their trigger flashes, model name, and
+  line and ribbon counts
 
 Hover a band or property to highlight it. Hovering a property also shows its
 description in the footer. Click an item to pin the inspector below the panel;
@@ -360,11 +369,13 @@ The inspector follows the selection:
   across the full history. Inside the analyzer pane, below the 16-band flow
   bank, two internal graphs plot `ABDR`/`WSDR`/`DRP` and `ABL`/`EXCESS`/`ONSET`
   for the selected band. The local-peak threshold and minimum interval are the
-  `ONS THRESH` and `ONS GAP` controls of each `KICK`, `SNARE`, and `DROP`
-  detector. `KICK` exposes its seven dedicated onset settings, main and
+  `ONS THRESH` and `ONS GAP` controls of each `KICK`, `SNARE`, `HAT`, and
+  `DROP` detector. `KICK` exposes its seven dedicated onset settings, main and
   suppression kernels, snare and drop choke times, quake multiplier, quake
   sequence length, and quake spring. `SNARE` exposes its seven dedicated onset
   settings, main and suppression kernels, flip count, choke, and flip spring.
+  `HAT` exposes its seven dedicated onset settings and main and suppression
+  kernels.
   The editor is one overlay canvas over the 16-band onset-input spectrogram;
   there is no separate kernel window. The spectrogram and computed kernel use
   the same intensity gradient: transparent red (weakest), red, magenta, blue,
@@ -385,16 +396,17 @@ The inspector follows the selection:
   settings, inverted-kernel suppression, and quake multiplier, plus three
   kernel banks (`LOW`, `HIGH`, `ONSET`). Press and drag across a drop bank to
   draw its shape; the brush interpolates across columns and release ends the
-  stroke. Selecting `KICK`, `SNARE`, or `DROP` (or its `DETECTOR` leaf) switches
-  the inspector extension to that detector's traces. Kick and snare show the
-  composite template onset flow against its adaptive threshold, plus the
-  trigger flash. A suppression graph sits directly below the onset graph: it
-  draws the suppression projection and the weighted part actually subtracted,
-  both growing downward from a zero line at the top. Drop shows the low and
-  high projections, their difference, window confidence, latched eligibility,
-  composite onset flow and threshold, its suppression analysis, and trigger
-  flash. The header reports the detector state, onset or gap values against the
-  threshold, hit total, and last power. Temporal templates persist per detector
+  stroke. Selecting `KICK`, `SNARE`, `HAT`, or `DROP` (or its `DETECTOR` leaf)
+  switches the inspector extension to that detector's traces. Kick, snare, and
+  hat show the composite template onset flow, its median reference, and the
+  threshold derived from it, plus the trigger flash. A suppression graph sits
+  directly below the onset graph and draws the suppression projection and the
+  weighted part actually subtracted, both growing downward from a zero line at
+  the top. Drop shows the low and high projections, their difference, window
+  confidence, latched eligibility, composite onset flow and threshold, its
+  suppression analysis, and trigger flash. The header reports the detector
+  state, onset, reference, and threshold values, hit total, and last power.
+  Temporal templates persist per detector
   as the two polygons; configs written before the polygon editor load their
   previous step templates or 16-band kick/snare kernels as initial polygons.
   Per-band ABL settings persist as one recipe per band, while the

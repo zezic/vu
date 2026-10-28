@@ -4468,6 +4468,49 @@ mod tests {
         visualizer
     }
 
+    /// A decaying five-tone bass burst repeated every 200 ms.
+    fn kick_burst(frame: usize) -> Vec<[f32; 2]> {
+        (0..800)
+            .map(|index| {
+                let sample = frame * 800 + index;
+                let time = sample as f32 / 48_000.0;
+                let block = sample % 9_600;
+                let envelope = if block < 3_000 {
+                    1.0 - block as f32 / 3_000.0
+                } else {
+                    0.0
+                };
+                // Spread the burst over the five kick bands so the composite
+                // kick kernel sees a real low transient.
+                let bass = [40.0, 50.0, 65.0, 85.0, 110.0]
+                    .iter()
+                    .map(|frequency| (std::f32::consts::TAU * frequency * time).sin())
+                    .sum::<f32>()
+                    / 5.0
+                    * envelope;
+                [bass; 2]
+            })
+            .collect()
+    }
+
+    /// Detector settings under which only the kick reacts to a burst.
+    fn kick_only_settings() -> DetectorSettings {
+        DetectorSettings {
+            // Keep the snare template on the top band so a low burst cannot
+            // choke the kick through the snare detector.
+            snare_pattern: TemporalPattern {
+                inner: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
+                outer: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
+                suppression_inner: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
+                suppression_outer: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
+                effective: 1.0,
+            },
+            // Unreachable gap confidence keeps the drop from choking the kick.
+            drop_gap_threshold: 1.0,
+            ..DetectorSettings::default()
+        }
+    }
+
     #[test]
     fn detector_defaults_describe_the_onset_bank() {
         let detectors = DetectorSettings::default();
@@ -4923,48 +4966,39 @@ mod tests {
     }
 
     #[test]
+    fn kick_detection_holds_across_input_gain() {
+        fn hits(gain: f32) -> u32 {
+            let mut visualizer = loaded_visualizer();
+            visualizer.set_detector_settings(kick_only_settings());
+            visualizer.set_samplerate(48_000);
+            for frame in 0..720 {
+                visualizer.consume_buf(&kick_burst(frame), gain);
+            }
+            visualizer.debug_snapshot().kick_hits
+        }
+        let loud = hits(1.0);
+        let quiet = hits(0.1);
+        assert!(
+            loud >= 48,
+            "the loud train must confirm most of its 60 bursts, got {loud}"
+        );
+        assert!(
+            quiet * 4 >= loud * 3,
+            "a 20 dB quieter train must keep its hits, got {quiet} against {loud}"
+        );
+    }
+
+    #[test]
     fn low_band_bursts_trigger_the_kick_and_quake() {
         let mut visualizer = loaded_visualizer();
-        // Isolate the kick kernel so a broadband click cannot choke it
-        // through the snare detector.
-        visualizer.set_detector_settings(DetectorSettings {
-            snare_pattern: TemporalPattern {
-                inner: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
-                outer: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
-                suppression_inner: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
-                suppression_outer: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
-                effective: 1.0,
-            },
-            ..DetectorSettings::default()
-        });
+        visualizer.set_detector_settings(kick_only_settings());
         visualizer.set_samplerate(48_000);
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut at = AudioTime::ZERO;
         let mut kick_seen = false;
         let mut quake_seen = false;
         for frame in 0..360 {
-            let input: Vec<[f32; 2]> = (0..800)
-                .map(|index| {
-                    let sample = frame * 800 + index;
-                    let time = sample as f32 / 48_000.0;
-                    let block = sample % 9_600;
-                    let envelope = if block < 3_000 {
-                        1.0 - block as f32 / 3_000.0
-                    } else {
-                        0.0
-                    };
-                    // Spread the burst over the five kick bands so the
-                    // composite kick kernel sees a real low transient.
-                    let bass = [40.0, 50.0, 65.0, 85.0, 110.0]
-                        .iter()
-                        .map(|frequency| (std::f32::consts::TAU * frequency * time).sin())
-                        .sum::<f32>()
-                        / 5.0
-                        * envelope;
-                    [bass; 2]
-                })
-                .collect();
-            visualizer.consume_buf(&input, 1.0);
+            visualizer.consume_buf(&kick_burst(frame), 1.0);
             let end = at.shifted(800.0 / 48_000.0);
             visualizer.update(
                 AudioInterval::new(at, end),
@@ -5759,11 +5793,13 @@ mod tests {
         assert!(snapshot.drop_status.onset.suppressed.is_finite());
         assert!(snapshot.kick_flux.flux.is_finite());
         assert!(snapshot.kick_flux.smoothed.is_finite());
+        assert!(snapshot.kick_flux.reference.is_none_or(f32::is_finite));
         assert!(snapshot.kick_flux.threshold.is_finite());
         assert!(snapshot.kick_flux.inhibition.is_finite());
         assert!(snapshot.kick_flux.suppressed.is_finite());
         assert!(snapshot.snare_flux.flux.is_finite());
         assert!(snapshot.snare_flux.smoothed.is_finite());
+        assert!(snapshot.snare_flux.reference.is_none_or(f32::is_finite));
         assert!(snapshot.snare_flux.threshold.is_finite());
         assert!(snapshot.snare_flux.inhibition.is_finite());
         assert!(snapshot.snare_flux.suppressed.is_finite());

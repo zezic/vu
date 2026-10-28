@@ -891,6 +891,11 @@ fn draw_extension(
     }
 }
 
+/// Formats a threshold reference for the compact debug labels.
+fn reference_text(reference: Option<f32>) -> String {
+    reference.map_or_else(|| "-".to_owned(), |value| format!("{value:.3}"))
+}
+
 fn detector_extension_text(
     detector: Detector,
     snapshot: &DebugSnapshot,
@@ -909,7 +914,12 @@ fn detector_extension_text(
     };
     (
         format!("{} TRIGGER  {}", detector.name(), trigger_state(&trigger)),
-        format!("ONSET FLUX {:.3}/{:.3}", onset.smoothed, onset.threshold),
+        format!(
+            "ONSET FLUX {:.3}  REF {}  THR {:.3}",
+            onset.smoothed,
+            reference_text(onset.reference),
+            onset.threshold
+        ),
         format!("HITS {hits}  LAST {:.2}", trigger.power),
     )
 }
@@ -4089,7 +4099,11 @@ impl GraphSource {
             Self::DropEligible => format!("ELIG {}", u8::from(snapshot.drop_onset.armed)),
             Self::DetectorOnsetFlux(detector) => {
                 let onset = onset_flux_snapshot(snapshot, detector);
-                format!("ONSET {:.3}/{:.3}", onset.smoothed, onset.threshold)
+                format!(
+                    "ONSET {:.3}  REF {}",
+                    onset.smoothed,
+                    reference_text(onset.reference)
+                )
             }
             Self::DetectorSuppression(detector) => {
                 let onset = onset_flux_snapshot(snapshot, detector);
@@ -4106,7 +4120,7 @@ impl GraphSource {
             Self::DropDiff => Some("high - low"),
             Self::DropConfidence => Some("window mean"),
             Self::DropEligible => Some("latched gap"),
-            Self::DetectorOnsetFlux(_) => Some("kernel onset flux"),
+            Self::DetectorOnsetFlux(_) => Some("flux, reference, threshold"),
             Self::DetectorSuppression(_) => Some("suppression"),
             _ => None,
         }
@@ -4789,6 +4803,22 @@ fn draw_graph(
         source.inverted(),
         |sample| source.value(sample, false, routing).unwrap_or(0.0),
     );
+    if let GraphSource::DetectorOnsetFlux(detector) = source {
+        // Drawn over the flux: a peak that reaches the median would otherwise
+        // hide it, and the two lines would look like one.
+        draw_optional_trace(
+            scene,
+            history,
+            plot,
+            range,
+            TraceStyle {
+                color: palette.neutral[1].with_alpha(0.55),
+                width: 1.0 * scale,
+                start: 0.0,
+            },
+            |sample| onset_flux_sample(sample, detector).reference,
+        );
+    }
     if let Some(shape) = source.shape(visualizer) {
         let flux_band =
             matches!(focus, InspectorFocus::Flux(_)) && matches!(source, GraphSource::Band(_));
@@ -4902,7 +4932,9 @@ fn draw_trace(
     style: TraceStyle,
     value: impl Fn(&DebugSample) -> f32,
 ) {
-    draw_trace_axis(scene, history, plot, range, style, false, value);
+    draw_trace_axis(scene, history, plot, range, style, false, |sample| {
+        Some(value(sample))
+    });
 }
 
 fn draw_inverted_trace(
@@ -4913,7 +4945,22 @@ fn draw_inverted_trace(
     style: TraceStyle,
     value: impl Fn(&DebugSample) -> f32,
 ) {
-    draw_trace_axis(scene, history, plot, range, style, true, value);
+    draw_trace_axis(scene, history, plot, range, style, true, |sample| {
+        Some(value(sample))
+    });
+}
+
+/// Draws a trace that may not exist for every sample, leaving a gap where the
+/// value is absent instead of dropping the line to zero.
+fn draw_optional_trace(
+    scene: &mut Scene,
+    history: &DebugHistory,
+    plot: Rect,
+    range: (f32, f32),
+    style: TraceStyle,
+    value: impl Fn(&DebugSample) -> Option<f32>,
+) {
+    draw_trace_axis(scene, history, plot, range, style, false, value);
 }
 
 fn draw_trace_axis(
@@ -4923,7 +4970,7 @@ fn draw_trace_axis(
     range: (f32, f32),
     style: TraceStyle,
     inverted: bool,
-    value: impl Fn(&DebugSample) -> f32,
+    value: impl Fn(&DebugSample) -> Option<f32>,
 ) {
     let Some((first, last)) = history.span() else {
         return;
@@ -4934,21 +4981,27 @@ fn draw_trace_axis(
     }
     let span = last - start;
     let mut path = BezPath::new();
-    let mut count = 0;
+    let mut segments = 0;
+    let mut connected = false;
     for sample in history.samples() {
         if sample.at < start {
             continue;
         }
+        let Some(value) = value(sample) else {
+            connected = false;
+            continue;
+        };
         let x = plot.x0 + f64::from((sample.at - start) / span) * plot.width();
-        let y = map_level_axis(plot, range, value(sample), inverted);
-        if count == 0 {
-            path.move_to(Point::new(x, y));
-        } else {
+        let y = map_level_axis(plot, range, value, inverted);
+        if connected {
             path.line_to(Point::new(x, y));
+            segments += 1;
+        } else {
+            path.move_to(Point::new(x, y));
+            connected = true;
         }
-        count += 1;
     }
-    if count >= 2 {
+    if segments > 0 {
         scene.stroke(
             &Stroke::new(style.width),
             Affine::IDENTITY,
@@ -5579,15 +5632,17 @@ mod tests {
     }
 
     #[test]
-    fn kick_and_snare_focus_headers_report_their_onset_flux() {
+    fn phase_detector_focus_headers_report_their_onset_flux() {
         let visualizer = Visualizer::new();
         let snapshot = visualizer.debug_snapshot();
-        for detector in [Detector::Kick, Detector::Snare] {
+        for detector in [Detector::Kick, Detector::Snare, Detector::Hat] {
             let (heading, description, _) =
                 detector_extension_text(detector, &snapshot, &visualizer);
             assert!(heading.ends_with("IDLE"));
             assert!(heading.starts_with(detector.name()));
             assert!(description.contains("ONSET FLUX"));
+            assert!(description.contains("REF"));
+            assert!(description.contains("THR"));
         }
     }
 
