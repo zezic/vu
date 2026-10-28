@@ -1,6 +1,5 @@
 use std::{borrow::Cow, sync::Arc};
 
-use anyhow::Context;
 use parley::{
     fontique::FontInfoOverride,
     style::{FontFamily, FontStyle as ParleyFontStyle, FontWeight, FontWidth},
@@ -17,7 +16,7 @@ use vello::{
 /// fonts are registered.
 const UI_FAMILY: &str = "VU Iosevka";
 
-/// The four bundled Iosevka faces used for everything except gauge markings.
+/// The four bundled Iosevka faces used for the HUD and inspector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiFace {
     Light,
@@ -45,17 +44,12 @@ impl UiFace {
 pub struct Fonts {
     fonts: FontContext,
     layouts: LayoutContext<Brush>,
-    gauge_family: String,
     ui_family: String,
 }
 
 impl Fonts {
     pub fn new() -> anyhow::Result<Self> {
         let mut fonts = FontContext::new();
-        fonts.collection.register_fonts(
-            Blob::new(Arc::new(include_bytes!("../assets/D-DINExp.ttf").to_vec())),
-            None,
-        );
         for (bytes, face) in [
             (
                 include_bytes!("../assets/fonts/Iosevka/IosevkaTightSoft-Light-subset.ttf")
@@ -92,11 +86,6 @@ impl Fonts {
                 .register_fonts(Blob::new(Arc::new(bytes.to_vec())), Some(metadata));
         }
         let families: Vec<String> = fonts.collection.family_names().map(str::to_owned).collect();
-        let gauge_family = families
-            .iter()
-            .find(|name| name.contains("DIN"))
-            .cloned()
-            .context("The bundled DIN font could not be loaded")?;
         if !families.iter().any(|name| name == UI_FAMILY) {
             anyhow::bail!("The bundled Iosevka subsets could not be registered under {UI_FAMILY}");
         }
@@ -104,7 +93,6 @@ impl Fonts {
         Ok(Self {
             fonts,
             layouts: LayoutContext::new(),
-            gauge_family,
             ui_family,
         })
     }
@@ -117,18 +105,6 @@ impl Fonts {
     pub fn layout_ui(&mut self, text: &str, size: f32, face: UiFace) -> Text {
         let family = self.ui_family.clone();
         self.layout_with(text, size, &family, face.weight(), face.style())
-    }
-
-    /// Gauge markings and units retain the original DIN face.
-    pub fn layout_gauge(&mut self, text: &str, size: f32) -> Text {
-        let family = self.gauge_family.clone();
-        self.layout_with(
-            text,
-            size,
-            &family,
-            FontWeight::NORMAL,
-            ParleyFontStyle::Normal,
-        )
     }
 
     fn layout_with(
@@ -168,11 +144,7 @@ impl Text {
     /// bundled Iosevka faces report a tall ascender; this metric is the actual
     /// optical top of a capital.
     pub fn cap_height(&self) -> f64 {
-        let line = self
-            .layout
-            .lines()
-            .next()
-            .expect("meter labels contain one line");
+        let line = self.layout.lines().next().expect("labels contain one line");
         line.items()
             .find_map(|item| match item {
                 PositionedLayoutItem::GlyphRun(glyph_run) => {
@@ -195,11 +167,7 @@ impl Text {
     /// Draws a single-line label centered horizontally at the transform's origin,
     /// with its alphabetic baseline at y = 0.
     pub fn draw(&self, scene: &mut Scene, transform: Affine, color: Color) {
-        let line = self
-            .layout
-            .lines()
-            .next()
-            .expect("meter labels contain one line");
+        let line = self.layout.lines().next().expect("labels contain one line");
         let transform = transform
             * Affine::translate((
                 -(self.layout.width() as f64) / 2.0,
@@ -207,7 +175,7 @@ impl Text {
             ));
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
-                unreachable!("meter labels contain text only")
+                unreachable!("labels contain text only")
             };
             let run = glyph_run.run();
             scene
@@ -249,22 +217,6 @@ mod tests {
             let attributes = glyph_run.run().font_attrs();
             (attributes.weight, attributes.style)
         }
-
-        fn glyph_ids(&self) -> Vec<u32> {
-            let line = self
-                .layout
-                .lines()
-                .next()
-                .expect("test labels contain one line");
-            let mut ids = Vec::new();
-            for item in line.items() {
-                let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
-                    unreachable!("test labels contain text only")
-                };
-                ids.extend(glyph_run.positioned_glyphs().map(|glyph| glyph.id));
-            }
-            ids
-        }
     }
 
     #[test]
@@ -287,18 +239,6 @@ mod tests {
             assert_eq!(weight, face.weight());
             assert_eq!(style, face.style());
         }
-        Ok(())
-    }
-
-    #[test]
-    fn gauge_markings_keep_the_din_face_while_ui_uses_iosevka() -> anyhow::Result<()> {
-        let mut fonts = Fonts::new()?;
-        let gauge = fonts.layout_gauge("0123456789+-", 20.0);
-        let ui = fonts.layout_ui("0123456789+-", 20.0, UiFace::SemiBold);
-        let italic = fonts.layout_ui("0123456789+-", 20.0, UiFace::LightItalic);
-        assert!(!gauge.glyph_ids().is_empty());
-        assert_ne!(gauge.glyph_ids(), ui.glyph_ids());
-        assert!(!italic.glyph_ids().is_empty());
         Ok(())
     }
 }

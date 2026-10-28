@@ -106,14 +106,11 @@ mod tests {
         config.flush()?;
         assert!(!path.exists());
         config.edit().preamp_db = PreampDb::try_from(-12.0)?;
-        config.edit().mode = crate::measurement::Mode::SamplePeak;
-        config.edit().peak_movement = crate::meter::PeakMovement::VintageFr;
         config.edit().frame_rate_limit = FrameRateLimit::Fps55;
         config.edit().shutter_frames = crate::config::ShutterFrames::try_from(2.5)?;
         config.edit().theme = config
             .theme
             .adjusted(crate::frame_schedule::Adjustment::Increase);
-        config.edit().presentation = crate::visualizer::Presentation::Visualizer;
         config.edit().visualizer_text_scale = config
             .visualizer_text_scale
             .adjusted(crate::frame_schedule::Adjustment::Increase);
@@ -233,8 +230,6 @@ mod tests {
             "(tuning: (gains: { SpinBand: 20.0 }))",
             "(tuning: (style: { DeformBias: 3.0 }))",
             "(frame_rate_limit: Fps99)",
-            "(mode: Unknown)",
-            "(peak_movement: Unknown)",
             "(theme: \"Unknown theme\")",
         ] {
             fs::write(&path, text)?;
@@ -243,12 +238,6 @@ mod tests {
         }
         let missing: Config = ron::from_str("(frame_rate_limit: Fps48)")?;
         assert_eq!(missing.preamp_db, PreampDb::default());
-        assert_eq!(missing.mode, crate::measurement::Mode::Vu);
-        assert_eq!(missing.peak_movement, crate::meter::PeakMovement::VintageFr);
-        assert_eq!(
-            missing.presentation,
-            crate::visualizer::Presentation::Visualizer
-        );
         assert_eq!(
             missing.shutter_frames,
             crate::config::ShutterFrames::default()
@@ -287,6 +276,14 @@ mod tests {
             missing.tuning,
             crate::visualizer::VisualizerTuning::default()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn removed_display_settings_load_as_defaults() -> anyhow::Result<()> {
+        let config: Config =
+            ron::from_str("(presentation: Gauges, mode: Ppm, peak_movement: VintageFr)")?;
+        assert_eq!(config, Config::default());
         Ok(())
     }
 

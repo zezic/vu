@@ -1,5 +1,3 @@
-use std::f32::consts::TAU;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec2 {
     pub x: f32,
@@ -147,71 +145,13 @@ impl std::ops::Mul<f32> for Vec3 {
     }
 }
 
-/// Curated evolution path. The first scene is always the plain cube.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum FigureKind {
-    #[default]
-    Cube,
-    Octahedron,
-    Icosahedron,
-    Tesseract,
-    Torus,
-}
-
-impl FigureKind {
-    #[must_use]
-    pub fn next(self) -> Self {
-        match self {
-            Self::Cube => Self::Octahedron,
-            Self::Octahedron => Self::Icosahedron,
-            Self::Icosahedron => Self::Tesseract,
-            Self::Tesseract => Self::Torus,
-            Self::Torus => Self::Cube,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Cube => "Cube",
-            Self::Octahedron => "Octahedron",
-            Self::Icosahedron => "Icosahedron",
-            Self::Tesseract => "Tesseract",
-            Self::Torus => "Torus",
-        }
-    }
-
-    /// The torus alternates two vivid accents across its edges. Every other
-    /// figure keeps one accent so its edges read as a single object, including
-    /// the tesseract whose two projected cubes would otherwise be striped.
-    pub fn uses_two_accents(self) -> bool {
-        matches!(self, Self::Torus)
-    }
-}
-
-#[derive(Clone)]
-enum Source {
-    Three(Vec<Vec3>),
-    Four(Vec<[f32; 4]>),
-}
-
 #[derive(Clone)]
 pub struct Wireframe {
-    source: Source,
+    vertices: Vec<Vec3>,
     edges: Vec<[u16; 2]>,
-    vertex_count: usize,
 }
 
 impl Wireframe {
-    pub fn build(kind: FigureKind) -> Self {
-        match kind {
-            FigureKind::Cube => cube(),
-            FigureKind::Octahedron => octahedron(),
-            FigureKind::Icosahedron => icosahedron(),
-            FigureKind::Tesseract => tesseract(),
-            FigureKind::Torus => torus(),
-        }
-    }
-
     /// Builds a wireframe from an indexed mesh. Vertices must already be in
     /// model space; the caller is responsible for fitting them to the camera.
     /// The edge list may be empty when a coarse crease threshold hides every
@@ -229,37 +169,19 @@ impl Wireframe {
             }),
             "every wireframe edge must join two distinct vertices"
         );
-        Self {
-            source: Source::Three(vertices),
-            edges,
-            vertex_count,
-        }
+        Self { vertices, edges }
     }
 
     pub fn vertex_count(&self) -> usize {
-        self.vertex_count
+        self.vertices.len()
     }
 
     pub fn edges(&self) -> &[[u16; 2]] {
         &self.edges
     }
 
-    /// A 4D tesseract collapses to 3D with a phase-driven four-space rotation.
-    pub fn vertex(&self, index: usize, phase: f32) -> Vec3 {
-        match &self.source {
-            Source::Three(vertices) => vertices[index],
-            Source::Four(vertices) => {
-                let vertex = vertices[index];
-                let (sin_xw, cos_xw) = (phase * 0.9).sin_cos();
-                let (sin_yz, cos_yz) = (phase * 0.63).sin_cos();
-                let x = vertex[0] * cos_xw - vertex[3] * sin_xw;
-                let w = vertex[0] * sin_xw + vertex[3] * cos_xw;
-                let y = vertex[1] * cos_yz - vertex[2] * sin_yz;
-                let z = vertex[1] * sin_yz + vertex[2] * cos_yz;
-                let perspective = 0.8 / (2.4 - w).max(0.6);
-                Vec3::new(x, y, z) * perspective
-            }
-        }
+    pub fn vertex(&self, index: usize) -> Vec3 {
+        self.vertices[index]
     }
 }
 
@@ -273,152 +195,6 @@ pub fn soft_saturate(value: f32, limit: f32) -> f32 {
         let excess = value - knee;
         let tail = limit - knee;
         knee + tail * excess / (excess + tail)
-    }
-}
-
-fn normalized(mut vertices: Vec<Vec3>) -> Vec<Vec3> {
-    let radius = vertices
-        .iter()
-        .map(|vertex| vertex.length())
-        .fold(0.0_f32, f32::max)
-        .max(1e-6);
-    for vertex in &mut vertices {
-        *vertex = *vertex * (1.0 / radius);
-    }
-    vertices
-}
-
-/// Keep only pairs at the nearest vertex distance, which is the wireframe edge.
-fn connected_edges(vertices: &[Vec3], tolerance: f32) -> Vec<[u16; 2]> {
-    let nearest = vertices
-        .iter()
-        .enumerate()
-        .flat_map(|(a, &first)| {
-            vertices[a + 1..]
-                .iter()
-                .map(move |&second| (second - first).length())
-        })
-        .filter(|distance| *distance > 1e-5)
-        .fold(f32::INFINITY, f32::min);
-    (0..vertices.len())
-        .flat_map(|a| (a + 1..vertices.len()).map(move |b| [a, b]))
-        .filter(|&[a, b]| (vertices[a] - vertices[b]).length() <= nearest * tolerance)
-        .map(|[a, b]| [a as u16, b as u16])
-        .collect()
-}
-
-fn cube() -> Wireframe {
-    let vertices = normalized(
-        [-1.0, 1.0]
-            .into_iter()
-            .flat_map(|x| {
-                [-1.0, 1.0]
-                    .into_iter()
-                    .flat_map(move |y| [-1.0, 1.0].into_iter().map(move |z| Vec3::new(x, y, z)))
-            })
-            .collect(),
-    );
-    let edges = connected_edges(&vertices, 1.1);
-    Wireframe {
-        source: Source::Three(vertices),
-        edges,
-        vertex_count: 8,
-    }
-}
-
-fn octahedron() -> Wireframe {
-    let vertices = vec![
-        Vec3::new(1.0, 0.0, 0.0),
-        Vec3::new(-1.0, 0.0, 0.0),
-        Vec3::new(0.0, 1.0, 0.0),
-        Vec3::new(0.0, -1.0, 0.0),
-        Vec3::new(0.0, 0.0, 1.0),
-        Vec3::new(0.0, 0.0, -1.0),
-    ];
-    let edges = connected_edges(&vertices, 1.05);
-    Wireframe {
-        source: Source::Three(vertices),
-        edges,
-        vertex_count: 6,
-    }
-}
-
-fn icosahedron() -> Wireframe {
-    let golden = (1.0 + 5.0_f32.sqrt()) / 2.0;
-    let mut vertices = Vec::with_capacity(12);
-    for &a in &[-1.0, 1.0] {
-        for &b in &[-golden, golden] {
-            vertices.push(Vec3::new(0.0, a, b));
-            vertices.push(Vec3::new(a, b, 0.0));
-            vertices.push(Vec3::new(b, 0.0, a));
-        }
-    }
-    let vertices = normalized(vertices);
-    let edges = connected_edges(&vertices, 1.1);
-    Wireframe {
-        source: Source::Three(vertices),
-        edges,
-        vertex_count: 12,
-    }
-}
-
-fn tesseract() -> Wireframe {
-    let mut vertices = Vec::with_capacity(16);
-    for &x in &[-1.0, 1.0] {
-        for &y in &[-1.0, 1.0] {
-            for &z in &[-1.0, 1.0] {
-                for &w in &[-1.0, 1.0] {
-                    vertices.push([x, y, z, w]);
-                }
-            }
-        }
-    }
-    let edges = (0..16)
-        .flat_map(|a| (a + 1..16).map(move |b| [a, b]))
-        .filter(|&[a, b]| {
-            let a = vertices[a as usize];
-            let b = vertices[b as usize];
-            (0..4).filter(|&axis| a[axis] != b[axis]).count() == 1
-        })
-        .map(|[a, b]| [a as u16, b as u16])
-        .collect();
-    Wireframe {
-        source: Source::Four(vertices),
-        edges,
-        vertex_count: 16,
-    }
-}
-
-fn torus() -> Wireframe {
-    const RINGS: usize = 12;
-    const TUBES: usize = 8;
-    let major = 0.72;
-    let minor = 0.28;
-    let mut vertices = Vec::with_capacity(RINGS * TUBES);
-    for ring in 0..RINGS {
-        let around = TAU * ring as f32 / RINGS as f32;
-        for tube in 0..TUBES {
-            let across = TAU * tube as f32 / TUBES as f32;
-            let radius = major + minor * across.cos();
-            vertices.push(Vec3::new(
-                radius * around.cos(),
-                minor * across.sin(),
-                radius * around.sin(),
-            ));
-        }
-    }
-    let index = |ring: usize, tube: usize| ((ring % RINGS) * TUBES + tube % TUBES) as u16;
-    let mut edges = Vec::with_capacity(RINGS * TUBES * 2);
-    for ring in 0..RINGS {
-        for tube in 0..TUBES {
-            edges.push([index(ring, tube), index(ring + 1, tube)]);
-            edges.push([index(ring, tube), index(ring, tube + 1)]);
-        }
-    }
-    Wireframe {
-        source: Source::Three(vertices),
-        edges,
-        vertex_count: RINGS * TUBES,
     }
 }
 
@@ -545,7 +321,7 @@ pub struct Projected {
     pub depth: f32,
 }
 
-/// Maps one figure's view depths onto the edge opacity ramp. The closest vertex
+/// Maps one model's view depths onto the edge opacity ramp. The closest vertex
 /// is always fully opaque; `fade` is how much opacity the farthest vertex loses.
 #[derive(Clone, Copy, Debug)]
 pub struct DepthOpacity {
@@ -555,22 +331,8 @@ pub struct DepthOpacity {
 }
 
 impl DepthOpacity {
-    pub fn new(depths: impl IntoIterator<Item = f32>, fade: f32) -> Self {
-        let mut closest = f32::INFINITY;
-        let mut farthest = f32::NEG_INFINITY;
-        for depth in depths {
-            closest = closest.min(depth);
-            farthest = farthest.max(depth);
-        }
-        assert!(
-            closest <= farthest,
-            "depth opacity needs at least one projected vertex"
-        );
-        Self::between(closest, farthest, fade)
-    }
-
     /// Places the ramp on fixed planes `radius` either side of `center`.
-    /// Use this when the figure fits a known sphere, so the ramp stays on that
+    /// Use this when the model fits a known sphere, so the ramp stays on that
     /// sphere instead of following the silhouette of the current pose.
     pub fn centered(center: f32, radius: f32, fade: f32) -> Self {
         assert!(
@@ -608,51 +370,49 @@ impl DepthOpacity {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_evolution_step_has_a_connected_wireframe() {
-        let mut kind = FigureKind::default();
-        for _ in 0..5 {
-            let wireframe = Wireframe::build(kind);
-            let expected_edges = match kind {
-                FigureKind::Cube => 12,
-                FigureKind::Octahedron => 12,
-                FigureKind::Icosahedron => 30,
-                FigureKind::Tesseract => 32,
-                FigureKind::Torus => 192,
-            };
-            assert!(wireframe.vertex_count() >= 6, "{}", kind.name());
-            assert_eq!(wireframe.edges().len(), expected_edges, "{}", kind.name());
-            for edge in wireframe.edges() {
-                assert!((edge[0] as usize) < wireframe.vertex_count());
-                assert!((edge[1] as usize) < wireframe.vertex_count());
-                assert_ne!(edge[0], edge[1]);
+    fn cube() -> Wireframe {
+        let mut vertices = Vec::new();
+        for &x in &[-1.0, 1.0] {
+            for &y in &[-1.0, 1.0] {
+                for &z in &[-1.0, 1.0] {
+                    vertices.push(Vec3::new(x, y, z).normalized());
+                }
             }
-            kind = kind.next();
         }
-        assert_eq!(kind, FigureKind::Cube);
-        assert!(!FigureKind::Cube.uses_two_accents());
-        assert!(!FigureKind::Octahedron.uses_two_accents());
-        assert!(!FigureKind::Icosahedron.uses_two_accents());
-        assert!(!FigureKind::Tesseract.uses_two_accents());
-        assert!(FigureKind::Torus.uses_two_accents());
+        let edges = (0..vertices.len())
+            .flat_map(|a| (a + 1..vertices.len()).map(move |b| [a, b]))
+            .filter(|&[a, b]| {
+                let a = vertices[a];
+                let b = vertices[b];
+                (0..3)
+                    .filter(|&axis| match axis {
+                        0 => a.x != b.x,
+                        1 => a.y != b.y,
+                        _ => a.z != b.z,
+                    })
+                    .count()
+                    == 1
+            })
+            .map(|[a, b]| [a as u16, b as u16])
+            .collect();
+        Wireframe::from_edges(vertices, edges)
     }
 
     #[test]
     fn cube_projection_uses_perspective_and_stays_bounded() {
         let camera = Camera::new(1280.0, 440.0, 1.0);
-        let wireframe = Wireframe::build(FigureKind::Cube);
+        let wireframe = cube();
         let pose = Pose::default();
         let mut near = 0.0;
         let mut far = 0.0;
         for index in 0..wireframe.vertex_count() {
-            let projected = camera.project(wireframe.vertex(index, 0.0), pose);
+            let projected = camera.project(wireframe.vertex(index), pose);
             assert!(projected.screen.x.is_finite());
             assert!(projected.screen.y.is_finite());
             let radius =
                 (projected.screen.x - camera.center.x).hypot(projected.screen.y - camera.center.y);
-            assert!(radius < 440.0, "the figure must fit the window");
-            let z = wireframe.vertex(index, 0.0).z;
-            if z < 0.0 {
+            assert!(radius < 440.0, "the model must fit the window");
+            if wireframe.vertex(index).z < 0.0 {
                 near += radius;
             } else {
                 far += radius;
@@ -662,54 +422,12 @@ mod tests {
     }
 
     #[test]
-    fn every_figure_fits_the_viewport_at_its_default_pose() {
-        let camera = Camera::new(1280.0, 440.0, 1.0);
-        let pose = Pose::default();
-        for kind in [
-            FigureKind::Cube,
-            FigureKind::Octahedron,
-            FigureKind::Icosahedron,
-            FigureKind::Tesseract,
-            FigureKind::Torus,
-        ] {
-            let wireframe = Wireframe::build(kind);
-            for index in 0..wireframe.vertex_count() {
-                let projected = camera.project(wireframe.vertex(index, 1.7), pose);
-                let dx = (projected.screen.x - camera.center.x).abs();
-                let dy = (projected.screen.y - camera.center.y).abs();
-                assert!(
-                    dx < 420.0 && dy < 200.0,
-                    "{} vertex {index} projects at {dx}x{dy}",
-                    kind.name()
-                );
-            }
-        }
-    }
-
-    #[test]
     fn action_pose_offsets_pitch_and_leaves_yaw_alone() {
         let pose = Pose::default();
         let action = pose.with_action(1.2, Vec2::new(3.0, -4.0));
         assert_eq!(action.yaw, pose.yaw);
         assert!((action.pitch - pose.pitch - 1.2).abs() < 1e-6);
         assert_eq!(action.shake, Vec2::new(3.0, -4.0));
-    }
-
-    #[test]
-    fn depth_opacity_follows_the_configured_fade() {
-        let ramp = DepthOpacity::new([3.0, 5.0], 0.5);
-        assert_eq!(ramp.factor(3.0), 1.0);
-        assert_eq!(ramp.factor(5.0), 0.5);
-        assert!((ramp.factor(4.0) - 0.75).abs() < 1e-6);
-
-        let off = DepthOpacity::new([3.0, 5.0], 0.0);
-        assert_eq!(off.factor(5.0), 1.0);
-
-        let full = DepthOpacity::new([3.0, 5.0], 1.0);
-        assert_eq!(full.factor(5.0), 0.0);
-
-        let flat = DepthOpacity::new([4.0, 4.0], 0.5);
-        assert_eq!(flat.factor(4.0), 1.0);
     }
 
     #[test]
@@ -726,8 +444,8 @@ mod tests {
     }
 
     #[test]
-    fn deformation_and_four_space_projection_stay_finite() {
-        let wireframe = Wireframe::build(FigureKind::Tesseract);
+    fn deformation_stays_finite_and_bounded() {
+        let wireframe = cube();
         let deformation = Deformation {
             twist: 1.3,
             bulge: 0.4,
@@ -737,9 +455,17 @@ mod tests {
             phase: 12.0,
         };
         for index in 0..wireframe.vertex_count() {
-            let vertex = deformation.apply(wireframe.vertex(index, 4.2));
+            let vertex = deformation.apply(wireframe.vertex(index));
             assert!(vertex.x.is_finite() && vertex.y.is_finite() && vertex.z.is_finite());
             assert!(vertex.length() <= 1.6);
         }
+    }
+
+    #[test]
+    fn wireframe_validates_edges_against_vertices() {
+        assert!(std::panic::catch_unwind(|| {
+            Wireframe::from_edges(vec![Vec3::new(0.0, 0.0, 0.0)], vec![[0, 1]])
+        })
+        .is_err());
     }
 }

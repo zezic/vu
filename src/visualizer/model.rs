@@ -1,4 +1,4 @@
-//! Loads the binary glTF mesh backing the weapon showcase.
+//! Loads the binary glTF meshes backing the model visualizer.
 
 use std::{
     collections::{btree_map::Entry, BTreeMap},
@@ -13,11 +13,11 @@ use super::{
     CreaseThreshold,
 };
 
-/// Directory scanned for the showcase model. Binary glTF keeps the geometry
+/// Directory scanned for the models. Binary glTF keeps the geometry
 /// and any external resources out of the crate's compiled assets.
 const MODEL_DIRECTORY: &str = "assets/models";
 
-/// A loaded model normalized to the same radius as the procedural figures.
+/// A loaded model centered on the origin and normalized to unit radius.
 pub struct Model {
     pub name: String,
     vertices: Vec<Vec3>,
@@ -31,11 +31,11 @@ impl Model {
         let blob = gltf
             .blob
             .as_deref()
-            .context("the showcase model must be a binary glTF (.glb)")?;
+            .context("the model must be a binary glTF (.glb)")?;
         ensure!(
             gltf.buffers()
                 .all(|buffer| matches!(buffer.source(), gltf::buffer::Source::Bin)),
-            "the showcase model must embed its buffers in the .glb"
+            "the model must embed its buffers in the .glb"
         );
         let get_buffer = |buffer: gltf::Buffer<'_>| match buffer.source() {
             gltf::buffer::Source::Bin => Some(blob),
@@ -116,7 +116,7 @@ impl ModelSet {
     }
 
     /// Advances to the next model. Returns false when there is nothing to
-    /// advance to, so a one-model showcase stays put.
+    /// advance to, so a one-model set stays put.
     pub fn advance(&mut self) -> bool {
         if self.models.len() < 2 {
             return false;
@@ -259,7 +259,7 @@ impl Builder {
         for primitive in mesh.primitives() {
             ensure!(
                 primitive.mode() == gltf::mesh::Mode::Triangles,
-                "the showcase wireframe only supports triangle primitives"
+                "the wireframe only supports triangle primitives"
             );
             let reader = primitive.reader(get_buffer);
             let positions: Vec<[f32; 3]> = reader
@@ -386,8 +386,8 @@ impl Builder {
     }
 }
 
-/// Centers the wireframe on the origin and scales it to the radius used by the
-/// procedural figures, so the existing camera framing applies.
+/// Centers the wireframe on the origin and scales it to unit radius so every
+/// model uses the same camera framing.
 fn fit_to_unit_radius(vertices: &mut [Vec3]) -> anyhow::Result<()> {
     let mut minimum = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
     let mut maximum = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
@@ -423,7 +423,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bundled_weapon_loads_as_a_lean_wireframe() -> anyhow::Result<()> {
+    fn bundled_models_load_as_lean_wireframes() -> anyhow::Result<()> {
         let models = ModelSet::load()?;
         let model = models.current();
         assert!(!model.name.is_empty());
@@ -440,7 +440,7 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), wireframe.edges().len());
         for index in 0..wireframe.vertex_count() {
-            let vertex = wireframe.vertex(index, 0.0);
+            let vertex = wireframe.vertex(index);
             assert!(vertex.length() <= 1.0 + 1e-4);
         }
         Ok(())
@@ -485,7 +485,7 @@ mod tests {
         let path = model_paths()?
             .into_iter()
             .next()
-            .context("the showcase has a bundled model")?;
+            .context("the model directory contains a bundled model")?;
         let model = Model::load_file(&path)?;
         let fine = model.wireframe(CreaseThreshold::MIN);
         let coarse = model.wireframe(CreaseThreshold::MAX);

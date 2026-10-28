@@ -34,7 +34,7 @@ impl BackgroundBinding {
     }
 }
 
-/// Composites the retained meter face, swept motion ribbons, and crisp lines.
+/// Composites the retained UI face, swept motion ribbons, and crisp lines.
 pub struct Renderer {
     background_pipeline: wgpu::RenderPipeline,
     background_layout: wgpu::BindGroupLayout,
@@ -42,7 +42,6 @@ pub struct Renderer {
     line_pipeline: wgpu::RenderPipeline,
     model_additive_pipeline: wgpu::RenderPipeline,
     model_multiplicative_pipeline: wgpu::RenderPipeline,
-    ribbon_pipeline: wgpu::RenderPipeline,
     model_additive_ribbon_pipeline: wgpu::RenderPipeline,
     model_multiplicative_ribbon_pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
@@ -260,19 +259,6 @@ impl Renderer {
                 shader_location: 5,
             },
         ];
-        let ribbon_pipeline = instance_pipeline(
-            device,
-            format,
-            "Visualizer ribbons",
-            &ribbon_shader,
-            "ribbon_vertex",
-            "ribbon_fragment",
-            &uniform_layout,
-            std::mem::size_of::<RibbonInstance>() as u64,
-            &ribbon_attributes,
-            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            wgpu::ColorWrites::ALL,
-        );
         let model_additive_ribbon_pipeline = instance_pipeline(
             device,
             format,
@@ -311,7 +297,6 @@ impl Renderer {
             line_pipeline,
             model_additive_pipeline,
             model_multiplicative_pipeline,
-            ribbon_pipeline,
             model_additive_ribbon_pipeline,
             model_multiplicative_ribbon_pipeline,
             uniforms,
@@ -369,27 +354,13 @@ impl Renderer {
             );
             self.uploaded_viewport = Some(viewport);
         }
-        let model_ribbon_count = frame.model_ribbons.len();
         let ribbon_count = frame.ribbons.len();
-        let total_ribbons = model_ribbon_count + ribbon_count;
-        let ribbon_stride = std::mem::size_of::<RibbonInstance>() as u64;
-        let model_ribbon_bytes = model_ribbon_count as u64 * ribbon_stride;
-        if total_ribbons > 0 {
-            self.ensure_ribbon_capacity(&device.device, total_ribbons);
-            if model_ribbon_count > 0 {
-                device.queue.write_buffer(
-                    &self.ribbon_buffer,
-                    0,
-                    bytemuck::cast_slice(frame.model_ribbons),
-                );
-            }
-            if ribbon_count > 0 {
-                device.queue.write_buffer(
-                    &self.ribbon_buffer,
-                    model_ribbon_bytes,
-                    bytemuck::cast_slice(frame.ribbons),
-                );
-            }
+        let ribbon_bytes = ribbon_count as u64 * std::mem::size_of::<RibbonInstance>() as u64;
+        if ribbon_count > 0 {
+            self.ensure_ribbon_capacity(&device.device, ribbon_count);
+            device
+                .queue
+                .write_buffer(&self.ribbon_buffer, 0, bytemuck::cast_slice(frame.ribbons));
         }
         let model_count = frame.model_lines.len();
         let line_count = frame.lines.len();
@@ -447,20 +418,14 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.line_buffer.slice(0..model_bytes));
             pass.draw(0..6, 0..model_count as u32);
         }
-        if model_ribbon_count > 0 {
+        if ribbon_count > 0 {
             let pipeline = match frame.model_composite {
                 ModelComposite::Additive => &self.model_additive_ribbon_pipeline,
                 ModelComposite::Multiplicative => &self.model_multiplicative_ribbon_pipeline,
             };
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &self.uniform_bindings, &[]);
-            pass.set_vertex_buffer(0, self.ribbon_buffer.slice(0..model_ribbon_bytes));
-            pass.draw(0..6, 0..model_ribbon_count as u32);
-        }
-        if ribbon_count > 0 {
-            pass.set_pipeline(&self.ribbon_pipeline);
-            pass.set_bind_group(0, &self.uniform_bindings, &[]);
-            pass.set_vertex_buffer(0, self.ribbon_buffer.slice(model_ribbon_bytes..));
+            pass.set_vertex_buffer(0, self.ribbon_buffer.slice(0..ribbon_bytes));
             pass.draw(0..6, 0..ribbon_count as u32);
         }
         if line_count > 0 {
@@ -544,7 +509,7 @@ mod tests {
         audio::timeline::{AudioInterval, AudioTime},
         config::ShutterFrames,
         theme::Theme,
-        visualizer::Visualizer,
+        visualizer::{ModelMotion, Visualizer},
     };
 
     #[test]
@@ -623,6 +588,7 @@ mod tests {
         let mut renderer = Renderer::new(&device.device, format);
         let mut visualizer = Visualizer::new();
         visualizer.set_samplerate(48_000);
+        visualizer.set_model_motion(ModelMotion::Swept);
         let mut at = AudioTime::ZERO;
         for frame in 0..180 {
             let mut input = Vec::with_capacity(800);
@@ -653,7 +619,7 @@ mod tests {
             at = end;
         }
         let frame = visualizer.frame();
-        assert!(frame.lines.len() + frame.ribbons.len() >= 12);
+        assert!(frame.lines.len() + frame.model_lines.len() + frame.ribbons.len() >= 12);
         assert!(
             !frame.ribbons.is_empty(),
             "motion history must produce swept ribbons"
@@ -662,7 +628,7 @@ mod tests {
         let mut max_x = f32::NEG_INFINITY;
         let mut min_y = f32::INFINITY;
         let mut max_y = f32::NEG_INFINITY;
-        for line in frame.lines {
+        for line in frame.lines.iter().chain(frame.model_lines) {
             for (x, y) in [
                 (line.endpoints[0], line.endpoints[1]),
                 (line.endpoints[2], line.endpoints[3]),

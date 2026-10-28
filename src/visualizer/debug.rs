@@ -7,11 +7,11 @@ use vello::{
     Scene,
 };
 
-use super::{DebugRefresh, View};
+use super::ui::{DebugRefresh, View};
 use crate::{
     config::VisualizerTextScale,
     text::{Fonts, Text, UiFace},
-    theme::{mix, MeterColors},
+    theme::{mix, ThemeColors},
     visualizer::{
         BandComponent, BandRouting, ComputeNode, Contribution, DebugHistory, DebugSample,
         DebugSelection, DebugSnapshot, Dependency, Detector, DropKernel, EnvelopeTarget, ExtraRef,
@@ -210,16 +210,6 @@ impl Layout {
     }
 
     #[cfg(test)]
-    pub(super) fn property_mute_center(&self, property: Property) -> Point {
-        self.property_mute[property.index()].center()
-    }
-
-    #[cfg(test)]
-    pub(super) fn property_solo_center(&self, property: Property) -> Point {
-        self.property_solo[property.index()].center()
-    }
-
-    #[cfg(test)]
     pub(super) fn band_center(&self, band: usize) -> Point {
         self.band_rows[band].center()
     }
@@ -234,7 +224,7 @@ pub(super) fn draw(
     history: &DebugHistory,
     visualizer: &Visualizer,
     palette: Palette,
-    colors: MeterColors,
+    colors: ThemeColors,
     refresh: DebugRefresh,
     text_scale: VisualizerTextScale,
     selection: Option<DebugSelection>,
@@ -299,7 +289,7 @@ fn draw_panel(
     snapshot: &DebugSnapshot,
     visualizer: &Visualizer,
     palette: Palette,
-    colors: MeterColors,
+    colors: ThemeColors,
     refresh: DebugRefresh,
     selection: Option<DebugSelection>,
     hovered: Option<DebugSelection>,
@@ -663,7 +653,7 @@ fn draw_extension(
     history: &DebugHistory,
     visualizer: &Visualizer,
     palette: Palette,
-    colors: MeterColors,
+    colors: ThemeColors,
     selection: DebugSelection,
     focus: InspectorFocus,
     graph_max: &[Option<GraphMax>; Property::COUNT],
@@ -1164,23 +1154,6 @@ impl TreeLayout {
     }
 
     #[cfg(test)]
-    pub fn row_center_for(&self, target: TreeTarget) -> Point {
-        self.rows
-            .iter()
-            .find(|row| row.target() == Some(target))
-            .map(|row| row.rect.center())
-            .expect("the tree has a row for the target")
-    }
-
-    #[cfg(test)]
-    pub fn detector_center(&self, detector: Detector) -> Option<Point> {
-        self.rows
-            .iter()
-            .find(|row| row.target() == Some(TreeTarget::Detector(detector)))
-            .map(|row| row.rect.center())
-    }
-
-    #[cfg(test)]
     pub fn action_center(&self, action: TreeAction) -> Option<Point> {
         self.actions
             .iter()
@@ -1593,7 +1566,7 @@ fn draw_computation_tree(
     snapshot: &DebugSnapshot,
     visualizer: &Visualizer,
     palette: Palette,
-    colors: MeterColors,
+    colors: ThemeColors,
     property: Property,
     text_scale: VisualizerTextScale,
     target: Option<TreeTarget>,
@@ -1957,7 +1930,7 @@ fn draw_flux_analyzer(
     snapshot: &DebugSnapshot,
     visualizer: &Visualizer,
     palette: Palette,
-    colors: MeterColors,
+    colors: ThemeColors,
     text_scale: VisualizerTextScale,
     band: usize,
     pointer: Option<Point>,
@@ -2269,7 +2242,7 @@ fn draw_slider_content(
     shape: Option<InputShape>,
     visualizer: &Visualizer,
     palette: Palette,
-    colors: MeterColors,
+    colors: ThemeColors,
     scale: f64,
     pointer: Option<Point>,
 ) {
@@ -3164,6 +3137,7 @@ fn draw_offset_control(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_kernel_banks(
     fonts: &mut Fonts,
     scene: &mut Scene,
@@ -4223,7 +4197,7 @@ fn draw_graph(
     history: &DebugHistory,
     visualizer: &Visualizer,
     palette: Palette,
-    colors: MeterColors,
+    colors: ThemeColors,
     scale: f64,
     compact: bool,
     graph_max: Option<GraphMax>,

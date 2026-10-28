@@ -1,18 +1,13 @@
-use std::{
-    sync::mpsc::Receiver,
-    time::{Duration, Instant},
-};
+use std::{sync::mpsc::Receiver, time::Instant};
 
 use audio::capture_stream;
-use config::{Config, PreampStep};
+use config::{Config, PreampDb, PreampStep};
 use frame_schedule::{
     Adjustment, FrameKind, FrameSchedule, FrameTime, Occlusion, RedrawPermit, SurfaceArea,
 };
-use meter::{Meter, View};
-use render::{Presentation, RenderWindow};
+use render::RenderWindow;
 use saved::Saved;
-use scales::ScaleSetting;
-use vello::kurbo::Point;
+use vello::{kurbo::Point, wgpu};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -21,10 +16,8 @@ use winit::{
     window::WindowId,
 };
 
-use vu::{
-    audio, config, frame_schedule, measurement, meter, profile, render, scales, visualizer,
-    AudioEvent,
-};
+use visualizer::{Ui, View};
+use vu::{audio, config, frame_schedule, profile, render, visualizer, AudioEvent};
 mod saved;
 
 enum WindowState {
@@ -36,57 +29,25 @@ enum WindowState {
 struct ActiveWindow {
     render: RenderWindow,
     view: View,
-    meter_renderer: meter::Renderer,
     visualizer_renderer: visualizer::Renderer,
 }
 
 impl ActiveWindow {
     fn new(event_loop: &ActiveEventLoop) -> anyhow::Result<Self> {
-        let render = RenderWindow::new(event_loop, meter::Renderer::device_preferences())?;
+        let render = RenderWindow::new(event_loop, wgpu::DeviceDescriptor::default())?;
         let mut view = View::fit(render.viewport());
         view.set_ui_scale(render.window.scale_factor());
-        let meter_renderer = meter::Renderer::new(&render.device().device, render.format());
         let visualizer_renderer =
             visualizer::Renderer::new(&render.device().device, render.format());
         Ok(Self {
             render,
             view,
-            meter_renderer,
             visualizer_renderer,
         })
     }
 }
 
-enum DragState {
-    Idle,
-    Pending(Point),
-    Adjusting(ScaleSetting),
-}
-
-struct Click {
-    at: Instant,
-    position: Point,
-}
-
-impl Click {
-    fn follows(&self, position: Point, now: Instant) -> bool {
-        now.duration_since(self.at) <= Duration::from_millis(400)
-            && self.position.distance(position) <= 6.0
-    }
-}
-
-impl DragState {
-    fn setting(&self) -> Option<ScaleSetting> {
-        match self {
-            Self::Adjusting(setting) => Some(*setting),
-            _ => None,
-        }
-    }
-}
-
 enum Setting {
-    Mode,
-    PeakMovement,
     Theme,
     Preamp,
     FrameRate,
@@ -104,11 +65,9 @@ enum Setting {
 struct App {
     state: WindowState,
     rx: Receiver<AudioEvent>,
-    meter: Meter,
+    ui: Ui,
     settings: Saved<Config>,
     mouse: Point,
-    drag: DragState,
-    last_click: Option<Click>,
     modifiers: ModifiersState,
     frames: FrameSchedule,
     previous_frame: Instant,
@@ -127,22 +86,13 @@ impl App {
     fn adjust_setting(&mut self, setting: Setting, adjustment: Adjustment) {
         let settings = self.settings.edit();
         match setting {
-            Setting::PeakMovement => {
-                settings.peak_movement = settings.peak_movement.next();
-                self.meter.set_peak_movement(settings.peak_movement);
-            }
-            Setting::Mode => {
-                settings.mode = settings.mode.next();
-                self.meter.set_mode(settings.mode);
-                self.drag = DragState::Idle;
-            }
             Setting::Shutter => {
                 settings.shutter_frames = settings.shutter_frames.adjusted(adjustment);
-                self.meter.set_shutter(settings.shutter_frames);
+                self.ui.set_shutter(settings.shutter_frames);
             }
             Setting::Theme => {
                 settings.theme = settings.theme.adjusted(adjustment);
-                self.meter.set_theme(settings.theme);
+                self.ui.set_theme(settings.theme);
             }
             Setting::Preamp => {
                 let step = if self.modifiers.shift_key() {
@@ -151,14 +101,14 @@ impl App {
                     PreampStep::Coarse
                 };
                 settings.preamp_db = settings.preamp_db.adjusted(adjustment, step);
-                self.meter.set_preamp(settings.preamp_db);
+                self.ui.set_preamp(settings.preamp_db);
             }
             Setting::FrameRate => {
                 settings.frame_rate_limit = settings.frame_rate_limit.adjusted(adjustment);
                 self.frames.limit_changed(Instant::now());
             }
             Setting::KickOnsetMinInterval => {
-                let mut detectors = self.meter.detector_settings();
+                let mut detectors = self.ui.detector_settings();
                 let delta = match adjustment {
                     Adjustment::Decrease => -0.005,
                     Adjustment::Increase => 0.005,
@@ -166,10 +116,10 @@ impl App {
                 detectors.kick_onset_min_interval = (detectors.kick_onset_min_interval + delta)
                     .clamp(visualizer::FLUX_INTERVAL_MIN, visualizer::FLUX_INTERVAL_MAX);
                 settings.detectors = detectors.clone();
-                self.meter.set_detector_settings(detectors);
+                self.ui.set_detector_settings(detectors);
             }
             Setting::DropGapThreshold => {
-                let mut detectors = self.meter.detector_settings();
+                let mut detectors = self.ui.detector_settings();
                 let delta = match adjustment {
                     Adjustment::Decrease => -0.05,
                     Adjustment::Increase => 0.05,
@@ -179,31 +129,31 @@ impl App {
                     visualizer::DROP_GAP_THRESHOLD_MAX,
                 );
                 settings.detectors = detectors.clone();
-                self.meter.set_detector_settings(detectors);
+                self.ui.set_detector_settings(detectors);
             }
             Setting::DepthFade => {
                 settings.depth_fade = settings.depth_fade.adjusted(adjustment);
-                self.meter.set_depth_fade(settings.depth_fade);
+                self.ui.set_depth_fade(settings.depth_fade);
             }
             Setting::NearOpacity => {
                 settings.near_opacity = settings.near_opacity.adjusted(adjustment);
-                self.meter.set_near_opacity(settings.near_opacity);
+                self.ui.set_near_opacity(settings.near_opacity);
             }
             Setting::CreaseThreshold => {
                 settings.crease_threshold = settings.crease_threshold.adjusted(adjustment);
-                self.meter.set_crease_threshold(settings.crease_threshold);
+                self.ui.set_crease_threshold(settings.crease_threshold);
             }
             Setting::LineWidth => {
                 settings.line_width = settings.line_width.adjusted(adjustment);
-                self.meter.set_line_width(settings.line_width);
+                self.ui.set_line_width(settings.line_width);
             }
             Setting::MotionOpacity => {
                 settings.motion_opacity = settings.motion_opacity.adjusted(adjustment);
-                self.meter.set_motion_opacity(settings.motion_opacity);
+                self.ui.set_motion_opacity(settings.motion_opacity);
             }
             Setting::MotionFadePower => {
                 settings.motion_fade_power = settings.motion_fade_power.adjusted(adjustment);
-                self.meter.set_motion_fade_power(settings.motion_fade_power);
+                self.ui.set_motion_fade_power(settings.motion_fade_power);
             }
         }
     }
@@ -216,7 +166,6 @@ impl App {
         let ActiveWindow {
             render,
             view,
-            meter_renderer,
             visualizer_renderer,
         } = &mut **window;
         if self.profile.is_some()
@@ -250,77 +199,25 @@ impl App {
                 button: MouseButton::Left,
                 state,
                 ..
-            } => {
-                let now = Instant::now();
-                match state {
-                    ElementState::Pressed => {
-                        if self.meter.click_debug(view, self.mouse) {
-                            self.drag = DragState::Idle;
-                            self.last_click = None;
-                        } else {
-                            if self
-                                .last_click
-                                .take()
-                                .is_some_and(|click| click.follows(self.mouse, now))
-                            {
-                                self.meter.reset_scale();
-                            }
-                            self.drag = DragState::Pending(self.mouse);
-                        }
-                    }
-                    ElementState::Released => {
-                        self.meter.end_slider_drag();
-                        if matches!(self.drag, DragState::Pending(_)) {
-                            self.meter.repair_needles();
-                            self.last_click = Some(Click {
-                                at: now,
-                                position: self.mouse,
-                            });
-                        }
-                        self.drag = DragState::Idle;
-                    }
+            } => match state {
+                ElementState::Pressed => {
+                    self.ui.click_debug(view, self.mouse);
                 }
-            }
+                ElementState::Released => self.ui.end_slider_drag(),
+            },
             WindowEvent::CursorMoved { position, .. } => {
                 let position = Point::new(position.x, position.y);
-                let mut delta = position - self.mouse;
-                if let DragState::Pending(origin) = self.drag {
-                    let movement = position - origin;
-                    if self.settings.mode != measurement::Mode::Vu && movement.hypot() >= 3.0 {
-                        self.drag = DragState::Adjusting(if movement.x.abs() > movement.y.abs() {
-                            ScaleSetting::DbRange
-                        } else {
-                            ScaleSetting::Bend
-                        });
-                        delta = movement;
-                    }
-                }
-                match (self.settings.mode, self.drag.setting()) {
-                    (measurement::Mode::Vu, _) => {}
-                    (_, Some(ScaleSetting::DbRange)) => {
-                        self.meter.scale.negative_db_range = (self.meter.scale.negative_db_range
-                            + delta.x as f32 * 0.1)
-                            .clamp(1.0, 100.0);
-                    }
-                    (_, Some(ScaleSetting::Bend)) => {
-                        self.meter.scale.bend =
-                            (self.meter.scale.bend * (1.0 + delta.y as f32 * 0.003)).max(0.1);
-                    }
-                    (_, None) => {}
-                }
-                self.meter.set_pointer(Some(position));
+                self.ui.set_pointer(Some(position));
                 self.mouse = position;
             }
             WindowEvent::CursorLeft { .. } => {
-                self.meter.set_pointer(None);
-                self.meter.end_slider_drag();
+                self.ui.set_pointer(None);
+                self.ui.end_slider_drag();
             }
             WindowEvent::Focused(false) => {
                 self.modifiers = ModifiersState::empty();
-                self.drag = DragState::Idle;
-                self.last_click = None;
-                self.meter.set_pointer(None);
-                self.meter.end_slider_drag();
+                self.ui.set_pointer(None);
+                self.ui.end_slider_drag();
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
@@ -330,26 +227,12 @@ impl App {
                 ..
             } => {
                 let scale = f64::from((1.0 + y / 10.0).max(0.1));
-                view.zoom(self.mouse, scale);
+                view.zoom(scale);
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     match key {
-                        KeyCode::Escape => self.meter.clear_debug_selection(),
-                        KeyCode::Equal if self.settings.mode != measurement::Mode::Vu => {
-                            self.meter.scale.negative_db_range =
-                                (self.meter.scale.negative_db_range + 0.1).min(100.0)
-                        }
-                        KeyCode::Minus if self.settings.mode != measurement::Mode::Vu => {
-                            self.meter.scale.negative_db_range =
-                                (self.meter.scale.negative_db_range - 0.1).max(1.0)
-                        }
-                        KeyCode::BracketLeft if self.settings.mode != measurement::Mode::Vu => {
-                            self.meter.scale.bend = (self.meter.scale.bend - 0.1).max(0.1)
-                        }
-                        KeyCode::BracketRight if self.settings.mode != measurement::Mode::Vu => {
-                            self.meter.scale.bend += 0.1
-                        }
+                        KeyCode::Escape => self.ui.clear_debug_selection(),
                         KeyCode::KeyC => {
                             self.adjust_setting(Setting::Shutter, Adjustment::Decrease)
                         }
@@ -362,7 +245,7 @@ impl App {
                                 .visualizer_text_scale
                                 .adjusted(Adjustment::Decrease);
                             self.settings.edit().visualizer_text_scale = scale;
-                            self.meter.set_text_scale(scale);
+                            self.ui.set_text_scale(scale);
                         }
                         KeyCode::Equal | KeyCode::NumpadAdd if !event.repeat => {
                             let scale = self
@@ -370,18 +253,13 @@ impl App {
                                 .visualizer_text_scale
                                 .adjusted(Adjustment::Increase);
                             self.settings.edit().visualizer_text_scale = scale;
-                            self.meter.set_text_scale(scale);
+                            self.ui.set_text_scale(scale);
                         }
                         KeyCode::KeyB if !event.repeat => {
-                            self.meter.cycle_debug_refresh();
+                            self.ui.cycle_debug_refresh();
                         }
                         KeyCode::KeyD if !event.repeat => {
-                            self.meter.set_debug(!self.meter.debug());
-                        }
-                        KeyCode::KeyF if !event.repeat => {
-                            let presentation = self.settings.presentation.next();
-                            self.settings.edit().presentation = presentation;
-                            self.meter.set_presentation(presentation);
+                            self.ui.set_debug(!self.ui.debug());
                         }
                         KeyCode::KeyG => {
                             self.adjust_setting(Setting::KickOnsetMinInterval, Adjustment::Decrease)
@@ -413,15 +291,11 @@ impl App {
                         KeyCode::Period => {
                             self.adjust_setting(Setting::CreaseThreshold, Adjustment::Increase)
                         }
-                        KeyCode::Backslash if !event.repeat => self.meter.next_model(),
-                        KeyCode::KeyT
-                            if !event.repeat
-                                && self.settings.presentation
-                                    == visualizer::Presentation::Weapon =>
-                        {
+                        KeyCode::Backslash if !event.repeat => self.ui.next_model(),
+                        KeyCode::KeyT if !event.repeat => {
                             let model_motion = self.settings.model_motion.toggled();
                             self.settings.edit().model_motion = model_motion;
-                            self.meter.set_model_motion(model_motion);
+                            self.ui.set_model_motion(model_motion);
                         }
                         KeyCode::Semicolon => {
                             self.adjust_setting(Setting::LineWidth, Adjustment::Decrease)
@@ -443,14 +317,6 @@ impl App {
                             };
                             self.adjust_setting(Setting::MotionFadePower, adjustment)
                         }
-                        KeyCode::KeyM if !event.repeat => {
-                            self.adjust_setting(Setting::Mode, Adjustment::Increase)
-                        }
-                        KeyCode::KeyN
-                            if !event.repeat && self.settings.mode.uses_peak_movement() =>
-                        {
-                            self.adjust_setting(Setting::PeakMovement, Adjustment::Increase)
-                        }
                         KeyCode::KeyA => self.adjust_setting(Setting::Theme, Adjustment::Decrease),
                         KeyCode::KeyS => self.adjust_setting(Setting::Theme, Adjustment::Increase),
                         KeyCode::KeyZ => self.adjust_setting(Setting::Preamp, Adjustment::Decrease),
@@ -467,13 +333,13 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 while let Ok(event) = self.rx.try_recv() {
-                    self.meter.audio_event(event);
+                    self.ui.audio_event(event);
                 }
-                let detectors = self.meter.detector_settings();
+                let detectors = self.ui.detector_settings();
                 if self.settings.detectors != detectors {
                     self.settings.edit().detectors = detectors;
                 }
-                let tuning = self.meter.visualizer_tuning();
+                let tuning = self.ui.visualizer_tuning();
                 if self.settings.tuning != tuning {
                     self.settings.edit().tuning = tuning;
                 }
@@ -481,17 +347,11 @@ impl App {
                 let frame_time = FrameTime::new(self.previous_frame, now);
                 self.previous_frame = now;
                 if let Some(profile) = &mut self.profile {
-                    profile.feed(&mut self.meter, now)?;
+                    profile.feed(&mut self.ui, now)?;
                 }
                 let before_draw = Instant::now();
                 render.scene.reset();
-                let frame = self.meter.draw(
-                    &mut render.scene,
-                    view,
-                    limit,
-                    self.drag.setting(),
-                    frame_time,
-                );
+                let frame = self.ui.draw(&mut render.scene, view, limit, frame_time);
                 let after_draw = Instant::now();
                 let changed = !matches!(frame.background, render::Frame::Unchanged(_));
                 let viewport = render.viewport();
@@ -499,12 +359,14 @@ impl App {
                                encoder: &mut vello::wgpu::CommandEncoder,
                                background: &vello::wgpu::TextureView,
                                target: &vello::wgpu::TextureView| {
-                    match &frame.overlay {
-                        meter::Overlay::Gauges(gauge) => meter_renderer
-                            .draw(device, encoder, background, target, viewport, gauge),
-                        meter::Overlay::Visualizer(frame) => visualizer_renderer
-                            .draw(device, encoder, background, target, viewport, *frame),
-                    }
+                    visualizer_renderer.draw(
+                        device,
+                        encoder,
+                        background,
+                        target,
+                        viewport,
+                        frame.overlay,
+                    );
                 };
                 let presentation = if let Some(profile) = &mut self.profile {
                     profile.present(before_draw, after_draw, changed, |completed| {
@@ -513,7 +375,7 @@ impl App {
                 } else {
                     render.present(frame.background, |_| {}, overlay)?
                 };
-                if matches!(presentation, Presentation::Unavailable) {
+                if matches!(presentation, render::Presentation::Unavailable) {
                     self.frames.surface_unavailable(Instant::now());
                 }
             }
@@ -540,8 +402,6 @@ impl ApplicationHandler for App {
                 self.frames
                     .resized(window.render.window.inner_size().into(), now);
                 self.frames.occlusion_changed(Occlusion::Visible, now);
-                self.drag = DragState::Idle;
-                self.last_click = None;
                 WindowState::Active(Box::new(window))
             }
             Err(error) => {
@@ -584,7 +444,7 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         while let Ok(event) = self.rx.try_recv() {
-            self.meter.audio_event(event);
+            self.ui.audio_event(event);
         }
         let now = Instant::now();
         if self
@@ -624,11 +484,11 @@ fn main() -> anyhow::Result<()> {
     pretty_env_logger::init();
     let profile = profile::Run::from_args()?;
     let settings = Saved::<Config>::load(config::config_file()?)?;
-    let mut meter = Meter::new(&settings)?;
+    let mut ui = Ui::new(&settings)?;
     let (tx, rx) = std::sync::mpsc::channel();
     let _stream = if profile.is_some() {
-        meter.set_preamp(config::PreampDb::try_from(0.0)?);
-        meter.audio_event(AudioEvent::Config {
+        ui.set_preamp(PreampDb::try_from(0.0)?);
+        ui.audio_event(AudioEvent::Config {
             samplerate: profile::SAMPLE_RATE,
         });
         None
@@ -639,11 +499,9 @@ fn main() -> anyhow::Result<()> {
     let mut app = App {
         state: WindowState::Suspended,
         rx,
-        meter,
+        ui,
         settings,
         mouse: Point::ORIGIN,
-        drag: DragState::Idle,
-        last_click: None,
         modifiers: ModifiersState::empty(),
         frames: FrameSchedule::new(Instant::now()),
         previous_frame: Instant::now(),
@@ -668,5 +526,3 @@ fn main() -> anyhow::Result<()> {
     }
     Ok(())
 }
-
-pub use vu::{db_to_multiplier, db_to_normalized, normalized_to_db};

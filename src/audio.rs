@@ -8,7 +8,10 @@ use std::{
     time::Instant,
 };
 
+pub mod cursor;
 pub mod timeline;
+
+pub use cursor::AudioCursor;
 use timeline::{CaptureClock, CaptureContinuity, CaptureSequence};
 
 use crate::AudioEvent;
@@ -24,7 +27,7 @@ pub struct CaptureStream {
 }
 
 /// Captures desktop output on macOS and Windows, or the default recording source on Linux.
-/// Keep the stream alive while the meter runs.
+/// Keep the stream alive while VU runs.
 pub fn capture_stream(tx: Sender<AudioEvent>) -> anyhow::Result<CaptureStream> {
     if !cfg!(any(
         target_os = "macos",
@@ -138,7 +141,7 @@ where
     Ok(stream)
 }
 
-/// Mono feeds both needles; multichannel output uses the first left/right pair.
+/// Mono feeds both analysis channels; multichannel output uses the first left/right pair.
 fn stereo_frames<T>(input: &[T], channels: usize) -> impl Iterator<Item = [f32; 2]> + '_
 where
     T: Sample,
@@ -202,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_mono_stereo_and_multichannel_to_meter_frames() {
+    fn converts_mono_stereo_and_multichannel_to_stereo_frames() {
         assert_eq!(
             stereo_frames(&[0.25_f32, -0.5], 1).collect::<Vec<_>>(),
             [[0.25, 0.25], [-0.5, -0.5]]

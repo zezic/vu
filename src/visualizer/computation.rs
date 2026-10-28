@@ -1737,7 +1737,7 @@ impl ContributionSpec {
 }
 
 /// Values that every mix term can read. The context owns its copies so a mix
-/// point does not borrow the figure, the mixer, or the music simultaneously.
+/// point does not borrow the model, the mixer, or the music simultaneously.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct MixContext {
     pub bands: [f32; BAND_COUNT],

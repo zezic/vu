@@ -4,8 +4,8 @@ use anyhow::{bail, ensure};
 use cpu_time::{ProcessTime, ThreadTime};
 
 use crate::{
-    meter::Meter,
     render::{Presentation, Stage},
+    visualizer::Ui,
     AudioEvent,
 };
 
@@ -58,7 +58,7 @@ impl Run {
         }
     }
 
-    pub fn feed(&mut self, meter: &mut Meter, now: Instant) -> anyhow::Result<()> {
+    pub fn feed(&mut self, ui: &mut Ui, now: Instant) -> anyhow::Result<()> {
         let start = match &self.phase {
             Phase::Pending => {
                 self.phase = Phase::Warmup(now);
@@ -81,7 +81,7 @@ impl Run {
         let elapsed = now.duration_since(start).as_secs_f64();
         let due = (elapsed * SAMPLE_RATE as f64) as usize;
         // Deliver only new samples, including when presentation limits the cadence.
-        meter.audio_event(AudioEvent::Buffer {
+        ui.audio_event(AudioEvent::Buffer {
             buf: vec![levels(elapsed); due - self.audio_frames],
             captured_at: start
                 + Duration::from_secs_f64(self.audio_frames as f64 / SAMPLE_RATE as f64),

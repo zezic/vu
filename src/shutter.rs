@@ -42,14 +42,4 @@ impl ShutterWindow {
     pub(crate) fn clear(&mut self) {
         self.frames.clear();
     }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.frames.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.frames.is_empty()
-    }
 }

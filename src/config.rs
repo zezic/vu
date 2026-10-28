@@ -167,9 +167,6 @@ impl VisualizerTextScale {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub presentation: crate::visualizer::Presentation,
-    pub mode: crate::measurement::Mode,
-    pub peak_movement: crate::meter::PeakMovement,
     pub theme: crate::theme::ThemeId,
     pub preamp_db: PreampDb,
     pub frame_rate_limit: FrameRateLimit,
@@ -184,6 +181,24 @@ pub struct Config {
     pub motion_opacity: crate::visualizer::MotionOpacity,
     pub motion_fade_power: crate::visualizer::MotionFadePower,
     pub tuning: crate::visualizer::VisualizerTuning,
+    /// Removed display selectors accepted so an existing config still loads.
+    #[serde(default, skip_serializing)]
+    presentation: Ignored,
+    #[serde(default, skip_serializing)]
+    mode: Ignored,
+    #[serde(default, skip_serializing)]
+    peak_movement: Ignored,
+}
+
+/// A config value that is accepted for compatibility and discarded.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Ignored;
+
+impl<'de> Deserialize<'de> for Ignored {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(Self)
+    }
 }
 
 pub fn config_file() -> anyhow::Result<PathBuf> {

@@ -2138,7 +2138,7 @@ impl QuakeSequence {
     }
 }
 
-/// A damped spring used by the flip and quake figure actions.
+/// A damped spring used by the flip and quake actions.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Spring {
     value: f32,

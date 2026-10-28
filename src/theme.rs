@@ -77,10 +77,10 @@ pub enum Accent {
 }
 impl ThemeId {
     /// The registry groups a light theme by its background being lighter than
-    /// the derived scale tone.
+    /// its foreground.
     pub fn is_light(self) -> bool {
         let entry = &registry()[self.0];
-        luma(entry.colors.background) >= luma(entry.colors.scale)
+        luma(entry.colors.background) >= luma(entry.foreground)
     }
 
     pub fn color(self, accent: Accent) -> Color {
@@ -108,57 +108,31 @@ impl ThemeId {
     }
 }
 
-/// The single mapping from Gogh's terminal palette to VU's visual roles.
+/// The single mapping from Gogh's terminal palette to VU's UI roles.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MeterColors {
+pub struct ThemeColors {
     pub background: Color,
-    pub scale: Color,
-    pub warning: Color,
-    pub warning_dim: Color,
-    pub needle: Color,
-    pub needle_stop: Color,
     pub readout: Color,
     pub hint: Color,
-    pub lamp_off: Color,
-    pub lamp_hot: Color,
-    pub lamp: Color,
-    pub lamp_glow: Color,
 }
 
-impl MeterColors {
+impl ThemeColors {
     fn from_gogh(theme: &GoghTheme) -> Self {
         let background = hex(&theme.background);
-        let scale = mix(hex(&theme.foreground), background, 0.3);
+        let foreground = hex(&theme.foreground);
+        let scale = mix(foreground, background, 0.3);
         Self {
             background,
-            scale,
-            warning: hex(&theme.basic[1]),
-            warning_dim: mix(hex(&theme.basic[1]), background, 0.35),
-            needle: hex(&theme.foreground),
-            needle_stop: mix(background, scale, 0.5),
             readout: mix(background, scale, 0.4),
             hint: mix(background, scale, 0.6),
-            lamp_off: mix(background, scale, 0.1),
-            lamp_hot: hex(&theme.basic[11]),
-            lamp: hex(&theme.basic[1]),
-            lamp_glow: hex(&theme.basic[1]),
         }
     }
 
     fn crossfade(self, target: Self, progress: f32) -> Self {
         Self {
             background: mix(self.background, target.background, progress),
-            scale: mix(self.scale, target.scale, progress),
-            warning: mix(self.warning, target.warning, progress),
-            warning_dim: mix(self.warning_dim, target.warning_dim, progress),
-            needle: mix(self.needle, target.needle, progress),
-            needle_stop: mix(self.needle_stop, target.needle_stop, progress),
             readout: mix(self.readout, target.readout, progress),
             hint: mix(self.hint, target.hint, progress),
-            lamp_off: mix(self.lamp_off, target.lamp_off, progress),
-            lamp_hot: mix(self.lamp_hot, target.lamp_hot, progress),
-            lamp: mix(self.lamp, target.lamp, progress),
-            lamp_glow: mix(self.lamp_glow, target.lamp_glow, progress),
         }
     }
 }
@@ -193,7 +167,7 @@ struct Entry {
     name: String,
     foreground: Color,
     accents: [Color; 16],
-    colors: MeterColors,
+    colors: ThemeColors,
 }
 
 fn registry() -> &'static [Entry] {
@@ -204,14 +178,14 @@ fn registry() -> &'static [Entry] {
         let mut entries: Vec<_> = themes
             .into_iter()
             .map(|theme| Entry {
-                colors: MeterColors::from_gogh(&theme),
+                colors: ThemeColors::from_gogh(&theme),
                 foreground: hex(&theme.foreground),
                 accents: theme.basic.each_ref().map(|value| hex(value)),
                 name: theme.name,
             })
             .collect();
         entries.sort_by(|a, b| {
-            let light = |entry: &Entry| luma(entry.colors.background) >= luma(entry.colors.scale);
+            let light = |entry: &Entry| luma(entry.colors.background) >= luma(entry.foreground);
             light(a).cmp(&light(b)).then_with(|| a.name.cmp(&b.name))
         });
         entries
@@ -219,21 +193,17 @@ fn registry() -> &'static [Entry] {
 }
 
 struct Transition {
-    from: MeterColors,
+    from: ThemeColors,
     elapsed: f32,
 }
 
 pub struct Theme {
     selected: ThemeId,
-    pub colors: MeterColors,
+    pub colors: ThemeColors,
     transition: Option<Transition>,
 }
 
 impl Theme {
-    pub fn animating(&self) -> bool {
-        self.transition.is_some()
-    }
-
     pub fn selected(&self) -> ThemeId {
         self.selected
     }

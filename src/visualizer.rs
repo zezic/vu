@@ -1,11 +1,13 @@
-//! Spectrum-driven pseudo-3D wireframe presentation.
+//! Spectrum-driven pseudo-3D model visualizer.
 
 mod computation;
+mod debug;
 mod detection;
 mod geometry;
 mod model;
 mod renderer;
 mod spectrum;
+mod ui;
 
 use computation::{validate_value, MixContext};
 pub use computation::{
@@ -48,13 +50,13 @@ use crate::{
 };
 
 use geometry::{
-    soft_saturate, Camera, Deformation, DepthOpacity, FigureKind, Pose, Projected, Vec2, Vec3,
-    Wireframe,
+    soft_saturate, Camera, Deformation, DepthOpacity, Pose, Projected, Vec2, Vec3, Wireframe,
 };
 pub use spectrum::{RelativeExcessSettings, BAND_COUNT};
 use spectrum::{Spectrum, SpectrumAnalyzer};
 
 pub use renderer::Renderer;
+pub use ui::{Ui, UiFrame, View};
 
 const MAX_PENDING_ACTIONS: usize = 64;
 const MAX_HISTORY: usize = 17;
@@ -70,40 +72,7 @@ const QUAKE_PIXELS: f32 = 24.0;
 /// hundredths, so one hundred turns is a whole period for every one of them.
 const PHASE_PERIOD: f32 = TAU * 100.0;
 
-/// The top-level display selected by the presentation hotkey.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Presentation {
-    Gauges,
-    #[default]
-    Visualizer,
-    Weapon,
-}
-
-impl Presentation {
-    #[must_use]
-    pub fn next(self) -> Self {
-        match self {
-            Self::Gauges => Self::Visualizer,
-            Self::Visualizer => Self::Weapon,
-            Self::Weapon => Self::Gauges,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Gauges => "Gauges",
-            Self::Visualizer => "Wireframe",
-            Self::Weapon => "Weapon",
-        }
-    }
-
-    /// Both visualizer presentations consume audio and draw the visualizer HUD.
-    pub fn shows_visualizer(self) -> bool {
-        matches!(self, Self::Visualizer | Self::Weapon)
-    }
-}
-
-/// How the weapon wireframe composites over the theme background.
+/// How the model wireframe composites over the theme background.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ModelComposite {
     #[default]
@@ -222,7 +191,7 @@ impl From<NearOpacity> for f32 {
     }
 }
 
-/// Weapon showcase edge crease threshold in degrees. Lower values keep more
+/// Model edge crease threshold in degrees. Lower values keep more
 /// edge detail; higher values reduce the wireframe to the strongest creases.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "f32", into = "f32")]
@@ -333,7 +302,7 @@ impl From<LineWidth> for f32 {
     }
 }
 
-/// Whether the rigid weapon showcase uses the analytical exposure sweep.
+/// Whether the model uses the analytical exposure sweep.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelMotion {
     #[default]
@@ -616,8 +585,7 @@ impl From<PropertyGatesTuning> for PropertyGates {
     }
 }
 
-/// Style values pinned from the inspector. Values that are absent keep the
-/// per-figure random variation.
+/// Style values pinned from the inspector. Absent values keep the defaults.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StyleTuning(BTreeMap<StyleInput, f32>);
@@ -950,30 +918,26 @@ impl Property {
         }
     }
 
-    /// One line explaining what the property does to the figure or to the
+    /// One line explaining what the property does to the model or to the
     /// animation. The inspector shows this when the property is selected.
     pub fn description(self) -> &'static str {
         match self {
-            Self::Pulse => {
-                "Bass, broadband and kick energy swell the figure and thicken its edges."
-            }
+            Self::Pulse => "Bass, broadband and kick energy swell the model and thicken its edges.",
             Self::Spin => "Band 04 speeds the continuous yaw rotation; the style axis weights it.",
             Self::Pitch => "Band 05 tilts the camera; the style Y axis scales the tilt.",
             Self::Roll => "Band 06 rolls the camera; the style Z axis scales the roll.",
             Self::Twist => {
                 "Band 07 twists vertices around the vertical axis; twist sign reverses it."
             }
-            Self::Bulge => "Band 08 inflates the figure radially; deform bias scales the bulge.",
+            Self::Bulge => "Band 08 inflates the model radially; deform bias scales the bulge.",
             Self::Ripple => "Band 09 adds a travelling radial wave to every vertex.",
             Self::Shear => "Band 10 slants X by Y; shear sign reverses the slant.",
-            Self::Zoom => "Band 11 pulls the camera closer and enlarges the projected figure.",
-            Self::Accent => "Band 12 picks the vivid tint of the next spawned figure.",
+            Self::Zoom => "Band 11 pulls the camera closer and enlarges the projected model.",
+            Self::Accent => "Band 12 picks the vivid tint of the next model.",
             Self::Line => "Band 13 raises edge opacity above the near-opacity floor.",
             Self::Jitter => "Band 14 adds per-vertex noise; jitter bias scales it.",
-            Self::Phase => {
-                "Band 15 speeds the phase clock behind ripple, jitter and tesseract rotation."
-            }
-            Self::Kick => "A kick-kernel flux peak latches a decaying kick that swells the figure.",
+            Self::Phase => "Band 15 speeds the phase clock behind ripple and jitter.",
+            Self::Kick => "A kick-kernel flux peak latches a decaying kick that swells the model.",
             Self::Flip => {
                 "Every Nth snare adds 180 degrees to the pitch baseline through a damped spring."
             }
@@ -986,7 +950,7 @@ impl Property {
             Self::Morph => {
                 "Power sets how quickly style parameters ease toward a hit's new target."
             }
-            Self::Entrance => "Power sets how quickly a newly spawned figure fades in.",
+            Self::Entrance => "Power sets how quickly a newly shown model fades in.",
         }
     }
 
@@ -1469,19 +1433,20 @@ impl Diagnosis {
 /// The animated layers for one displayed visualizer frame.
 #[derive(Clone, Copy)]
 pub struct Frame<'a> {
+    /// Diagnostic overlays drawn with normal blending.
     pub lines: &'a [LineInstance],
+    /// The model wireframe drawn with the themed composite.
     pub model_lines: &'a [LineInstance],
+    /// Swept model motion blur drawn with the themed composite.
     pub ribbons: &'a [RibbonInstance],
-    pub model_ribbons: &'a [RibbonInstance],
     pub model_composite: ModelComposite,
 }
 
-/// Lazily loaded weapon model. The loaded copy is retained so switching back to
-/// the showcase does not re-read the file.
-enum Showcase {
+/// Lazily loaded model set. The loaded copy is retained for the whole run.
+enum Models {
     Unloaded,
     Ready(Box<model::ModelSet>),
-    Failed(String),
+    Failed,
 }
 
 pub struct Visualizer {
@@ -1495,8 +1460,7 @@ pub struct Visualizer {
     pending_actions: VecDeque<Action>,
     rng: Rng,
     scene: Scene,
-    presentation: Presentation,
-    showcase: Showcase,
+    models: Models,
     model_composite: ModelComposite,
     model_lines: Vec<LineInstance>,
     model_ribbons: Vec<RibbonInstance>,
@@ -1534,16 +1498,15 @@ pub struct Visualizer {
     drop_hits: u32,
     diagnosis: Diagnosis,
     debug_history: DebugHistory,
+    /// Diagnostic crosses and connector lines drawn with normal blending.
     lines: Vec<LineInstance>,
-    ribbons: Vec<RibbonInstance>,
 }
 
 impl Visualizer {
     pub fn new() -> Self {
         let tuning = VisualizerTuning::default();
         let inputs = tuning.inputs;
-        let mut rng = Rng::new(0x005e_ed0f_7e5e_1e55u64);
-        let scene = Scene::new(&mut rng);
+        let rng = Rng::new(0x005e_ed0f_7e5e_1e55u64);
         let mut visualizer = Self {
             analyzer: SpectrumAnalyzer::new(48_000),
             bands: inputs
@@ -1556,9 +1519,8 @@ impl Visualizer {
             onsets: OnsetBank::new(),
             pending_actions: VecDeque::with_capacity(MAX_PENDING_ACTIONS),
             rng,
-            scene,
-            presentation: Presentation::Visualizer,
-            showcase: Showcase::Unloaded,
+            scene: Scene::new(),
+            models: Models::Unloaded,
             model_composite: ModelComposite::default(),
             model_lines: Vec::new(),
             model_ribbons: Vec::new(),
@@ -1600,7 +1562,6 @@ impl Visualizer {
             diagnosis: Diagnosis::new(),
             debug_history: DebugHistory::default(),
             lines: Vec::with_capacity(2048),
-            ribbons: Vec::with_capacity(2048),
         };
         visualizer
             .analyzer
@@ -1609,73 +1570,39 @@ impl Visualizer {
         visualizer
     }
 
-    /// Switches the visualizer content with the presentation. The weapon model
-    /// is loaded the first time the showcase becomes visible.
-    pub fn set_presentation(&mut self, presentation: Presentation) {
-        assert!(
-            presentation.shows_visualizer(),
-            "the visualizer only handles its own presentations"
-        );
-        if self.presentation == presentation {
-            return;
-        }
-        self.presentation = presentation;
-        match presentation {
-            Presentation::Weapon => self.enter_showcase(),
-            Presentation::Visualizer if self.scene.current.is_showcase() => {
-                let accent = self.accent();
-                self.scene
-                    .leave_showcase(&mut self.rng, accent, &self.style_tuning);
-            }
-            _ => {}
-        }
-    }
-
-    fn enter_showcase(&mut self) {
+    /// Loads the model directory on first use and shows its current model.
+    fn load_models(&mut self) {
         let accent = self.accent();
-        if let Showcase::Ready(models) = &self.showcase {
-            self.scene.enter_showcase(
-                models.current(),
-                self.crease_threshold,
-                self.model_motion,
-                accent,
-                &self.style_tuning,
-            );
-            return;
-        }
-        if let Showcase::Failed(error) = &self.showcase {
-            log::error!("retrying the weapon showcase after: {error}");
-        }
         match model::ModelSet::load() {
             Ok(models) => {
                 let (_, total) = models.position();
-                log::info!("weapon showcase: {total} models");
-                self.scene.enter_showcase(
+                log::info!("model visualizer: {total} models");
+                self.scene.show(
                     models.current(),
                     self.crease_threshold,
                     self.model_motion,
                     accent,
                     &self.style_tuning,
                 );
-                self.showcase = Showcase::Ready(Box::new(models));
+                self.models = Models::Ready(Box::new(models));
             }
             Err(error) => {
-                log::error!("could not load the weapon showcase: {error:#}");
-                self.showcase = Showcase::Failed(format!("{error:#}"));
+                log::error!("could not load the models: {error:#}");
+                self.models = Models::Failed;
             }
         }
     }
 
-    /// Steps to the next showcase model. Drops call this while the showcase is
-    /// active; the hotkey calls it from outside a frame.
+    /// Steps to the next model. Drops advance the set; the hotkey calls this
+    /// from outside a frame.
     fn advance_model(&mut self, accent: f32) {
-        let Showcase::Ready(models) = &mut self.showcase else {
+        let Models::Ready(models) = &mut self.models else {
             return;
         };
         if !models.advance() {
             return;
         }
-        self.scene.switch_showcase(
+        self.scene.switch(
             models.current(),
             self.crease_threshold,
             self.model_motion,
@@ -1684,15 +1611,13 @@ impl Visualizer {
     }
 
     pub fn next_model(&mut self) {
-        if self.presentation == Presentation::Weapon {
-            let accent = self.accent();
-            self.advance_model(accent);
-        }
+        let accent = self.accent();
+        self.advance_model(accent);
     }
 
     pub fn model_position(&self) -> Option<(usize, usize)> {
-        match &self.showcase {
-            Showcase::Ready(models) => Some(models.position()),
+        match &self.models {
+            Models::Ready(models) => Some(models.position()),
             _ => None,
         }
     }
@@ -1765,9 +1690,10 @@ impl Visualizer {
     }
 
     fn apply_style_tuning(&mut self) {
-        self.style_tuning.apply(&mut self.scene.current.style);
-        self.style_tuning
-            .apply(&mut self.scene.current.target_style);
+        if let Some(current) = &mut self.scene.current {
+            self.style_tuning.apply(&mut current.style);
+            self.style_tuning.apply(&mut current.target_style);
+        }
         if let Some(outgoing) = &mut self.scene.outgoing {
             self.style_tuning.apply(&mut outgoing.style);
             self.style_tuning.apply(&mut outgoing.target_style);
@@ -1779,7 +1705,7 @@ impl Visualizer {
         self.reset_audio();
     }
 
-    /// Discard temporal history after capture restarts or the mode becomes visible.
+    /// Discard temporal history after capture restarts.
     pub fn reset_audio(&mut self) {
         self.analyzer.reset();
         self.reset_analysis();
@@ -1861,6 +1787,13 @@ impl Visualizer {
 
     fn mix_context(&self) -> MixContext {
         let status = self.onsets.status();
+        let (style, entrance, phase) = self
+            .scene
+            .current
+            .as_ref()
+            .map_or((Style::default(), 1.0, 0.0), |model| {
+                (model.style, model.entrance, model.phase)
+            });
         MixContext {
             bands: self.bands.map(|band| band.value),
             raw_bands: self.last_spectrum.bands,
@@ -1874,9 +1807,9 @@ impl Visualizer {
             drop_onset: status.drop.flash,
             gains: self.gains,
             routing: self.routing,
-            style: self.scene.current.style,
-            entrance: self.scene.current.entrance,
-            phase: self.scene.current.phase,
+            style,
+            entrance,
+            phase,
             time: self.time,
         }
     }
@@ -1900,8 +1833,7 @@ impl Visualizer {
         Frame {
             lines: &self.lines,
             model_lines: &self.model_lines,
-            ribbons: &self.ribbons,
-            model_ribbons: &self.model_ribbons,
+            ribbons: &self.model_ribbons,
             model_composite: self.model_composite,
         }
     }
@@ -1909,22 +1841,27 @@ impl Visualizer {
     /// Logical wireframe line count. Model edges stay counted while motion
     /// blur renders them as swept ribbons; diagnosis lines are included.
     pub fn line_count(&self) -> usize {
-        if self.scene.current.is_showcase() {
-            let outgoing = self
-                .scene
-                .outgoing
-                .as_ref()
-                .map_or(0, FigureRuntime::wireframe_edge_count);
-            self.lines.len() + self.scene.current.wireframe_edge_count() + outgoing
-        } else {
-            self.lines.len()
-        }
+        let outgoing = self
+            .scene
+            .outgoing
+            .as_ref()
+            .map_or(0, ModelRuntime::wireframe_edge_count);
+        let current = self
+            .scene
+            .current
+            .as_ref()
+            .map_or(0, ModelRuntime::wireframe_edge_count);
+        self.lines.len() + current + outgoing
     }
 
     pub fn scene_name(&self) -> &str {
-        match &self.showcase {
-            Showcase::Failed(_) if self.presentation == Presentation::Weapon => "No model",
-            _ => self.scene.current.name(),
+        match &self.models {
+            Models::Failed => "No model",
+            _ => self
+                .scene
+                .current
+                .as_ref()
+                .map_or("Loading", ModelRuntime::name),
         }
     }
 
@@ -2272,7 +2209,17 @@ impl Visualizer {
             Parameter::Attack(target) => self.envelope(target).attack,
             Parameter::Release(target) => self.envelope(target).release,
             Parameter::KickDecay => self.kick_decay,
-            Parameter::Style(style) => style_value(&self.scene.current.style, style),
+            Parameter::Style(style) => {
+                let mut value = self
+                    .scene
+                    .current
+                    .as_ref()
+                    .map_or(Style::default(), |model| model.style);
+                if self.scene.current.is_none() {
+                    self.style_tuning.apply(&mut value);
+                }
+                style_value(&value, style)
+            }
             Parameter::Gain(gain) => self.gains[gain],
             Parameter::BandSource(component) => self.routing[component] as f32,
             Parameter::InputLow(target) => self.shape(target).low,
@@ -2357,8 +2304,10 @@ impl Visualizer {
             Parameter::Release(target) => self.envelope_mut(target).release = value,
             Parameter::KickDecay => self.kick_decay = value,
             Parameter::Style(style) => {
-                set_style_value(&mut self.scene.current.style, style, value);
-                set_style_value(&mut self.scene.current.target_style, style, value);
+                if let Some(current) = &mut self.scene.current {
+                    set_style_value(&mut current.style, style, value);
+                    set_style_value(&mut current.target_style, style, value);
+                }
                 self.style_tuning.set(style, value);
             }
             Parameter::Gain(gain) => self.gains[gain] = value,
@@ -2453,9 +2402,9 @@ impl Visualizer {
             return;
         }
         self.crease_threshold = crease;
-        if let Showcase::Ready(models) = &self.showcase {
-            if self.scene.current.is_showcase() {
-                self.scene.set_showcase_wireframe(models.current(), crease);
+        if let Models::Ready(models) = &self.models {
+            if self.scene.current.is_some() {
+                self.scene.set_wireframe(models.current(), crease);
             }
         }
     }
@@ -2473,7 +2422,7 @@ impl Visualizer {
             return;
         }
         self.model_motion = motion;
-        if self.scene.current.is_showcase() {
+        if self.scene.current.is_some() {
             self.scene.set_model_motion(motion);
         }
     }
@@ -2506,7 +2455,9 @@ impl Visualizer {
     }
 
     fn property_values(&self) -> [f32; Property::COUNT] {
-        let current = &self.scene.current;
+        let Some(current) = &self.scene.current else {
+            return std::array::from_fn(|index| Property::VARIANTS[index].neutral());
+        };
         std::array::from_fn(|index| match Property::VARIANTS[index] {
             Property::Pulse => current.pose.scale,
             Property::Spin => current.spin_speed,
@@ -2599,7 +2550,11 @@ impl Visualizer {
                 role: BandRole::for_index(index),
             }
         });
-        let style = self.scene.current.style;
+        let style = self
+            .scene
+            .current
+            .as_ref()
+            .map_or(Style::default(), |model| model.style);
         DebugSnapshot {
             bands,
             properties: self.property_values(),
@@ -2630,7 +2585,7 @@ impl Visualizer {
                 .scene
                 .outgoing
                 .as_ref()
-                .map(|figure| figure.name().to_owned()),
+                .map(|model| model.name().to_owned()),
             transition: self.scene.transition,
             style: StyleDebug {
                 axis: [style.axis.x, style.axis.y, style.axis.z],
@@ -2641,10 +2596,18 @@ impl Visualizer {
                 phase_rate: style.phase_rate,
                 jitter_bias: style.jitter_bias,
             },
-            phase: self.scene.current.phase.rem_euclid(TAU),
-            entrance: self.scene.current.entrance,
+            phase: self
+                .scene
+                .current
+                .as_ref()
+                .map_or(0.0, |model| model.phase.rem_euclid(TAU)),
+            entrance: self
+                .scene
+                .current
+                .as_ref()
+                .map_or(1.0, |model| model.entrance),
             lines: self.lines.len() + self.model_lines.len(),
-            ribbons: self.ribbons.len() + self.model_ribbons.len(),
+            ribbons: self.model_ribbons.len(),
         }
     }
 
@@ -2666,9 +2629,8 @@ impl Visualizer {
         ui_scale: f32,
     ) {
         let dt = dt.clamp(0.0, 0.1);
-        if self.presentation == Presentation::Weapon && matches!(&self.showcase, Showcase::Unloaded)
-        {
-            self.enter_showcase();
+        if matches!(&self.models, Models::Unloaded) {
+            self.load_models();
         }
         self.palette.approach(*palette, dt, 10.0);
         self.time += dt;
@@ -2729,22 +2691,13 @@ impl Visualizer {
         };
         self.lines.clear();
         self.model_lines.clear();
-        self.ribbons.clear();
         self.model_ribbons.clear();
-        if self.presentation == Presentation::Weapon
-            && matches!(&self.showcase, Showcase::Failed(_))
-        {
+        if self.scene.current.is_none() {
             self.diagnosis.active = false;
             self.diagnosis.readout = None;
             self.record_debug_sample();
             return;
         }
-        let showcase = self.scene.current.is_showcase();
-        let (scene_lines, scene_ribbons) = if showcase {
-            (&mut self.model_lines, &mut self.model_ribbons)
-        } else {
-            (&mut self.lines, &mut self.ribbons)
-        };
         self.scene.update(
             dt,
             &music,
@@ -2766,8 +2719,8 @@ impl Visualizer {
             flip_pitch,
             shake,
             self.time,
-            scene_lines,
-            scene_ribbons,
+            &mut self.model_lines,
+            &mut self.model_ribbons,
         );
         self.record_debug_sample();
         let ui_scale = ui_scale.max(0.25);
@@ -2779,7 +2732,8 @@ impl Visualizer {
         let vertex = self
             .scene
             .current
-            .vertex_diagnosis(self.diagnosis.vertex)
+            .as_ref()
+            .and_then(|model| model.vertex_diagnosis(self.diagnosis.vertex))
             .map(|data| data.screen)
             .unwrap_or(Vec2::new(viewport.0 * 0.5, viewport.1 * 0.5));
         let center = Vec2::new(viewport.0 * 0.5, viewport.1 * 0.5);
@@ -2800,7 +2754,10 @@ impl Visualizer {
     }
 
     fn activate_diagnosis(&mut self, viewport: (f32, f32), ui_scale: f32) {
-        let count = self.scene.current.vertices.len();
+        let Some(current) = self.scene.current.as_ref() else {
+            return;
+        };
+        let count = current.vertices.len();
         if count == 0 {
             return;
         }
@@ -2810,7 +2767,7 @@ impl Visualizer {
         self.diagnosis.remaining = 2.5 + self.rng.unit() * 3.0;
         self.diagnosis.mode_timer = 0.0;
         self.diagnosis.refresh_timer = 0.1;
-        self.diagnosis.scene = self.scene.current.name().to_owned();
+        self.diagnosis.scene = current.name().to_owned();
         let target = self.diagnosis_target(viewport, ui_scale);
         self.diagnosis.anchor = target;
         self.diagnosis.revision += 1;
@@ -2832,10 +2789,13 @@ impl Visualizer {
             self.diagnosis.next_in = 3.0 + self.rng.unit() * 5.0;
             return;
         }
-        let scene = self.scene.current.name();
+        let Some(current) = self.scene.current.as_ref() else {
+            return;
+        };
+        let scene = current.name();
         if scene != self.diagnosis.scene {
             self.diagnosis.scene = scene.to_owned();
-            self.diagnosis.vertex = self.rng.range(self.scene.current.vertices.len().max(1));
+            self.diagnosis.vertex = self.rng.range(current.vertices.len().max(1));
             self.diagnosis.mode = DiagnosisMode::random(&mut self.rng);
             self.diagnosis.mode_timer = 0.0;
             self.diagnosis.refresh_timer = 0.1;
@@ -2844,8 +2804,8 @@ impl Visualizer {
             self.diagnosis.readout = None;
             self.diagnosis.revision += 1;
         }
-        if self.diagnosis.vertex >= self.scene.current.vertices.len() {
-            self.diagnosis.vertex = self.scene.current.vertices.len().saturating_sub(1);
+        if self.diagnosis.vertex >= current.vertices.len() {
+            self.diagnosis.vertex = current.vertices.len().saturating_sub(1);
         }
         self.diagnosis.mode_timer += dt;
         if self.diagnosis.mode_timer >= 1.8 {
@@ -2860,7 +2820,7 @@ impl Visualizer {
         self.diagnosis.refresh_timer += dt;
         if self.diagnosis.refresh_timer >= 0.1 {
             self.diagnosis.refresh_timer = 0.0;
-            if let Some(data) = self.scene.current.vertex_diagnosis(self.diagnosis.vertex) {
+            if let Some(data) = current.vertex_diagnosis(self.diagnosis.vertex) {
                 let color = palette.vivid(self.diagnosis.vertex + self.diagnosis.mode.index() * 4);
                 self.diagnosis.revision += 1;
                 self.diagnosis.readout = Some(DiagnosisReadout {
@@ -2876,7 +2836,12 @@ impl Visualizer {
         if !self.diagnosis.active || self.diagnosis.suppressed {
             return;
         }
-        let Some(data) = self.scene.current.vertex_diagnosis(self.diagnosis.vertex) else {
+        let Some(data) = self
+            .scene
+            .current
+            .as_ref()
+            .and_then(|model| model.vertex_diagnosis(self.diagnosis.vertex))
+        else {
             return;
         };
         let Some(readout) = &self.diagnosis.readout else {
@@ -2983,11 +2948,7 @@ impl Visualizer {
                 }
             }
             Action::Drop(power) => {
-                if self.scene.current.is_showcase() {
-                    self.advance_model(accent);
-                } else {
-                    self.scene.change(&mut self.rng, accent, &self.style_tuning);
-                }
+                self.advance_model(accent);
                 if self.property_gates.plays(Property::Quake) {
                     self.quake_y
                         .impulse(power * self.detectors.drop_quake_factor);
@@ -3125,42 +3086,21 @@ impl Smoother {
 }
 
 struct Scene {
-    current: FigureRuntime,
-    outgoing: Option<FigureRuntime>,
+    current: Option<ModelRuntime>,
+    outgoing: Option<ModelRuntime>,
     transition: f32,
 }
 
 impl Scene {
-    fn new(rng: &mut Rng) -> Self {
-        let style = Style::default();
-        let tint = FigureTint::spawn(FigureKind::Cube, 0.0, rng);
+    fn new() -> Self {
         Self {
-            current: FigureRuntime::new(FigureKind::Cube, 1.0, style, tint),
+            current: None,
             outgoing: None,
             transition: 1.0,
         }
     }
 
-    fn change(&mut self, rng: &mut Rng, accent: f32, style_tuning: &StyleTuning) {
-        let next = match &self.current.source {
-            FigureSource::Procedural(kind) => kind.next(),
-            FigureSource::Model { .. } => return,
-        };
-        let mut target_style = Style::random(rng);
-        style_tuning.apply(&mut target_style);
-        let tint = FigureTint::spawn(next, accent, rng);
-        let mut entering = FigureRuntime::new(next, 0.0, target_style, tint);
-        entering.pose.yaw += rng.signed() * 0.9;
-        entering.pose.pitch += rng.signed() * 0.4;
-        entering.phase = rng.unit() * TAU;
-        self.outgoing = None;
-        self.current.opacity = 1.0;
-        let old = std::mem::replace(&mut self.current, entering);
-        self.outgoing = Some(old);
-        self.transition = 0.0;
-    }
-
-    fn enter_showcase(
+    fn show(
         &mut self,
         model: &model::Model,
         crease: CreaseThreshold,
@@ -3170,83 +3110,71 @@ impl Scene {
     ) {
         let mut style = Style::default();
         style_tuning.apply(&mut style);
-        self.current = FigureRuntime::showcase(
+        self.current = Some(ModelRuntime::new(
             model.name.clone(),
             model.wireframe(crease),
+            Pose {
+                yaw: TAU * 0.25,
+                ..Pose::default()
+            },
             style,
-            FigureTint::solid(accent),
-            motion,
-        );
+            ModelTint::solid(accent),
+            motion == ModelMotion::Swept,
+        ));
         self.outgoing = None;
         self.transition = 1.0;
     }
 
-    fn set_showcase_wireframe(&mut self, model: &model::Model, crease: CreaseThreshold) {
-        assert!(
-            self.current.is_showcase(),
-            "only the weapon showcase changes its crease threshold"
-        );
-        self.current.set_wireframe(model.wireframe(crease));
+    fn set_wireframe(&mut self, model: &model::Model, crease: CreaseThreshold) {
+        let current = self
+            .current
+            .as_mut()
+            .expect("a model must be shown before changing its wireframe");
+        current.set_wireframe(model.wireframe(crease));
     }
 
     /// Crossfades into another model while keeping the current orientation.
-    fn switch_showcase(
+    fn switch(
         &mut self,
         model: &model::Model,
         crease: CreaseThreshold,
         motion: ModelMotion,
         accent: f32,
     ) {
-        assert!(
-            self.current.is_showcase(),
-            "only the weapon showcase switches models"
-        );
-        let mut entering = FigureRuntime::showcase(
+        let current = self
+            .current
+            .as_ref()
+            .expect("a model must be shown before switching models");
+        let mut entering = ModelRuntime::new(
             model.name.clone(),
             model.wireframe(crease),
-            self.current.target_style,
-            FigureTint::solid(accent),
-            motion,
+            current.pose,
+            current.target_style,
+            ModelTint::solid(accent),
+            motion == ModelMotion::Swept,
         );
-        entering.pose = self.current.pose;
-        entering.pitch = self.current.pitch;
-        entering.roll = self.current.roll;
-        entering.style = self.current.style;
-        entering.phase = self.current.phase;
-        self.outgoing = Some(std::mem::replace(&mut self.current, entering));
+        entering.pose = current.pose;
+        entering.pitch = current.pitch;
+        entering.roll = current.roll;
+        entering.style = current.style;
+        entering.phase = current.phase;
+        self.outgoing = self.current.replace(entering);
         self.transition = 0.0;
     }
 
     fn set_model_motion(&mut self, motion: ModelMotion) {
-        assert!(
-            self.current.is_showcase(),
-            "only the weapon showcase changes its motion blur"
-        );
-        self.current.set_motion_blur(motion == ModelMotion::Swept);
+        if let Some(current) = &mut self.current {
+            current.set_motion_blur(motion == ModelMotion::Swept);
+        }
         if let Some(outgoing) = &mut self.outgoing {
-            assert!(
-                outgoing.is_showcase(),
-                "the outgoing showcase model owns its motion blur"
-            );
             outgoing.set_motion_blur(motion == ModelMotion::Swept);
         }
     }
 
-    fn leave_showcase(&mut self, rng: &mut Rng, accent: f32, style_tuning: &StyleTuning) {
-        let mut style = Style::random(rng);
-        style_tuning.apply(&mut style);
-        self.current = FigureRuntime::new(
-            FigureKind::Cube,
-            1.0,
-            style,
-            FigureTint::spawn(FigureKind::Cube, accent, rng),
-        );
-        self.outgoing = None;
-        self.transition = 1.0;
-    }
-
     fn reset_temporal(&mut self) {
-        self.current.reset_temporal();
+        if let Some(current) = &mut self.current {
+            current.reset_temporal();
+        }
         if let Some(outgoing) = &mut self.outgoing {
             outgoing.reset_temporal();
         }
@@ -3275,13 +3203,16 @@ impl Scene {
         out: &mut Vec<LineInstance>,
         out_ribbons: &mut Vec<RibbonInstance>,
     ) {
+        let Some(current) = &self.current else {
+            return;
+        };
         if self.outgoing.is_some() && gates.plays(Property::Crossfade) {
             let context = music.context(
-                self.current.style,
+                current.style,
                 *gains,
                 *routing,
-                self.current.entrance,
-                self.current.phase,
+                current.entrance,
+                current.phase,
                 time,
             );
             let rate = mixer.value(MixPoint::CrossfadeRate, &context);
@@ -3290,36 +3221,44 @@ impl Scene {
             if let Some(outgoing) = &mut self.outgoing {
                 outgoing.opacity = 1.0 - progress;
             }
-            self.current.opacity = progress;
+            self.current
+                .as_mut()
+                .expect("the crossfade has a current model")
+                .opacity = progress;
         } else {
-            self.current.opacity = 1.0;
+            self.current
+                .as_mut()
+                .expect("the crossfade has a current model")
+                .opacity = 1.0;
             if self.outgoing.is_some() {
                 // A muted crossfade swaps scenes without a fade.
                 self.transition = Property::Crossfade.neutral();
                 self.outgoing = None;
             }
         }
-        self.current.update(
-            dt,
-            music,
-            gains,
-            routing,
-            mixer,
-            gates,
-            exposure_start,
-            frame_end,
-            camera,
-            palette,
-            depth_fade,
-            near_opacity,
-            motion_fade,
-            width,
-            flip_pitch,
-            shake,
-            time,
-            out,
-            out_ribbons,
-        );
+        if let Some(current) = &mut self.current {
+            current.update(
+                dt,
+                music,
+                gains,
+                routing,
+                mixer,
+                gates,
+                exposure_start,
+                frame_end,
+                camera,
+                palette,
+                depth_fade,
+                near_opacity,
+                motion_fade,
+                width,
+                flip_pitch,
+                shake,
+                time,
+                out,
+                out_ribbons,
+            );
+        }
         if let Some(outgoing) = &mut self.outgoing {
             outgoing.update(
                 dt,
@@ -3349,34 +3288,15 @@ impl Scene {
     }
 }
 
-/// What the runtime draws: one step of the figure evolution, or a loaded model.
-enum FigureSource {
-    Procedural(FigureKind),
-    Model { name: String },
-}
-
-impl FigureSource {
-    fn name(&self) -> &str {
-        match self {
-            Self::Procedural(kind) => kind.name(),
-            Self::Model { name } => name,
-        }
-    }
-
-    fn is_model(&self) -> bool {
-        matches!(self, Self::Model { .. })
-    }
-}
-
-struct FigureRuntime {
-    source: FigureSource,
+struct ModelRuntime {
+    name: String,
     wireframe: Wireframe,
     pose: Pose,
     pitch: Smoother,
     roll: Smoother,
     style: Style,
     target_style: Style,
-    tint: FigureTint,
+    tint: ModelTint,
     phase: f32,
     /// Latest values written by `update` and read by the debug inspector.
     deformation: Deformation,
@@ -3429,56 +3349,19 @@ struct VertexDiagnosis {
     acceleration: Vec2,
 }
 
-impl FigureRuntime {
-    fn new(kind: FigureKind, opacity: f32, target_style: Style, tint: FigureTint) -> Self {
-        Self::with_source(
-            FigureSource::Procedural(kind),
-            Wireframe::build(kind),
-            Pose::default(),
-            opacity,
-            target_style,
-            tint,
-            true,
-        )
-    }
-
-    /// A loaded model stays rigid and keeps a permanent label instead of
-    /// evolving through the figure kinds.
-    fn showcase(
+impl ModelRuntime {
+    fn new(
         name: String,
         wireframe: Wireframe,
-        target_style: Style,
-        tint: FigureTint,
-        motion: ModelMotion,
-    ) -> Self {
-        let pose = Pose {
-            yaw: TAU * 0.25,
-            ..Pose::default()
-        };
-        Self::with_source(
-            FigureSource::Model { name },
-            wireframe,
-            pose,
-            1.0,
-            target_style,
-            tint,
-            motion == ModelMotion::Swept,
-        )
-    }
-
-    fn with_source(
-        source: FigureSource,
-        wireframe: Wireframe,
         pose: Pose,
-        opacity: f32,
         target_style: Style,
-        tint: FigureTint,
+        tint: ModelTint,
         motion_blur: bool,
     ) -> Self {
         let vertex_capacity = wireframe.vertex_count();
         let edge_capacity = wireframe.edges().len();
         Self {
-            source,
+            name,
             wireframe,
             pose,
             pitch: Smoother::new(pose.pitch),
@@ -3493,8 +3376,8 @@ impl FigureRuntime {
             camera_zoom: 1.0,
             morph_rate: 1.1,
             line_energy: 0.6,
-            entrance: opacity,
-            opacity,
+            entrance: 1.0,
+            opacity: 1.0,
             motion_blur,
             history: VecDeque::with_capacity(MAX_HISTORY),
             vertices: Vec::with_capacity(vertex_capacity),
@@ -3507,19 +3390,14 @@ impl FigureRuntime {
     }
 
     fn name(&self) -> &str {
-        self.source.name()
+        &self.name
     }
 
     fn wireframe_edge_count(&self) -> usize {
         self.wireframe.edges().len()
     }
 
-    fn is_showcase(&self) -> bool {
-        self.source.is_model()
-    }
-
     fn set_motion_blur(&mut self, enabled: bool) {
-        assert!(self.is_showcase(), "figure motion blur is always enabled");
         self.motion_blur = enabled;
         if !enabled {
             self.history.clear();
@@ -3527,10 +3405,6 @@ impl FigureRuntime {
     }
 
     fn set_wireframe(&mut self, wireframe: Wireframe) {
-        assert!(
-            self.is_showcase(),
-            "only the weapon showcase changes its wireframe at runtime"
-        );
         self.wireframe = wireframe;
         self.history.clear();
         self.current.clear();
@@ -3545,10 +3419,6 @@ impl FigureRuntime {
         self.history.clear();
     }
 
-    // Sixteen log-spaced areas drive the scene: 0-3 bass pulse and hits, 4 spin,
-    // 5 pitch, 6 roll, 7 twist, 8 bulge, 9 ripple, 10 shear, 11 camera zoom,
-    // 12 accent saturation of newly spawned figures, 13 line energy, 14 jitter,
-    // 15 phase speed.
     #[allow(clippy::too_many_arguments)]
     fn update(
         &mut self,
@@ -3612,7 +3482,7 @@ impl FigureRuntime {
         self.phase_speed =
             gates.drive(Property::Phase, mixer.value(MixPoint::PhaseSpeed, &context));
         self.phase = (self.phase + dt * self.phase_speed).rem_euclid(PHASE_PERIOD);
-        // The figure scale combines the pulse channel with the separate camera
+        // The model scale combines the pulse channel with the separate camera
         // zoom property, so either can be muted on its own.
         let entrance_scale = gates.drive(
             Property::Pulse,
@@ -3626,38 +3496,24 @@ impl FigureRuntime {
         );
         let scale = entrance_scale * energy * self.style.zoom_bias * camera_zoom;
         self.pose.scale = soft_saturate(scale, 1.45).max(0.35);
-        let showcase = self.is_showcase();
-        let deformation = if showcase {
-            Deformation::default()
-        } else {
-            Deformation {
-                twist: gates.drive(Property::Twist, mixer.value(MixPoint::Twist, &context)),
-                bulge: gates.drive(Property::Bulge, mixer.value(MixPoint::Bulge, &context)),
-                ripple: gates.drive(Property::Ripple, mixer.value(MixPoint::Ripple, &context)),
-                shear: gates.drive(Property::Shear, mixer.value(MixPoint::Shear, &context)),
-                jitter: gates.drive(Property::Jitter, mixer.value(MixPoint::Jitter, &context)),
-                phase: self.phase,
-            }
-        };
+        // Models are rigid, so the vertex distortion controls contribute an
+        // identity transform.
+        let deformation = Deformation::default();
         self.deformation = deformation;
         self.line_energy = gates.drive(Property::Line, mixer.value(MixPoint::Line, &context));
         self.world_vertices.clear();
         self.vertices.clear();
         let pose = self.pose.with_action(flip_pitch, shake);
         for index in 0..self.wireframe.vertex_count() {
-            let world = deformation.apply(self.wireframe.vertex(index, self.phase));
+            let world = deformation.apply(self.wireframe.vertex(index));
             self.world_vertices.push(world);
             self.vertices.push(camera.project(world, pose));
         }
         self.update_kinematics(dt);
-        let depth_opacity = if self.is_showcase() {
-            // Showcase models are fitted to a unit radius, so `pose.scale` is
-            // the model radius in view space. Keep the planes on that fitted
-            // sphere instead of following the silhouette of the current pose.
-            DepthOpacity::centered(self.pose.distance, self.pose.scale, depth_fade)
-        } else {
-            DepthOpacity::new(self.vertices.iter().map(|vertex| vertex.depth), depth_fade)
-        };
+        // Models are fitted to a unit radius, so `pose.scale` is the model
+        // radius in view space. Keep the depth planes on that fitted sphere
+        // instead of following the silhouette of the current pose.
+        let depth_opacity = DepthOpacity::centered(self.pose.distance, self.pose.scale, depth_fade);
         self.current.clear();
         self.current
             .extend(self.wireframe.edges().iter().map(|edge| {
@@ -3697,16 +3553,18 @@ impl FigureRuntime {
         let alpha = (self.opacity * base_opacity).clamp(0.0, 1.0);
         let width = base_width * (1.0 + music.kick * 0.25);
         for (index, current) in self.current.iter().enumerate() {
-            let rgb = self.tint.edge_rgb(index, palette);
+            let rgb = self.tint.edge_rgb(palette);
 
             let Some(exposure) = &exposure else {
                 let start_color = [rgb[0], rgb[1], rgb[2], alpha * current.start_depth_opacity];
                 let end_color = [rgb[0], rgb[1], rgb[2], alpha * current.end_depth_opacity];
-                out.push(if showcase {
-                    LineInstance::flat(current.start, current.end, start_color, end_color, width)
-                } else {
-                    LineInstance::shaded(current.start, current.end, start_color, end_color, width)
-                });
+                out.push(LineInstance::flat(
+                    current.start,
+                    current.end,
+                    start_color,
+                    end_color,
+                    width,
+                ));
                 continue;
             };
 
@@ -4041,25 +3899,6 @@ impl Default for Style {
 }
 
 impl Style {
-    fn random(rng: &mut Rng) -> Self {
-        let axes = [
-            Vec3::new(1.0, 0.2, 0.1),
-            Vec3::new(0.15, 1.0, 0.2),
-            Vec3::new(0.1, 0.25, 1.0),
-            Vec3::new(0.7, 0.6, 0.35),
-            Vec3::new(-0.6, 0.8, 0.3),
-        ];
-        Self {
-            axis: axes[rng.range(axes.len())].normalized(),
-            twist_sign: if rng.chance(0.5) { 1.0 } else { -1.0 },
-            shear_sign: if rng.chance(0.5) { 1.0 } else { -1.0 },
-            deform_bias: 0.35 + rng.unit() * 0.95,
-            zoom_bias: 0.9 + rng.unit() * 0.25,
-            phase_rate: 0.7 + rng.unit() * 0.7,
-            jitter_bias: 0.2 + rng.unit() * 1.1,
-        }
-    }
-
     fn approach(&mut self, target: Self, dt: f32, rate: f32) {
         let blend = 1.0 - (-rate * dt).exp();
         // Do not renormalize here: opposite target axes must pass through zero
@@ -4102,43 +3941,24 @@ fn set_style_value(style: &mut Style, input: StyleInput, value: f32) {
     }
 }
 
-/// The palette assignment of one spawned figure: which clean vivid theme color
-/// each edge uses. The assignment is frozen at spawn, so the figure keeps its
-/// colors until it leaves the scene.
+/// The vivid theme color used by every edge of one model. The assignment is
+/// frozen when the model is shown, so its color does not follow the spectrum.
 #[derive(Clone, Copy, Debug)]
-struct FigureTint {
-    primary: usize,
-    secondary: Option<usize>,
+struct ModelTint {
+    accent: usize,
 }
 
-impl FigureTint {
-    /// `accent` is the accent band value at spawn; it shifts the chosen theme
-    /// color without making it follow the spectrum afterwards.
-    fn spawn(kind: FigureKind, accent: f32, rng: &mut Rng) -> Self {
-        let offset = accent_index(accent);
-        let primary = (offset + rng.range(Palette::VIVID_COUNT)) % Palette::VIVID_COUNT;
-        let secondary = kind
-            .uses_two_accents()
-            .then(|| (primary + 1 + rng.range(Palette::VIVID_COUNT - 1)) % Palette::VIVID_COUNT);
-        Self { primary, secondary }
-    }
-
-    /// A model is one coherent object, so every edge shares the accent color.
+impl ModelTint {
+    /// `accent` is the accent band value when the model appears.
     fn solid(accent: f32) -> Self {
         Self {
-            primary: accent_index(accent),
-            secondary: None,
+            accent: accent_index(accent),
         }
     }
 
-    /// RGB for one edge. The palette is sampled live so a theme crossfade
-    /// reaches figures that are already on screen.
-    fn edge_rgb(self, edge: usize, palette: &Palette) -> [f32; 3] {
-        let index = match self.secondary {
-            Some(secondary) if edge % 2 == 1 => secondary,
-            _ => self.primary,
-        };
-        let color = palette.vivid(index);
+    /// The palette is sampled live so a theme crossfade reaches the model.
+    fn edge_rgb(self, palette: &Palette) -> [f32; 3] {
+        let color = palette.vivid(self.accent);
         [
             color.components[0],
             color.components[1],
@@ -4175,23 +3995,25 @@ impl Rng {
         ((self.next() >> 40) as f32) / ((1u64 << 24) as f32)
     }
 
-    fn chance(&mut self, probability: f32) -> bool {
-        self.unit() < probability
-    }
-
     fn range(&mut self, end: usize) -> usize {
         assert!(end > 0);
         ((self.unit() * end as f32) as usize).min(end - 1)
-    }
-
-    fn signed(&mut self) -> f32 {
-        self.unit() * 2.0 - 1.0
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn loaded_visualizer() -> Visualizer {
+        let mut visualizer = Visualizer::new();
+        visualizer.load_models();
+        assert!(
+            visualizer.scene.current.is_some(),
+            "the bundled models must load"
+        );
+        visualizer
+    }
 
     #[test]
     fn detector_defaults_describe_the_onset_bank() {
@@ -4540,7 +4362,7 @@ mod tests {
 
     #[test]
     fn a_step_in_spectrum_energy_moves_lines_without_jumping_out_of_view() {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = loaded_visualizer();
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         let mut previous: Vec<[f32; 2]> = Vec::new();
@@ -4559,6 +4381,8 @@ mod tests {
             let current: Vec<[f32; 2]> = visualizer
                 .scene
                 .current
+                .as_ref()
+                .expect("the model is loaded")
                 .current
                 .iter()
                 .map(|line| [line.end.x, line.end.y])
@@ -4571,7 +4395,7 @@ mod tests {
                     .fold(0.0_f32, f32::max);
                 assert!(
                     moved < 180.0,
-                    "the figure jumped {moved} pixels in one frame"
+                    "the model jumped {moved} pixels in one frame"
                 );
             }
             previous = current;
@@ -4587,8 +4411,11 @@ mod tests {
     }
 
     #[test]
-    fn kick_snare_and_drop_actions_move_the_figure_state() {
-        let mut visualizer = Visualizer::new();
+    fn kick_snare_and_drop_actions_move_the_model_state() {
+        let mut visualizer = loaded_visualizer();
+        if visualizer.model_position().expect("models loaded").1 < 2 {
+            return;
+        }
         let settings = DetectorSettings {
             snare_flip_every: 2,
             ..DetectorSettings::default()
@@ -4615,7 +4442,7 @@ mod tests {
         assert_ne!(
             visualizer.scene_name(),
             before,
-            "a drop always changes figure"
+            "a drop always changes model"
         );
         visualizer
             .quake_y
@@ -4625,7 +4452,7 @@ mod tests {
 
     #[test]
     fn low_band_bursts_trigger_the_kick_and_quake() {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = loaded_visualizer();
         // Isolate the kick kernel so a broadband click cannot choke it
         // through the snare detector.
         visualizer.set_detector_settings(DetectorSettings {
@@ -4744,7 +4571,8 @@ mod tests {
     #[test]
     fn longer_shutter_keeps_more_of_the_recorded_motion_path() {
         fn trail(shutter: f32) -> (usize, f32) {
-            let mut visualizer = Visualizer::new();
+            let mut visualizer = loaded_visualizer();
+            visualizer.set_model_motion(ModelMotion::Swept);
             let palette = Palette::from_theme(crate::theme::ThemeId::default());
             let mut frame =
                 AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
@@ -4765,6 +4593,8 @@ mod tests {
             let exposure = visualizer
                 .scene
                 .current
+                .as_ref()
+                .expect("the model is loaded")
                 .exposure_poses(exposure_start, frame.start())
                 .expect("exposure poses");
             let movement = exposure
@@ -4789,7 +4619,7 @@ mod tests {
     #[test]
     fn near_opacity_floor_scales_below_the_line_energy_base() {
         fn peak_alpha(near_opacity: NearOpacity) -> f32 {
-            let mut visualizer = Visualizer::new();
+            let mut visualizer = loaded_visualizer();
             visualizer.set_near_opacity(near_opacity);
             visualizer.debug_music([0.0; BAND_COUNT], 0.0);
             let palette = Palette::from_theme(crate::theme::ThemeId::default());
@@ -4805,7 +4635,7 @@ mod tests {
             );
             visualizer
                 .frame()
-                .lines
+                .model_lines
                 .iter()
                 .flat_map(|line| [line.start_color[3], line.end_color[3]])
                 .fold(0.0, f32::max)
@@ -4822,7 +4652,7 @@ mod tests {
 
     #[test]
     fn edge_opacity_fades_with_projected_depth() {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = loaded_visualizer();
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         visualizer.debug_music([0.0; BAND_COUNT], 0.0);
         let frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
@@ -4836,21 +4666,21 @@ mod tests {
             1.0,
         );
         let frame = visualizer.frame();
-        assert_eq!(frame.lines.len(), 12, "the first frame is the cube edges");
+        assert!(!frame.model_lines.is_empty(), "the model has edges");
         let alphas: Vec<f32> = frame
-            .lines
+            .model_lines
             .iter()
             .flat_map(|line| [line.start_color[3], line.end_color[3]])
             .collect();
         let min = alphas.iter().copied().fold(f32::INFINITY, f32::min);
         let max = alphas.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         assert!(
-            (max / min - 2.0).abs() < 1e-4,
-            "the farthest endpoint must keep half the nearest opacity: {min}..{max}"
+            max / min > 1.05,
+            "depth fade must dim the farthest endpoint: {min}..{max}"
         );
         assert!(
             frame
-                .lines
+                .model_lines
                 .iter()
                 .any(|line| (line.start_color[3] - line.end_color[3]).abs() > 0.01),
             "an edge must interpolate between its endpoint depths"
@@ -4870,40 +4700,21 @@ mod tests {
             1.0,
             1.0,
         );
-        for edge in &visualizer.scene.current.current {
+        for edge in &visualizer
+            .scene
+            .current
+            .as_ref()
+            .expect("the model is loaded")
+            .current
+        {
             assert_eq!(edge.start_depth_opacity, 1.0);
             assert_eq!(edge.end_depth_opacity, 1.0);
         }
     }
 
     #[test]
-    fn the_tesseract_shares_one_edge_color_and_the_torus_alternates_two() {
-        let palette = Palette::from_theme(crate::theme::ThemeId::default());
-        let mut rng = Rng::new(17);
-        let tesseract = FigureTint::spawn(FigureKind::Tesseract, 0.8, &mut rng);
-        let expected = tesseract.edge_rgb(0, &palette);
-        assert!(
-            palette.vivid.iter().any(|color| {
-                let [red, green, blue, _] = color.components;
-                [red, green, blue] == expected
-            }),
-            "figure colors must be clean theme colors"
-        );
-        for edge in 0..Wireframe::build(FigureKind::Tesseract).edges().len() {
-            assert_eq!(tesseract.edge_rgb(edge, &palette), expected);
-        }
-        let torus = FigureTint::spawn(FigureKind::Torus, 0.8, &mut rng);
-        assert_ne!(torus.edge_rgb(0, &palette), torus.edge_rgb(1, &palette));
-    }
-
-    #[test]
-    fn a_spawned_figure_keeps_its_edge_colors_while_the_music_changes() {
-        let mut visualizer = Visualizer::new();
-        visualizer.scene.current.source = FigureSource::Procedural(FigureKind::Tesseract);
-        visualizer.scene.current.wireframe = Wireframe::build(FigureKind::Tesseract);
-        visualizer.scene.current.reset_temporal();
-        visualizer.scene.current.tint =
-            FigureTint::spawn(FigureKind::Tesseract, 0.8, &mut visualizer.rng);
+    fn a_model_keeps_its_edge_color_while_the_music_changes() {
+        let mut visualizer = loaded_visualizer();
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         let mut expected: Option<[f32; 3]> = None;
@@ -4923,7 +4734,7 @@ mod tests {
             frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
             let frame = visualizer.frame();
             let mut rgbs: Vec<[f32; 3]> = Vec::new();
-            for line in frame.lines {
+            for line in frame.model_lines {
                 for color in [line.start_color, line.end_color] {
                     if color[3] > 0.0 {
                         rgbs.push([color[0], color[1], color[2]]);
@@ -4939,6 +4750,13 @@ mod tests {
             }
             assert!(!rgbs.is_empty());
             let first = *expected.get_or_insert(rgbs[0]);
+            assert!(
+                palette.vivid.iter().any(|color| {
+                    let [red, green, blue, _] = color.components;
+                    [red, green, blue] == first
+                }),
+                "model colors must be clean theme colors"
+            );
             for rgb in rgbs {
                 assert_eq!(rgb, first, "edge colors changed with the music");
             }
@@ -4967,9 +4785,9 @@ mod tests {
     }
 
     #[test]
-    fn phase_rebase_preserves_tesseract_and_deformation_geometry() {
-        let wireframe = Wireframe::build(FigureKind::Tesseract);
-        let mut before = Deformation {
+    fn phase_rebase_preserves_deformation_geometry() {
+        let vertex = Vec3::new(0.6, 0.3, 0.4);
+        let before = Deformation {
             twist: 0.3,
             bulge: 0.2,
             ripple: 0.4,
@@ -4977,60 +4795,32 @@ mod tests {
             jitter: 0.02,
             phase: 0.0,
         };
-        let mut after = before;
-        after.phase = PHASE_PERIOD;
-        for index in 0..wireframe.vertex_count() {
-            let a = before.apply(wireframe.vertex(index, 0.0));
-            let b = after.apply(wireframe.vertex(index, PHASE_PERIOD));
-            assert!(
-                (a - b).length() < 0.01,
-                "phase rebase jumped vertex {index}: {a:?} vs {b:?}"
-            );
-        }
-        before.phase = TAU - 0.001;
-        after.phase = TAU + 0.001;
-        let a = before.apply(wireframe.vertex(0, TAU - 0.001));
-        let b = after.apply(wireframe.vertex(0, TAU + 0.001));
+        let after = Deformation {
+            phase: PHASE_PERIOD,
+            ..before
+        };
+        let a = before.apply(vertex);
+        let b = after.apply(vertex);
+        assert!(
+            (a - b).length() < 0.01,
+            "phase rebase jumped the vertex: {a:?} vs {b:?}"
+        );
+        let before = Deformation {
+            phase: TAU - 0.001,
+            ..before
+        };
+        let after = Deformation {
+            phase: TAU + 0.001,
+            ..after
+        };
+        let a = before.apply(vertex);
+        let b = after.apply(vertex);
         assert!((a - b).length() < 0.01);
     }
 
     #[test]
-    fn tesseract_vertices_move_continuously() {
-        let mut visualizer = Visualizer::new();
-        visualizer.scene.current.source = FigureSource::Procedural(FigureKind::Tesseract);
-        visualizer.scene.current.wireframe = Wireframe::build(FigureKind::Tesseract);
-        visualizer.scene.current.reset_temporal();
-        let palette = Palette::from_theme(crate::theme::ThemeId::default());
-        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
-        let mut previous = None;
-        let mut maximum = 0.0_f32;
-        for _ in 0..240 {
-            visualizer.debug_music([0.4; BAND_COUNT], 0.4);
-            visualizer.update(
-                frame,
-                ShutterFrames::try_from(2.0).unwrap(),
-                1.0 / 60.0,
-                &palette,
-                (1280.0, 440.0),
-                1.0,
-                1.0,
-            );
-            let current = visualizer.scene.current.vertices[0].screen;
-            if let Some(previous) = previous {
-                maximum = maximum.max((current - previous).length());
-            }
-            previous = Some(current);
-            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
-        }
-        assert!(
-            maximum < 120.0,
-            "the tesseract vertex jumped {maximum} pixels in one frame"
-        );
-    }
-
-    #[test]
     fn diagnosis_appears_on_a_vertex_and_follows_it_lazily() {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = loaded_visualizer();
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         visualizer.diagnosis.next_in = 0.0;
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
@@ -5054,6 +4844,8 @@ mod tests {
                 let vertex = visualizer
                     .scene
                     .current
+                    .as_ref()
+                    .expect("the model is loaded")
                     .vertices
                     .iter()
                     .enumerate()
@@ -5093,7 +4885,8 @@ mod tests {
 
     #[test]
     fn debug_snapshot_exposes_all_analysis_layers() {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = loaded_visualizer();
+        visualizer.set_model_motion(ModelMotion::Swept);
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         for _ in 0..3 {
@@ -5154,7 +4947,7 @@ mod tests {
 
     #[test]
     fn property_mute_and_solo_gate_scene_effects() {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = loaded_visualizer();
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         let mut step = |visualizer: &mut Visualizer| {
@@ -5173,7 +4966,7 @@ mod tests {
         step(&mut visualizer);
         let live = visualizer.debug_snapshot();
         assert!(live.properties[Property::Spin.index()] > 0.0);
-        assert!(live.properties[Property::Twist.index()].abs() > 0.0);
+        assert!(live.properties[Property::Morph.index()] > 0.0);
 
         visualizer.toggle_property_mute(Property::Spin);
         step(&mut visualizer);
@@ -5187,16 +4980,16 @@ mod tests {
         step(&mut visualizer);
         let solo = visualizer.debug_snapshot();
         assert!(solo.properties[Property::Spin.index()] > 0.0);
-        assert_eq!(solo.properties[Property::Twist.index()], 0.0);
+        assert_eq!(solo.properties[Property::Morph.index()], 0.0);
         assert_eq!(solo.properties[Property::Line.index()], 1.0);
         assert_eq!(solo.properties[Property::Entrance.index()], 1.0);
         assert_eq!(solo.properties[Property::Morph.index()], 0.0);
         assert!(visualizer.property_soloed(Property::Spin));
-        assert!(!visualizer.property_active(Property::Twist));
+        assert!(!visualizer.property_active(Property::Morph));
 
         visualizer.toggle_property_solo(Property::Spin);
         step(&mut visualizer);
-        assert!(visualizer.debug_snapshot().properties[Property::Twist.index()].abs() > 0.0);
+        assert!(visualizer.debug_snapshot().properties[Property::Morph.index()] > 0.0);
     }
 
     #[test]
@@ -5330,13 +5123,37 @@ mod tests {
     }
 
     #[test]
-    fn a_pinned_style_value_reaches_every_spawned_figure() {
-        let mut visualizer = Visualizer::new();
+    fn a_pinned_style_value_survives_a_model_change() {
+        let mut visualizer = loaded_visualizer();
         visualizer.set_parameter(Parameter::Style(StyleInput::DeformBias), 1.25);
+        assert!(
+            (visualizer
+                .scene
+                .current
+                .as_ref()
+                .expect("the model is loaded")
+                .target_style
+                .deform_bias
+                - 1.25)
+                .abs()
+                < 1e-6
+        );
+        if visualizer.model_position().expect("models loaded").1 < 2 {
+            return;
+        }
         visualizer.handle_action(Action::Drop(1.0), 0.5);
         assert!(
-            (visualizer.scene.current.target_style.deform_bias - 1.25).abs() < 1e-6,
-            "the drop keeps the tuned style value"
+            (visualizer
+                .scene
+                .current
+                .as_ref()
+                .expect("the next model is loaded")
+                .target_style
+                .deform_bias
+                - 1.25)
+                .abs()
+                < 1e-6,
+            "the model change keeps the tuned style value"
         );
     }
 
@@ -5510,16 +5327,6 @@ mod tests {
     }
 
     #[test]
-    fn presentation_cycles_gauges_figures_and_weapon() {
-        assert_eq!(Presentation::Gauges.next(), Presentation::Visualizer);
-        assert_eq!(Presentation::Visualizer.next(), Presentation::Weapon);
-        assert_eq!(Presentation::Weapon.next(), Presentation::Gauges);
-        assert!(Presentation::Visualizer.shows_visualizer());
-        assert!(Presentation::Weapon.shows_visualizer());
-        assert!(!Presentation::Gauges.shows_visualizer());
-    }
-
-    #[test]
     fn crease_threshold_steps_and_clamps() {
         let mut threshold = CreaseThreshold::default();
         assert_eq!(threshold.whole_degrees(), 45);
@@ -5539,12 +5346,12 @@ mod tests {
     }
 
     #[test]
-    fn drops_and_the_hotkey_advance_the_showcase_model() {
+    fn drops_and_the_hotkey_advance_the_model() {
         let mut visualizer = Visualizer::new();
-        visualizer.set_presentation(Presentation::Weapon);
+        visualizer.load_models();
         let (_, total) = visualizer
             .model_position()
-            .expect("the showcase has loaded models");
+            .expect("the model directory has loaded models");
         if total < 2 {
             return;
         }
@@ -5637,7 +5444,8 @@ mod tests {
 
     #[test]
     fn motion_blur_draws_covered_ribbons_at_rest() -> anyhow::Result<()> {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = loaded_visualizer();
+        visualizer.set_model_motion(ModelMotion::Swept);
         let palette = Palette::from_theme(ThemeId::default());
         let shutter = ShutterFrames::try_from(2.0)?;
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
@@ -5657,7 +5465,7 @@ mod tests {
         let frame = visualizer.frame();
         assert!(
             frame.lines.is_empty(),
-            "figure motion blur draws swept ribbons at every speed"
+            "model motion blur draws swept ribbons at every speed"
         );
         assert!(!frame.ribbons.is_empty());
         assert!(
@@ -5669,7 +5477,8 @@ mod tests {
 
     #[test]
     fn slow_wide_edges_keep_only_the_body() -> anyhow::Result<()> {
-        let mut visualizer = Visualizer::new();
+        let mut visualizer = loaded_visualizer();
+        visualizer.set_model_motion(ModelMotion::Swept);
         visualizer.set_line_width(LineWidth::try_from(3.0)?);
         let palette = Palette::from_theme(ThemeId::default());
         let shutter = ShutterFrames::try_from(2.0)?;
@@ -5808,7 +5617,7 @@ mod tests {
     #[test]
     fn model_motion_blur_can_be_toggled() -> anyhow::Result<()> {
         let mut visualizer = Visualizer::new();
-        visualizer.set_presentation(Presentation::Weapon);
+        visualizer.load_models();
         let palette = Palette::from_theme(ThemeId::default());
         let shutter = ShutterFrames::try_from(4.0)?;
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
@@ -5828,14 +5637,14 @@ mod tests {
 
         step(&mut visualizer);
         assert!(!visualizer.frame().model_lines.is_empty());
-        assert!(visualizer.frame().model_ribbons.is_empty());
+        assert!(visualizer.frame().ribbons.is_empty());
 
         visualizer.set_model_motion(ModelMotion::Swept);
         for _ in 0..4 {
             step(&mut visualizer);
         }
         assert!(
-            !visualizer.frame().model_ribbons.is_empty(),
+            !visualizer.frame().ribbons.is_empty(),
             "fast model edges should sweep"
         );
         assert!(
@@ -5846,14 +5655,14 @@ mod tests {
         visualizer.set_model_motion(ModelMotion::Still);
         step(&mut visualizer);
         assert!(!visualizer.frame().model_lines.is_empty());
-        assert!(visualizer.frame().model_ribbons.is_empty());
+        assert!(visualizer.frame().ribbons.is_empty());
         Ok(())
     }
 
     #[test]
     fn line_width_scales_the_model_strokes() -> anyhow::Result<()> {
         let mut visualizer = Visualizer::new();
-        visualizer.set_presentation(Presentation::Weapon);
+        visualizer.load_models();
         let palette = Palette::from_theme(ThemeId::default());
         let frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         let step = |visualizer: &mut Visualizer| {
@@ -5878,13 +5687,11 @@ mod tests {
     }
 
     #[test]
-    fn weapon_showcase_swaps_figures_for_the_model_wireframe() -> anyhow::Result<()> {
+    fn models_replace_the_initial_scene() -> anyhow::Result<()> {
         let mut visualizer = Visualizer::new();
-        visualizer.set_presentation(Presentation::Weapon);
-        assert_eq!(visualizer.presentation, Presentation::Weapon);
-        assert_ne!(visualizer.scene_name(), "Cube");
+        visualizer.load_models();
         assert!(!visualizer.scene_name().is_empty());
-        assert!(visualizer.scene.current.is_showcase());
+        assert!(visualizer.scene.current.is_some());
 
         let palette = Palette::from_theme(ThemeId::default());
         let frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
@@ -5932,10 +5739,6 @@ mod tests {
         );
         let coarse = visualizer.frame();
         assert!(coarse.lines.len() + coarse.model_lines.len() < fine);
-
-        visualizer.set_presentation(Presentation::Visualizer);
-        assert!(!visualizer.scene.current.is_showcase());
-        assert_eq!(visualizer.scene_name(), "Cube");
         Ok(())
     }
 }
