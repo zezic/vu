@@ -2185,6 +2185,13 @@ pub(super) fn scene_analyzer_layout(view: &View, text_scale: VisualizerTextScale
         Parameter::FocusDamping,
         Parameter::MotionStiffness,
         Parameter::MotionDamping,
+        Parameter::OrbitStepMin,
+        Parameter::OrbitStepMax,
+        Parameter::FovStepMin,
+        Parameter::FovStepMax,
+        Parameter::OrbitSpeed,
+        Parameter::DollyDepth,
+        Parameter::DollyPeriod,
         Parameter::OrbitStiffness,
         Parameter::OrbitDamping,
         Parameter::DollyStiffness,
@@ -2193,6 +2200,8 @@ pub(super) fn scene_analyzer_layout(view: &View, text_scale: VisualizerTextScale
         Parameter::SelectorFadeIn,
         Parameter::SelectorFadeOut,
         Parameter::SelectorColorChance,
+        Parameter::SelectorExitTriggers,
+        Parameter::SelectorGapTimeout,
     ];
     let action_rows = Vec::new();
     let sliders = slider_rows(

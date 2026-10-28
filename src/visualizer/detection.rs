@@ -2349,6 +2349,15 @@ impl Spring {
         self.value
     }
 
+    #[cfg(test)]
+    pub fn target(&self) -> f32 {
+        self.target
+    }
+
+    pub fn velocity(&self) -> f32 {
+        self.velocity
+    }
+
     pub fn set_target(&mut self, target: f32) {
         self.target = target;
     }

@@ -823,6 +823,13 @@ pub enum Parameter {
     FocusDamping,
     MotionStiffness,
     MotionDamping,
+    OrbitStepMin,
+    OrbitStepMax,
+    FovStepMin,
+    FovStepMax,
+    OrbitSpeed,
+    DollyDepth,
+    DollyPeriod,
     OrbitStiffness,
     OrbitDamping,
     DollyStiffness,
@@ -831,6 +838,8 @@ pub enum Parameter {
     SelectorFadeIn,
     SelectorFadeOut,
     SelectorColorChance,
+    SelectorExitTriggers,
+    SelectorGapTimeout,
     Attack(EnvelopeTarget),
     Release(EnvelopeTarget),
     KickDecay,
@@ -881,6 +890,13 @@ impl Parameter {
             Self::FocusDamping => "FOCUS D",
             Self::MotionStiffness => "MOTION K",
             Self::MotionDamping => "MOTION D",
+            Self::OrbitStepMin => "ORBIT MIN",
+            Self::OrbitStepMax => "ORBIT MAX",
+            Self::FovStepMin => "FOV MIN",
+            Self::FovStepMax => "FOV MAX",
+            Self::OrbitSpeed => "ORBIT SPEED",
+            Self::DollyDepth => "DOLLY DEPTH",
+            Self::DollyPeriod => "DOLLY TIME",
             Self::OrbitStiffness => "ORBIT K",
             Self::OrbitDamping => "ORBIT D",
             Self::DollyStiffness => "DOLLY K",
@@ -889,6 +905,8 @@ impl Parameter {
             Self::SelectorFadeIn => "SEL FADE IN",
             Self::SelectorFadeOut => "SEL FADE OUT",
             Self::SelectorColorChance => "SEL COLOR %",
+            Self::SelectorExitTriggers => "SEL EXIT N",
+            Self::SelectorGapTimeout => "SEL GAP s",
             Self::Attack(_) => "ATTACK",
             Self::Release(_) => "RELEASE",
             Self::KickDecay => "DECAY",
@@ -948,6 +966,14 @@ impl Parameter {
             | Self::MotionDamping
             | Self::OrbitDamping
             | Self::DollyDamping => (super::SPRING_DAMPING_MIN, super::SPRING_DAMPING_MAX),
+            Self::OrbitStepMin | Self::OrbitStepMax => (0.0, super::showcase::POI_ORBIT_STEP_MAX),
+            Self::FovStepMin | Self::FovStepMax => (0.0, super::showcase::POI_FOV_STEP_MAX),
+            Self::OrbitSpeed => (0.0, super::showcase::POI_ORBIT_SPEED_MAX),
+            Self::DollyDepth => (0.0, super::showcase::POI_DOLLY_DEPTH_MAX),
+            Self::DollyPeriod => (
+                super::showcase::POI_DOLLY_PERIOD_MIN,
+                super::showcase::POI_DOLLY_PERIOD_MAX,
+            ),
             Self::SelectorAttenuation | Self::SelectorColorChance => (0.0, 1.0),
             Self::SelectorFadeIn => (
                 super::showcase::SELECTOR_FADE_IN_MIN,
@@ -956,6 +982,14 @@ impl Parameter {
             Self::SelectorFadeOut => (
                 super::showcase::SELECTOR_FADE_OUT_MIN,
                 super::showcase::SELECTOR_FADE_OUT_MAX,
+            ),
+            Self::SelectorExitTriggers => (
+                super::showcase::SELECTOR_EXIT_TRIGGERS_MIN as f32,
+                super::showcase::SELECTOR_EXIT_TRIGGERS_MAX as f32,
+            ),
+            Self::SelectorGapTimeout => (
+                super::showcase::SELECTOR_GAP_TIMEOUT_MIN,
+                super::showcase::SELECTOR_GAP_TIMEOUT_MAX,
             ),
             Self::DropGapWindow => (super::DROP_GAP_WINDOW_MIN, super::DROP_GAP_WINDOW_MAX),
             Self::DropGapGain => (super::DROP_GAP_GAIN_MIN, super::DROP_GAP_GAIN_MAX),
@@ -1017,7 +1051,14 @@ impl Parameter {
             | Self::OrbitDamping
             | Self::DollyStiffness
             | Self::DollyDamping => 0.5,
-            Self::SelectorFadeIn | Self::SelectorFadeOut => 0.005,
+            Self::SelectorFadeIn | Self::SelectorFadeOut | Self::SelectorGapTimeout => 0.005,
+            Self::SelectorExitTriggers => 1.0,
+            Self::OrbitStepMin | Self::OrbitStepMax | Self::FovStepMin | Self::FovStepMax => {
+                std::f32::consts::PI / 180.0
+            }
+            Self::OrbitSpeed => std::f32::consts::PI / 360.0,
+            Self::DollyDepth => 0.01,
+            Self::DollyPeriod => 0.5,
             Self::SelectorAttenuation | Self::SelectorColorChance => 0.01,
             Self::Attack(_) | Self::Release(_) => 0.5,
             Self::KickDecay => 0.1,
@@ -1056,6 +1097,14 @@ impl Parameter {
             Self::SelectorAttenuation | Self::SelectorColorChance => {
                 format!("{:.0}%", value * 100.0)
             }
+            Self::SelectorExitTriggers => format!("{value:.0}"),
+            Self::OrbitStepMin | Self::OrbitStepMax | Self::FovStepMin | Self::FovStepMax => {
+                format!("{:.0}deg", value.to_degrees())
+            }
+            Self::OrbitSpeed => format!("{:.1}deg/s", value.to_degrees()),
+            Self::DollyDepth => format!("{:.0}%", value * 100.0),
+            Self::DollyPeriod => format!("{:.1}s", value),
+            Self::SelectorGapTimeout => format!("{value:.1}s"),
             Self::BandSource(_) => format!("B{:02}", value.round() as usize),
             Self::KickSequenceEvery | Self::SnareFlipEvery | Self::SnarePoiSwitches => {
                 format!("{value:.0}")

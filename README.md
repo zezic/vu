@@ -41,7 +41,8 @@ On macOS, allow system audio recording when prompted.
 - `,` / `.` - decrease or increase the model crease threshold in 5 degree steps,
   from 10 to 80 degrees. Lower values keep more mesh edges; the setting persists
   in the config file.
-- `\` - advance to the next model. Energy drops advance it too.
+- `\` - advance to the next model. Energy drops also advance it and toggle
+  between normal and POI showcase modes.
 - `T` - toggle analytical motion blur. The setting persists in the config file.
 - `;` / `'` - decrease or increase the base line width in 10% steps, from 10%
   to 300%. The setting persists in the config file.
@@ -67,26 +68,50 @@ edges use flat square caps.
 The model runs in either normal mode or POI focus mode. Normal mode keeps the
 usual spin and flips. In POI focus mode, the camera frames a semantic point of
 interest, the normal model motion fades out over its own spring, and each kick
-adds a random yaw and pitch step while choosing a random FOV. The FOV and camera
-distance move together, so the POI keeps its size while the surrounding model
-undergoes a dolly zoom.
+adds a signed random yaw and pitch step while changing FOV by a random step.
+Both use a signed magnitude between a minimum and a maximum (`ORBIT MIN`
+default 20 deg / `ORBIT MAX` 45 deg, and `FOV MIN` default 10 deg / `FOV MAX`
+20 deg). The same range seeds a fresh signed orbit when entering POI mode and when
+switching to another POI: the new target is chosen within the range and placed on the shortest
+angular path from the current angle, so accumulated rotation is not carried
+into the next POI. The FOV stays inside 30-120 deg. The FOV and camera distance move
+together, so the POI keeps its size while the surrounding model undergoes a
+dolly zoom. Kicks are ignored until the entry spring has settled, so the
+initial flight is never interrupted by a kick-driven orbit or FOV change. After settling,
+POI mode also runs a slow continuous yaw orbit (`ORBIT SPEED`, default 6 deg/s)
+and a slow in/out dolly (`DOLLY DEPTH`, default 15%, over `DOLLY TIME`, default
+12 s). Kicks do not shake the camera while the showcase is in POI mode.
 Empty POIs use their scaled cube as the framing volume; mesh POIs are framed
-and drawn in a contrasting color. The `ejection_port` empty also pulls the
-`slide` mesh and its children backward by the port length.
+and drawn in a contrasting color. When the focused POI is a mesh, every other
+mesh part fades to the selector attenuation (`SEL ATTEN`, default 12%) using
+the selector fade-in/fade-out times, while the POI mesh keeps full opacity.
+Empty POIs leave all meshes at full opacity. The `ejection_port` empty also
+pulls the `slide` mesh and its children backward by the port length.
 
 Snares drive the mode cycle. The `NORMAL FLIPS` setting counts the flips before
 POI mode starts, and `POI SWITCHES` counts the POI changes before normal mode
-returns. A gap-confidence entry always returns to normal mode and resets the
-cycle. All cycle and spring settings live in the analyzer panel: `SNARE` holds
-the two counters, and the `SCENE` panel holds separate motion, focus, orbit,
-and dolly springs plus the selector timing and attenuation controls.
+returns. A confirmed drop also toggles the mode: normal switches to POI focus,
+and POI focus returns to normal. The drop still advances the model, so the
+entry is resolved against the newly selected model; if that model has no
+resolvable POIs, normal mode remains. A gap-confidence entry always returns to
+normal mode and resets the cycle. All cycle and spring settings live in the
+analyzer panel: `SNARE` holds the two counters, and the `SCENE` panel holds
+separate motion, focus, orbit, and dolly springs, the slow orbit/dolly controls,
+the per-kick step ranges, and the selector timing and attenuation controls.
 
-The selector effect is available only in normal mode. A kick enables it; any
-other non-hat trigger, including a later kick, disables it. While active it
-keeps one mesh at full opacity, fades the other meshes to the configured
-attenuation, and has a 25% chance to color the selected mesh differently. The
-`HAT` detector selects the next mesh and has its own pattern editor; it is
-independent of the snare and drop detectors.
+The selector effect is available only in normal mode. A kick enables it. While
+active it keeps one mesh at full opacity, fades the other meshes to the
+configured attenuation (the same amount used for mesh POIs), and has a 25% chance to color the selected mesh
+differently. Kicks and snares count toward an exit threshold (`SEL EXIT N`,
+default 20); the trigger that reaches the threshold turns the selector off. A
+drop or a model change turns it off immediately. Gap-confidence entry no longer
+turns it off: the selector turns off only after the gap-confidence latch stays
+armed continuously for `SEL GAP s` (default 10 s), and clearing the gap resets
+that timer. The `HAT` detector only changes the selected mesh and never exits
+the selector. Snares do not flip the model while the selector is active; the
+snare that reaches the exit threshold also does not add a flip. The `HAT`
+detector has its own pattern editor and is independent of the snare and drop
+detectors.
 
 Edge opacity follows vertex depth: nearest vertices use the adjustable
 near-opacity floor (60% by default, brightened by line energy), farther vertices

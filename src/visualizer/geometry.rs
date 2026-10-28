@@ -387,8 +387,8 @@ impl Camera {
         let target = pose.orient(focus.target) * focus.blend;
         let relative = posed - target;
         let rotated = relative
-            .rotate_y(focus.yaw * focus.blend)
-            .rotate_x(focus.pitch * focus.blend);
+            .rotate_y(focus.rotation_yaw)
+            .rotate_x(focus.rotation_pitch);
         let distance = pose.distance + (focus.distance - pose.distance) * focus.blend;
         let focal = self.focal + (focus.focal - self.focal) * focus.blend;
         let focused_near = (focus.distance * 0.05).max(0.001);
@@ -419,13 +419,34 @@ impl Camera {
     }
 }
 
+/// Folds an unbounded angle into the closest representation around zero.
+pub fn wrap_angle(angle: f32) -> f32 {
+    (angle + std::f32::consts::TAU * 0.5).rem_euclid(std::f32::consts::TAU)
+        - std::f32::consts::TAU * 0.5
+}
+
+/// Angles that place the camera on the outward side of a model-space target.
+/// The returned rotation maps the target direction to view-space -Z.
+pub(super) fn focus_base_angles(target: Vec3) -> (f32, f32) {
+    let horizontal = (target.x * target.x + target.z * target.z).sqrt();
+    if target.length() <= 1e-4 {
+        return (0.0, 0.0);
+    }
+    let yaw = target.x.atan2(-target.z);
+    let pitch = -target.y.atan2(horizontal);
+    (yaw, pitch)
+}
+
 /// A partially blended POI view applied after the model pose.
+
 #[derive(Clone, Copy, Debug)]
 pub struct FocusProjection {
     /// POI center in model space.
     pub target: Vec3,
-    pub yaw: f32,
-    pub pitch: f32,
+    /// Effective focus rotation in view space. Callers apply the entry or
+    /// exit blend before filling these.
+    pub rotation_yaw: f32,
+    pub rotation_pitch: f32,
     /// Camera distance for the focused framing.
     pub distance: f32,
     /// Camera focal length for the focused FOV.
@@ -551,8 +572,8 @@ mod tests {
         let target = Vec3::new(0.2, 0.1, -0.1);
         let focus = FocusProjection {
             target,
-            yaw: 0.6,
-            pitch: 0.3,
+            rotation_yaw: 0.6,
+            rotation_pitch: 0.3,
             distance: 3.0,
             focal: camera.focal_for_fov(0.7),
             blend: 1.0,
@@ -569,8 +590,8 @@ mod tests {
         let vertex = Vec3::new(0.4, -0.2, 0.3);
         let focus = FocusProjection {
             target: Vec3::new(0.2, 0.1, -0.1),
-            yaw: 0.6,
-            pitch: 0.3,
+            rotation_yaw: 0.0,
+            rotation_pitch: 0.0,
             distance: 3.0,
             focal: camera.focal_for_fov(0.7),
             blend: 0.0,
@@ -582,13 +603,31 @@ mod tests {
     }
 
     #[test]
+    fn focus_base_angles_place_the_camera_on_the_outward_side() {
+        for target in [
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.1, 0.2, -0.3),
+        ] {
+            let (yaw, pitch) = focus_base_angles(target);
+            let rotated = (target * (1.0 / target.length()))
+                .rotate_y(yaw)
+                .rotate_x(pitch);
+            assert!(rotated.x.abs() < 1e-4);
+            assert!(rotated.y.abs() < 1e-4);
+            assert!((rotated.z + 1.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
     fn focused_projection_marks_vertices_behind_the_camera_invisible() {
         let camera = Camera::new(1280.0, 440.0, 1.0);
         let pose = Pose::default();
         let focus = FocusProjection {
             target: Vec3::new(0.0, 0.0, 0.0),
-            yaw: 0.0,
-            pitch: 0.0,
+            rotation_yaw: 0.0,
+            rotation_pitch: 0.0,
             distance: 0.1,
             focal: camera.focal_for_fov(2.0),
             blend: 1.0,

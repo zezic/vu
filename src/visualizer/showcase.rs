@@ -1,6 +1,6 @@
 //! Normal and POI-focused showcase modes, with the selector effect state.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, f32::consts::TAU};
 
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +9,7 @@ use super::{
     detection::{
         Spring, SPRING_DAMPING_MAX, SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX, SPRING_STIFFNESS_MIN,
     },
-    geometry::Vec3,
+    geometry::{wrap_angle, Vec3},
     model::Anchor,
     Rng,
 };
@@ -20,15 +20,34 @@ pub const SELECTOR_FADE_IN_MIN: f32 = 0.01;
 pub const SELECTOR_FADE_IN_MAX: f32 = 2.0;
 pub const SELECTOR_FADE_OUT_MIN: f32 = 0.005;
 pub const SELECTOR_FADE_OUT_MAX: f32 = 0.5;
+pub const SELECTOR_EXIT_TRIGGERS_MIN: u32 = 1;
+pub const SELECTOR_EXIT_TRIGGERS_MAX: u32 = 100;
+pub const SELECTOR_GAP_TIMEOUT_MIN: f32 = 1.0;
+pub const SELECTOR_GAP_TIMEOUT_MAX: f32 = 60.0;
 
 /// Fraction of the viewport half-extent used by the focused POI. Leaves 15%
 /// padding on each side.
 const FOCUS_FILL: f32 = 0.70;
-const POI_STEP_MIN: f32 = 0.0;
-const POI_STEP_MAX: f32 = std::f32::consts::FRAC_PI_2;
+pub const POI_ORBIT_STEP_MAX: f32 = std::f32::consts::FRAC_PI_2;
+pub const POI_ORBIT_STEP_DEFAULT: f32 = std::f32::consts::FRAC_PI_4;
+pub const POI_ORBIT_STEP_MIN_DEFAULT: f32 = std::f32::consts::PI / 9.0;
+pub const POI_FOV_STEP_MAX: f32 = std::f32::consts::FRAC_PI_2;
+pub const POI_FOV_STEP_DEFAULT: f32 = std::f32::consts::PI / 9.0;
+pub const POI_FOV_STEP_MIN_DEFAULT: f32 = std::f32::consts::PI / 18.0;
+pub const POI_ORBIT_SPEED_DEFAULT: f32 = std::f32::consts::PI / 30.0;
+pub const POI_ORBIT_SPEED_MAX: f32 = std::f32::consts::PI / 6.0;
+pub const POI_DOLLY_DEPTH_DEFAULT: f32 = 0.15;
+pub const POI_DOLLY_DEPTH_MAX: f32 = 0.5;
+pub const POI_DOLLY_PERIOD_DEFAULT: f32 = 12.0;
+pub const POI_DOLLY_PERIOD_MIN: f32 = 2.0;
+pub const POI_DOLLY_PERIOD_MAX: f32 = 60.0;
 const POI_FOV_MIN: f32 = 30.0_f32.to_radians();
 const POI_FOV_MAX: f32 = 120.0_f32.to_radians();
 const RECENT_POIS: usize = 2;
+/// The entry blend must be both visually complete and nearly motionless
+/// before kick-driven orbit and FOV changes are accepted.
+const ENTRY_SETTLED_BLEND: f32 = 0.999;
+const ENTRY_SETTLED_VELOCITY: f32 = 0.02;
 
 /// Every tunable showcase parameter. Stored with the rest of the inspector
 /// tuning so the settings survive a restart.
@@ -41,20 +60,39 @@ pub struct ShowcaseSettings {
     /// Slower spring that fades the model's spin, flip, and pulse out.
     pub motion_stiffness: f32,
     pub motion_damping: f32,
+    /// Smallest signed yaw or pitch target step magnitude per kick.
+    pub orbit_step_min: f32,
+    /// Largest signed yaw or pitch target step magnitude per kick.
+    pub orbit_step_max: f32,
+    /// Smallest absolute FOV target change per kick.
+    pub fov_step_min: f32,
+    /// Largest absolute FOV target change per kick.
+    pub fov_step_max: f32,
+    /// Slow automatic orbit yaw speed while POI mode is settled, rad/s.
+    pub orbit_speed: f32,
+    /// Slow automatic dolly depth as a fraction of the focus distance.
+    pub dolly_depth: f32,
+    /// Seconds for one slow dolly in/out cycle.
+    pub dolly_period: f32,
     /// Spring for the POI yaw and pitch orbit.
     pub orbit_stiffness: f32,
     pub orbit_damping: f32,
     /// Spring for the POI FOV and compensating dolly distance.
     pub dolly_stiffness: f32,
     pub dolly_damping: f32,
-    /// Opacity multiplier for meshes beside the selected one.
+    /// Opacity multiplier for meshes beside the selector, or beside a mesh
+    /// POI while focus mode is active.
     pub selector_attenuation: f32,
-    /// Seconds to fade other meshes out when the selector turns on.
+    /// Seconds to fade the other meshes out when a mesh effect turns on.
     pub selector_fade_in: f32,
     /// Seconds to bring other meshes back when the selector turns off.
     pub selector_fade_out: f32,
     /// Chance that the selected mesh uses a different palette color.
     pub selector_color_chance: f32,
+    /// Kick/snare triggers required before the selector turns off.
+    pub selector_exit_triggers: u32,
+    /// Continuous seconds of armed gap confidence before the selector turns off.
+    pub selector_gap_timeout: f32,
 }
 
 impl Default for ShowcaseSettings {
@@ -64,6 +102,13 @@ impl Default for ShowcaseSettings {
             focus_damping: 18.0,
             motion_stiffness: 12.0,
             motion_damping: 7.0,
+            orbit_step_min: POI_ORBIT_STEP_MIN_DEFAULT,
+            orbit_step_max: POI_ORBIT_STEP_DEFAULT,
+            fov_step_min: POI_FOV_STEP_MIN_DEFAULT,
+            fov_step_max: POI_FOV_STEP_DEFAULT,
+            orbit_speed: POI_ORBIT_SPEED_DEFAULT,
+            dolly_depth: POI_DOLLY_DEPTH_DEFAULT,
+            dolly_period: POI_DOLLY_PERIOD_DEFAULT,
             orbit_stiffness: 70.0,
             orbit_damping: 16.0,
             dolly_stiffness: 55.0,
@@ -72,6 +117,8 @@ impl Default for ShowcaseSettings {
             selector_fade_in: 0.30,
             selector_fade_out: 0.045,
             selector_color_chance: 0.25,
+            selector_exit_triggers: 20,
+            selector_gap_timeout: 10.0,
         }
     }
 }
@@ -95,6 +142,33 @@ impl ShowcaseSettings {
             validate_value(value, (SPRING_DAMPING_MIN, SPRING_DAMPING_MAX), name)?;
         }
         validate_value(
+            self.orbit_step_min,
+            (0.0, POI_ORBIT_STEP_MAX),
+            "orbit step min",
+        )?;
+        validate_value(
+            self.orbit_step_max,
+            (0.0, POI_ORBIT_STEP_MAX),
+            "orbit step max",
+        )?;
+        validate_value(self.fov_step_min, (0.0, POI_FOV_STEP_MAX), "FOV step min")?;
+        validate_value(self.fov_step_max, (0.0, POI_FOV_STEP_MAX), "FOV step max")?;
+        anyhow::ensure!(
+            self.orbit_step_min <= self.orbit_step_max,
+            "orbit step min must not exceed orbit step max"
+        );
+        anyhow::ensure!(
+            self.fov_step_min <= self.fov_step_max,
+            "FOV step min must not exceed FOV step max"
+        );
+        validate_value(self.orbit_speed, (0.0, POI_ORBIT_SPEED_MAX), "orbit speed")?;
+        validate_value(self.dolly_depth, (0.0, POI_DOLLY_DEPTH_MAX), "dolly depth")?;
+        validate_value(
+            self.dolly_period,
+            (POI_DOLLY_PERIOD_MIN, POI_DOLLY_PERIOD_MAX),
+            "dolly period",
+        )?;
+        validate_value(
             self.selector_attenuation,
             (SELECTOR_ATTENUATION_MIN, SELECTOR_ATTENUATION_MAX),
             "selector attenuation",
@@ -113,6 +187,16 @@ impl ShowcaseSettings {
             self.selector_color_chance,
             (0.0, 1.0),
             "selector color chance",
+        )?;
+        anyhow::ensure!(
+            (SELECTOR_EXIT_TRIGGERS_MIN..=SELECTOR_EXIT_TRIGGERS_MAX)
+                .contains(&self.selector_exit_triggers),
+            "selector exit triggers must be between {SELECTOR_EXIT_TRIGGERS_MIN} and {SELECTOR_EXIT_TRIGGERS_MAX}"
+        );
+        validate_value(
+            self.selector_gap_timeout,
+            (SELECTOR_GAP_TIMEOUT_MIN, SELECTOR_GAP_TIMEOUT_MAX),
+            "selector gap timeout",
         )?;
         Ok(())
     }
@@ -155,6 +239,10 @@ pub struct FocusView {
     pub radius: f32,
     pub orbit_yaw: f32,
     pub orbit_pitch: f32,
+    /// Continuous slow orbit added on top of the kick orbit, in radians.
+    pub orbit_drift_yaw: f32,
+    /// Multiplier applied to the focus distance for the slow in/out dolly.
+    pub dolly_scale: f32,
     pub fov: f32,
     pub blend: f32,
     /// One keeps the normal model motion, zero fades it fully out.
@@ -185,6 +273,8 @@ impl SelectorView {
 pub struct ShowcaseFrame {
     pub focus: FocusView,
     pub highlight_part: Option<u16>,
+    /// Opacity multiplier for every mesh part except `highlight_part`.
+    pub mesh_attenuation: f32,
     /// Translation applied to the slide subtree in normalized model space.
     pub slide_offset: Vec3,
     pub selector: SelectorView,
@@ -194,11 +284,15 @@ pub struct Showcase {
     settings: ShowcaseSettings,
     mode: ShowcaseMode,
     blend: Spring,
+    entry_settled: bool,
     motion: Spring,
     center: [Spring; 3],
     radius: Spring,
     orbit_yaw: Spring,
     orbit_pitch: Spring,
+    orbit_drift_yaw: f32,
+    dolly_phase: f32,
+    mesh_fade: f32,
     fov: Spring,
     slide: Spring,
     target: Option<FocusPoi>,
@@ -208,6 +302,7 @@ pub struct Showcase {
     normal_flips: u32,
     poi_switches: u32,
     selector: SelectorState,
+    gap_armed: bool,
     part_count: u16,
     slide_distance: f32,
 }
@@ -218,6 +313,7 @@ impl Showcase {
             settings,
             mode: ShowcaseMode::Normal,
             blend: Spring::default(),
+            entry_settled: false,
             motion: {
                 let mut spring = Spring::default();
                 spring.reset(1.0);
@@ -227,6 +323,9 @@ impl Showcase {
             radius: Spring::default(),
             orbit_yaw: Spring::default(),
             orbit_pitch: Spring::default(),
+            orbit_drift_yaw: 0.0,
+            dolly_phase: 0.0,
+            mesh_fade: 0.0,
             fov: Spring::default(),
             slide: Spring::default(),
             target: None,
@@ -236,6 +335,7 @@ impl Showcase {
             normal_flips: 0,
             poi_switches: 0,
             selector: SelectorState::default(),
+            gap_armed: false,
             part_count: 0,
             slide_distance: 0.0,
         }
@@ -293,6 +393,7 @@ impl Showcase {
         self.recent.clear();
         self.mode = ShowcaseMode::Normal;
         self.blend.reset(0.0);
+        self.entry_settled = false;
         self.motion.reset(1.0);
         for spring in &mut self.center {
             spring.reset(0.0);
@@ -300,11 +401,15 @@ impl Showcase {
         self.radius.reset(0.0);
         self.orbit_yaw.reset(0.0);
         self.orbit_pitch.reset(0.0);
+        self.orbit_drift_yaw = 0.0;
+        self.dolly_phase = 0.0;
+        self.mesh_fade = 0.0;
         self.fov.reset(0.0);
         self.slide.reset(0.0);
         self.normal_flips = 0;
         self.poi_switches = 0;
         self.selector = SelectorState::default();
+        self.gap_armed = false;
         self.slide_distance = 0.0;
     }
 
@@ -312,6 +417,7 @@ impl Showcase {
     pub fn reset_cycle(&mut self) {
         self.mode = ShowcaseMode::Normal;
         self.blend.reset(0.0);
+        self.entry_settled = false;
         self.motion.reset(1.0);
         self.current = None;
         self.target = None;
@@ -319,9 +425,13 @@ impl Showcase {
         self.normal_flips = 0;
         self.poi_switches = 0;
         self.selector = SelectorState::default();
+        self.gap_armed = false;
         self.slide.reset(0.0);
         self.orbit_yaw.reset(0.0);
         self.orbit_pitch.reset(0.0);
+        self.orbit_drift_yaw = 0.0;
+        self.dolly_phase = 0.0;
+        self.mesh_fade = 0.0;
         self.fov.reset(0.0);
     }
 
@@ -332,7 +442,12 @@ impl Showcase {
         switches_before_normal: u32,
         normal_fov: f32,
     ) -> SnareOutcome {
-        self.selector.deactivate();
+        // A snare counts toward the selector exit threshold, and while the
+        // selector is still active it must not also start a flip.
+        let selector_active = self.selector.active;
+        if self.mode == ShowcaseMode::Normal && selector_active {
+            self.selector.record_trigger(&self.settings);
+        }
         let flips_before_poi = flips_before_poi.max(1);
         let switches_before_normal = switches_before_normal.max(1);
         match self.mode {
@@ -348,10 +463,14 @@ impl Showcase {
             ShowcaseMode::Normal => {
                 if self.normal_flips < flips_before_poi {
                     self.normal_flips += 1;
-                    SnareOutcome { flip: true }
+                    SnareOutcome {
+                        flip: !selector_active,
+                    }
                 } else if self.pois.is_empty() {
                     self.normal_flips = 0;
-                    SnareOutcome { flip: true }
+                    SnareOutcome {
+                        flip: !selector_active,
+                    }
                 } else {
                     self.normal_flips = 0;
                     self.enter_poi(rng, normal_fov);
@@ -361,20 +480,42 @@ impl Showcase {
         }
     }
 
+    pub fn set_gap_armed(&mut self, armed: bool) {
+        self.gap_armed = armed;
+    }
+
     pub fn kick(&mut self, rng: &mut Rng) {
         if self.mode == ShowcaseMode::Poi {
             self.selector.deactivate();
-            let yaw = POI_STEP_MIN + rng.unit() * (POI_STEP_MAX - POI_STEP_MIN);
-            let pitch = POI_STEP_MIN + rng.unit() * (POI_STEP_MAX - POI_STEP_MIN);
+            // The entry owns the camera until it settles. Kicks during the
+            // flight are ignored instead of fighting the entry spring.
+            if !self.entry_settled {
+                return;
+            }
+            let yaw = signed_step(
+                rng,
+                self.settings.orbit_step_min,
+                self.settings.orbit_step_max,
+            );
+            let pitch = signed_step(
+                rng,
+                self.settings.orbit_step_min,
+                self.settings.orbit_step_max,
+            );
             self.orbit_yaw.set_target(self.orbit_yaw.value() + yaw);
             self.orbit_pitch
                 .set_target(self.orbit_pitch.value() + pitch);
-            let fov = POI_FOV_MIN + rng.unit() * (POI_FOV_MAX - POI_FOV_MIN);
+            let fov = signed_fov_step(
+                rng,
+                self.fov.value(),
+                self.settings.fov_step_min,
+                self.settings.fov_step_max,
+            );
             self.fov.set_target(fov);
             return;
         }
         if self.selector.active {
-            self.selector.deactivate();
+            self.selector.record_trigger(&self.settings);
         } else {
             self.selector.activate(rng, self.part_count, &self.settings);
         }
@@ -387,6 +528,24 @@ impl Showcase {
         }
     }
 
+    /// Enter POI focus mode from a non-snare trigger. Returns false when the
+    /// model has no resolvable POIs.
+    pub fn enter_focus(&mut self, rng: &mut Rng, normal_fov: f32) -> bool {
+        if self.mode == ShowcaseMode::Poi || self.pois.is_empty() {
+            return false;
+        }
+        self.normal_flips = 0;
+        self.enter_poi(rng, normal_fov);
+        self.mode == ShowcaseMode::Poi
+    }
+
+    /// Leave POI focus mode through the normal exit spring when already there.
+    pub fn exit_focus(&mut self) {
+        if self.mode == ShowcaseMode::Poi {
+            self.exit_poi();
+        }
+    }
+
     pub fn drop(&mut self) {
         self.selector.deactivate();
     }
@@ -396,13 +555,24 @@ impl Showcase {
         if self.mode == ShowcaseMode::Poi {
             self.exit_poi();
         }
-        self.selector.deactivate();
     }
 
     pub fn advance(&mut self, dt: f32) {
         let settings = &self.settings;
         self.blend
             .advance(dt, settings.focus_stiffness, settings.focus_damping);
+        if self.mode == ShowcaseMode::Poi
+            && !self.entry_settled
+            && self.blend.value() >= ENTRY_SETTLED_BLEND
+            && self.blend.velocity().abs() <= ENTRY_SETTLED_VELOCITY
+        {
+            self.entry_settled = true;
+        }
+        if self.mode == ShowcaseMode::Poi && self.entry_settled {
+            self.orbit_drift_yaw += dt * settings.orbit_speed;
+            self.dolly_phase =
+                (self.dolly_phase + dt * TAU / settings.dolly_period).rem_euclid(TAU);
+        }
         self.motion
             .advance(dt, settings.motion_stiffness, settings.motion_damping);
         for spring in &mut self.center {
@@ -418,7 +588,28 @@ impl Showcase {
             .advance(dt, settings.dolly_stiffness, settings.dolly_damping);
         self.slide
             .advance(dt, settings.focus_stiffness, settings.focus_damping);
-        self.selector.advance(dt, settings);
+        let mesh_target = if self.mode == ShowcaseMode::Poi
+            && self
+                .target
+                .as_ref()
+                .is_some_and(|poi| poi.anchor.part.is_some())
+        {
+            1.0
+        } else {
+            0.0
+        };
+        let mesh_duration = if mesh_target > self.mesh_fade {
+            settings.selector_fade_in
+        } else {
+            settings.selector_fade_out
+        };
+        let mesh_change = if mesh_duration <= f32::EPSILON {
+            1.0
+        } else {
+            dt / mesh_duration
+        };
+        self.mesh_fade += (mesh_target - self.mesh_fade).clamp(-mesh_change, mesh_change);
+        self.selector.advance(dt, settings, self.gap_armed);
     }
 
     pub fn frame(&self) -> ShowcaseFrame {
@@ -437,6 +628,8 @@ impl Showcase {
                 radius: self.radius.value().max(0.0),
                 orbit_yaw: self.orbit_yaw.value(),
                 orbit_pitch: self.orbit_pitch.value(),
+                orbit_drift_yaw: self.orbit_drift_yaw,
+                dolly_scale: 1.0 + self.settings.dolly_depth * self.dolly_phase.sin(),
                 fov,
                 blend,
                 model_motion: self.motion.value().clamp(0.0, 1.0),
@@ -447,6 +640,8 @@ impl Showcase {
             } else {
                 None
             },
+            mesh_attenuation: 1.0
+                - smoothstep(self.mesh_fade) * (1.0 - self.settings.selector_attenuation),
             slide_offset: Vec3::new(0.0, 0.0, -self.slide_distance * slide),
             selector: self.selector.view(&self.settings),
         }
@@ -462,6 +657,8 @@ impl Showcase {
         let settled = self.blend.value() <= 0.001;
         self.mode = ShowcaseMode::Poi;
         self.poi_switches = 0;
+        self.entry_settled = false;
+        self.selector.deactivate();
         self.blend.set_target(1.0);
         self.motion.set_target(0.0);
         self.current = Some(index);
@@ -471,6 +668,8 @@ impl Showcase {
         if settled {
             self.orbit_yaw.reset(0.0);
             self.orbit_pitch.reset(0.0);
+            self.orbit_drift_yaw = 0.0;
+            self.dolly_phase = 0.0;
             self.fov.reset(normal_fov);
             for (spring, value) in self.center.iter_mut().zip(center) {
                 spring.reset(value);
@@ -478,8 +677,6 @@ impl Showcase {
             self.radius.reset(anchor.radius);
             self.slide.reset(0.0);
         } else {
-            self.orbit_yaw.set_target(0.0);
-            self.orbit_pitch.set_target(0.0);
             self.fov.set_target(normal_fov);
             for (spring, value) in self.center.iter_mut().zip(center) {
                 spring.set_target(value);
@@ -487,6 +684,7 @@ impl Showcase {
             self.radius.set_target(anchor.radius);
         }
         self.set_slide_target();
+        self.reseed_orbit(rng);
     }
 
     fn select_next_poi(&mut self, rng: &mut Rng) {
@@ -501,6 +699,27 @@ impl Showcase {
         self.center[2].set_target(anchor.center.z);
         self.radius.set_target(anchor.radius);
         self.set_slide_target();
+        self.reseed_orbit(rng);
+    }
+
+    fn reseed_orbit(&mut self, rng: &mut Rng) {
+        let desired_yaw = signed_step(
+            rng,
+            self.settings.orbit_step_min,
+            self.settings.orbit_step_max,
+        );
+        let desired_pitch = signed_step(
+            rng,
+            self.settings.orbit_step_min,
+            self.settings.orbit_step_max,
+        );
+        let yaw_target = desired_yaw - self.orbit_drift_yaw;
+        let yaw = self.orbit_yaw.value();
+        let pitch = self.orbit_pitch.value();
+        self.orbit_yaw
+            .set_target(yaw + wrap_angle(yaw_target - yaw));
+        self.orbit_pitch
+            .set_target(pitch + wrap_angle(desired_pitch - pitch));
     }
 
     fn choose_poi(&mut self, rng: &mut Rng) -> Option<usize> {
@@ -532,6 +751,7 @@ impl Showcase {
     fn exit_poi(&mut self) {
         self.mode = ShowcaseMode::Normal;
         self.blend.set_target(0.0);
+        self.entry_settled = false;
         self.motion.set_target(1.0);
         self.poi_switches = 0;
         self.slide.set_target(0.0);
@@ -558,6 +778,8 @@ struct SelectorState {
     progress: f32,
     selected: Option<u16>,
     alternate_color: bool,
+    exit_triggers: u32,
+    gap_elapsed: f32,
 }
 
 impl SelectorState {
@@ -566,12 +788,25 @@ impl SelectorState {
             self.selected = pick_mesh(rng, None, part_count);
         }
         self.active = true;
+        self.exit_triggers = 0;
+        self.gap_elapsed = 0.0;
         self.roll_color(rng, settings);
     }
 
     fn deactivate(&mut self) {
         self.active = false;
         self.alternate_color = false;
+        self.gap_elapsed = 0.0;
+    }
+
+    fn record_trigger(&mut self, settings: &ShowcaseSettings) {
+        if !self.active {
+            return;
+        }
+        self.exit_triggers = self.exit_triggers.saturating_add(1);
+        if self.exit_triggers >= settings.selector_exit_triggers {
+            self.deactivate();
+        }
     }
 
     fn select_mesh(&mut self, rng: &mut Rng, part_count: u16) {
@@ -583,7 +818,19 @@ impl SelectorState {
             self.selected.is_some() && rng.unit() < settings.selector_color_chance;
     }
 
-    fn advance(&mut self, dt: f32, settings: &ShowcaseSettings) {
+    fn advance(&mut self, dt: f32, settings: &ShowcaseSettings, gap_armed: bool) {
+        if self.active {
+            if gap_armed {
+                self.gap_elapsed += dt;
+                if self.gap_elapsed >= settings.selector_gap_timeout {
+                    self.deactivate();
+                }
+            } else {
+                self.gap_elapsed = 0.0;
+            }
+        } else {
+            self.gap_elapsed = 0.0;
+        }
         let target = if self.active { 1.0 } else { 0.0 };
         let duration = if target > self.progress {
             settings.selector_fade_in
@@ -630,6 +877,33 @@ fn pick_mesh(rng: &mut Rng, current: Option<u16>, part_count: u16) -> Option<u16
 fn smoothstep(value: f32) -> f32 {
     let value = value.clamp(0.0, 1.0);
     value * value * (3.0 - 2.0 * value)
+}
+
+fn signed_step(rng: &mut Rng, minimum: f32, maximum: f32) -> f32 {
+    let magnitude = minimum + rng.unit() * (maximum - minimum);
+    if rng.unit() < 0.5 {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// Keeps the FOV step inside the 30-120 degree range and, where possible,
+/// chooses a direction with enough room for the minimum step.
+fn signed_fov_step(rng: &mut Rng, current: f32, minimum: f32, maximum: f32) -> f32 {
+    let magnitude = minimum + rng.unit() * (maximum - minimum);
+    let positive_room = POI_FOV_MAX - current;
+    let negative_room = current - POI_FOV_MIN;
+    let direction = if positive_room < minimum {
+        -1.0
+    } else if negative_room < minimum {
+        1.0
+    } else if rng.unit() < 0.5 {
+        -1.0
+    } else {
+        1.0
+    };
+    (current + direction * magnitude).clamp(POI_FOV_MIN, POI_FOV_MAX)
 }
 
 /// Camera distance that fits a sphere of `radius` into the focused view while
@@ -700,13 +974,29 @@ mod tests {
     }
 
     #[test]
-    fn kick_toggles_selector_in_normal_mode_only() {
-        let mut showcase = showcase();
+    fn selector_exit_needs_the_configured_trigger_count() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_exit_triggers: 2,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![
+                FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("slide".to_owned(), anchor(0.0, Some(0)), false),
+            ],
+            2,
+        );
         let mut rng = Rng::new(11);
         showcase.kick(&mut rng);
         assert!(showcase.selector_active());
         showcase.kick(&mut rng);
+        assert!(
+            showcase.selector_active(),
+            "one trigger is not enough with N=2"
+        );
+        showcase.kick(&mut rng);
         assert!(!showcase.selector_active());
+
         for _ in 0..3 {
             showcase.snare(&mut rng, 1, 2, 0.75);
         }
@@ -724,6 +1014,18 @@ mod tests {
         assert!(first.is_some());
         showcase.hat(&mut rng);
         assert_ne!(showcase.selected_mesh(), first);
+    }
+
+    #[test]
+    fn focus_mode_can_be_requested_and_left_outside_the_snare_cycle() {
+        let mut showcase = showcase();
+        let mut rng = Rng::new(44);
+        assert_eq!(showcase.mode(), ShowcaseMode::Normal);
+        assert!(showcase.enter_focus(&mut rng, 0.75));
+        assert_eq!(showcase.mode(), ShowcaseMode::Poi);
+        showcase.exit_focus();
+        assert_eq!(showcase.mode(), ShowcaseMode::Normal);
+        assert!(showcase.enter_focus(&mut rng, 0.75));
     }
 
     #[test]
@@ -767,6 +1069,390 @@ mod tests {
             showcase.advance(1.0 / 60.0);
         }
         assert!(showcase.frame().focus.model_motion > 0.95);
+    }
+
+    #[test]
+    fn snares_count_toward_selector_exit() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_exit_triggers: 2,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![
+                FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("slide".to_owned(), anchor(0.0, Some(0)), false),
+            ],
+            2,
+        );
+        let mut rng = Rng::new(32);
+        showcase.kick(&mut rng);
+        assert!(showcase.selector_active());
+
+        let first = showcase.snare(&mut rng, 5, 2, 0.75);
+        assert!(!first.flip);
+        assert!(showcase.selector_active());
+
+        let second = showcase.snare(&mut rng, 5, 2, 0.75);
+        assert!(!second.flip, "the disabling snare also suppresses its flip");
+        assert!(!showcase.selector_active());
+
+        let third = showcase.snare(&mut rng, 5, 2, 0.75);
+        assert!(third.flip, "the next snare flips normally");
+    }
+
+    #[test]
+    fn gap_confidence_exits_the_selector_only_after_its_timeout() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_gap_timeout: 2.0,
+            selector_exit_triggers: 100,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![
+                FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("slide".to_owned(), anchor(0.0, Some(0)), false),
+            ],
+            2,
+        );
+        let mut rng = Rng::new(8);
+        showcase.kick(&mut rng);
+        assert!(showcase.selector_active());
+        showcase.set_gap_armed(true);
+        for _ in 0..119 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!(showcase.selector_active(), "under two seconds stays active");
+        for _ in 0..3 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!(!showcase.selector_active(), "the timeout turns it off");
+    }
+
+    #[test]
+    fn clearing_gap_confidence_resets_the_selector_timeout() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_gap_timeout: 2.0,
+            selector_exit_triggers: 100,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![
+                FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("slide".to_owned(), anchor(0.0, Some(0)), false),
+            ],
+            2,
+        );
+        let mut rng = Rng::new(9);
+        showcase.kick(&mut rng);
+        showcase.set_gap_armed(true);
+        for _ in 0..90 {
+            showcase.advance(1.0 / 60.0);
+        }
+        showcase.set_gap_armed(false);
+        showcase.advance(1.0 / 60.0);
+        showcase.set_gap_armed(true);
+        for _ in 0..90 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!(
+            showcase.selector_active(),
+            "the timer restarts after the gap clears"
+        );
+    }
+
+    #[test]
+    fn gap_entry_does_not_exit_the_selector_and_drop_does() {
+        let mut showcase = showcase();
+        let mut rng = Rng::new(10);
+        showcase.kick(&mut rng);
+        showcase.gap_entry();
+        assert!(
+            showcase.selector_active(),
+            "gap entry alone starts the timeout instead"
+        );
+        showcase.drop();
+        assert!(!showcase.selector_active());
+    }
+
+    #[test]
+    fn exit_poi_springs_the_view_back_to_normal() {
+        let mut showcase = showcase();
+        let mut rng = Rng::new(13);
+        showcase.enter_poi(&mut rng, 0.75);
+        for _ in 0..180 {
+            showcase.advance(1.0 / 60.0);
+        }
+        showcase.kick(&mut rng);
+        for _ in 0..60 {
+            showcase.advance(1.0 / 60.0);
+        }
+        let before = showcase.frame();
+        showcase.exit_poi();
+        let immediate = showcase.frame();
+        assert!((immediate.focus.blend - before.focus.blend).abs() < 1e-6);
+        assert!((immediate.focus.center - before.focus.center).length() < 1e-6);
+        assert!((immediate.focus.orbit_yaw - before.focus.orbit_yaw).abs() < 1e-6);
+        assert!((immediate.focus.fov - before.focus.fov).abs() < 1e-6);
+
+        showcase.advance(1.0 / 60.0);
+        let after = showcase.frame();
+        assert!(after.focus.blend < before.focus.blend);
+        for _ in 0..120 {
+            showcase.advance(1.0 / 60.0);
+        }
+        let settled = showcase.frame();
+        assert!(
+            settled.focus.blend < 0.05,
+            "the camera exits through its spring"
+        );
+        assert!(
+            settled.focus.model_motion > 0.95,
+            "normal model motion fades back in"
+        );
+    }
+
+    #[test]
+    fn normal_to_poi_entry_reseeds_orbit_within_the_step_range() {
+        let mut showcase = showcase();
+        let mut rng = Rng::new(59);
+        showcase.orbit_yaw.reset(std::f32::consts::TAU * 2.0 + 0.7);
+        showcase
+            .orbit_pitch
+            .reset(std::f32::consts::TAU * 3.0 + 0.2);
+        showcase.orbit_drift_yaw = 2.0;
+        assert!(showcase.enter_focus(&mut rng, 0.75));
+        assert_eq!(showcase.orbit_yaw.value(), 0.0);
+        assert_eq!(showcase.orbit_pitch.value(), 0.0);
+        assert_eq!(showcase.orbit_drift_yaw, 0.0);
+        let minimum = showcase.settings.orbit_step_min;
+        let maximum = showcase.settings.orbit_step_max;
+        assert!(showcase.orbit_yaw.target().abs() >= minimum - 1e-6);
+        assert!(showcase.orbit_yaw.target().abs() <= maximum + 1e-6);
+        assert!(showcase.orbit_pitch.target().abs() >= minimum - 1e-6);
+        assert!(showcase.orbit_pitch.target().abs() <= maximum + 1e-6);
+    }
+
+    #[test]
+    fn poi_switch_reseeds_orbit_within_the_step_range() {
+        let mut showcase = showcase();
+        let mut rng = Rng::new(58);
+        assert!(showcase.enter_focus(&mut rng, 0.75));
+        showcase.orbit_yaw.reset(std::f32::consts::TAU * 3.0 + 0.4);
+        showcase
+            .orbit_pitch
+            .reset(std::f32::consts::TAU * 2.0 + 0.8);
+        showcase.orbit_drift_yaw = 1.7;
+        let yaw_before = showcase.orbit_yaw.value();
+        let pitch_before = showcase.orbit_pitch.value();
+
+        showcase.select_next_poi(&mut rng);
+        let yaw_target = showcase.orbit_yaw.target();
+        let pitch_target = showcase.orbit_pitch.target();
+        let yaw_total = wrap_angle(yaw_target + showcase.orbit_drift_yaw);
+        let pitch_total = wrap_angle(pitch_target);
+        let minimum = showcase.settings.orbit_step_min;
+        let maximum = showcase.settings.orbit_step_max;
+        assert!(yaw_total.abs() >= minimum - 1e-6);
+        assert!(yaw_total.abs() <= maximum + 1e-6);
+        assert!(pitch_total.abs() >= minimum - 1e-6);
+        assert!(pitch_total.abs() <= maximum + 1e-6);
+        assert!((yaw_target - yaw_before).abs() <= std::f32::consts::PI + 1e-6);
+        assert!((pitch_target - pitch_before).abs() <= std::f32::consts::PI + 1e-6);
+    }
+
+    #[test]
+    fn mesh_poi_attenuates_the_other_meshes() {
+        let mut showcase = Showcase::new(ShowcaseSettings::default());
+        showcase.set_model(
+            vec![FocusPoi::new(
+                "slide".to_owned(),
+                anchor(0.8, Some(0)),
+                false,
+            )],
+            2,
+        );
+        let mut rng = Rng::new(57);
+        assert!(showcase.enter_focus(&mut rng, 0.75));
+        for _ in 0..180 {
+            showcase.advance(1.0 / 60.0);
+        }
+        let frame = showcase.frame();
+        assert_eq!(frame.highlight_part, Some(0));
+        assert!((frame.mesh_attenuation - showcase.settings.selector_attenuation).abs() < 1e-3);
+
+        showcase.exit_focus();
+        for _ in 0..10 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!((showcase.frame().mesh_attenuation - 1.0).abs() < 1e-3);
+
+        showcase.set_model(
+            vec![FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false)],
+            2,
+        );
+        assert!(showcase.enter_focus(&mut rng, 0.75));
+        for _ in 0..60 {
+            showcase.advance(1.0 / 60.0);
+        }
+        let empty = showcase.frame();
+        assert_eq!(empty.highlight_part, None);
+        assert!((empty.mesh_attenuation - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn slow_orbit_and_dolly_start_after_the_entry_settles() {
+        let mut showcase = showcase();
+        let mut rng = Rng::new(55);
+        assert!(showcase.enter_focus(&mut rng, 0.75));
+        for _ in 0..10 {
+            showcase.advance(1.0 / 60.0);
+        }
+        let early = showcase.frame();
+        assert!(!showcase.entry_settled);
+        assert_eq!(early.focus.orbit_drift_yaw, 0.0);
+        assert!((early.focus.dolly_scale - 1.0).abs() < 1e-6);
+
+        for _ in 0..180 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!(showcase.entry_settled);
+        let before = showcase.frame();
+        for _ in 0..60 {
+            showcase.advance(1.0 / 60.0);
+        }
+        let after = showcase.frame();
+        assert!(after.focus.orbit_drift_yaw > before.focus.orbit_drift_yaw);
+        assert!(
+            (after.focus.dolly_scale - 1.0).abs() > 0.01,
+            "the slow dolly moves the camera in or out"
+        );
+    }
+
+    #[test]
+    fn kicks_cap_orbit_and_fov_step_variation() {
+        let orbit_min = 20.0_f32.to_radians();
+        let orbit_cap = 45.0_f32.to_radians();
+        let fov_min = 10.0_f32.to_radians();
+        let fov_cap = 20.0_f32.to_radians();
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            orbit_step_min: orbit_min,
+            orbit_step_max: orbit_cap,
+            fov_step_min: fov_min,
+            fov_step_max: fov_cap,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![
+                FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("slide".to_owned(), anchor(0.0, Some(0)), false),
+            ],
+            2,
+        );
+        let mut rng = Rng::new(42);
+        showcase.enter_poi(&mut rng, 0.75);
+        for _ in 0..180 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!(showcase.entry_settled);
+
+        let mut yaw_signs = [false; 2];
+        let mut fov_signs = [false; 2];
+        for _ in 0..24 {
+            let yaw_before = showcase.orbit_yaw.value();
+            let pitch_before = showcase.orbit_pitch.value();
+            let fov_before = showcase.fov.value();
+            showcase.kick(&mut rng);
+            let yaw_step = showcase.orbit_yaw.target() - yaw_before;
+            let pitch_step = showcase.orbit_pitch.target() - pitch_before;
+            let fov_step = showcase.fov.target() - fov_before;
+            assert!(yaw_step.abs() >= orbit_min - 1e-6);
+            assert!(pitch_step.abs() >= orbit_min - 1e-6);
+            assert!(yaw_step.abs() <= orbit_cap + 1e-6);
+            assert!(pitch_step.abs() <= orbit_cap + 1e-6);
+            assert!(fov_step.abs() >= fov_min - 1e-6);
+            assert!(fov_step.abs() <= fov_cap + 1e-6);
+            assert!(showcase.fov.target() >= 30.0_f32.to_radians() - 1e-6);
+            assert!(showcase.fov.target() <= 120.0_f32.to_radians() + 1e-6);
+            yaw_signs[usize::from(yaw_step > 0.0)] = true;
+            fov_signs[usize::from(fov_step > 0.0)] = true;
+        }
+        assert!(yaw_signs[0] && yaw_signs[1], "orbit steps use both signs");
+        assert!(fov_signs[0] && fov_signs[1], "FOV steps use both signs");
+    }
+
+    #[test]
+    fn fov_min_step_moves_inward_at_the_range_edges() {
+        let fov_min = 10.0_f32.to_radians();
+        let fov_max = 20.0_f32.to_radians();
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            fov_step_min: fov_min,
+            fov_step_max: fov_max,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![
+                FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("slide".to_owned(), anchor(0.0, Some(0)), false),
+            ],
+            2,
+        );
+        let mut rng = Rng::new(43);
+        showcase.enter_poi(&mut rng, 0.75);
+        for _ in 0..180 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!(showcase.entry_settled);
+
+        let high = 120.0_f32.to_radians() - 1.0_f32.to_radians();
+        showcase.fov.reset(high);
+        showcase.kick(&mut rng);
+        assert!(showcase.fov.target() < high);
+        assert!(high - showcase.fov.target() >= fov_min - 1e-6);
+
+        let low = 30.0_f32.to_radians() + 1.0_f32.to_radians();
+        showcase.fov.reset(low);
+        showcase.kick(&mut rng);
+        assert!(showcase.fov.target() > low);
+        assert!(showcase.fov.target() - low >= fov_min - 1e-6);
+    }
+
+    #[test]
+    fn step_minima_must_not_exceed_the_maxima() {
+        let orbit = ShowcaseSettings {
+            orbit_step_min: 1.0,
+            ..ShowcaseSettings::default()
+        };
+        assert!(orbit.validate().is_err());
+        let fov = ShowcaseSettings {
+            fov_step_min: 1.0,
+            ..ShowcaseSettings::default()
+        };
+        assert!(fov.validate().is_err());
+    }
+
+    #[test]
+    fn kicks_are_ignored_until_the_entry_spring_settles() {
+        let mut showcase = showcase();
+        let mut rng = Rng::new(21);
+        showcase.enter_poi(&mut rng, 0.75);
+        for _ in 0..10 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!(!showcase.entry_settled);
+        let orbit_target = showcase.orbit_yaw.target();
+        let fov_target = showcase.fov.target();
+
+        showcase.kick(&mut rng);
+        assert_eq!(showcase.orbit_yaw.target(), orbit_target);
+        assert_eq!(showcase.fov.target(), fov_target);
+
+        for _ in 0..180 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!(showcase.entry_settled);
+        showcase.kick(&mut rng);
+        assert!((showcase.orbit_yaw.target() - orbit_target).abs() > 1e-6);
+        assert!((showcase.fov.target() - fov_target).abs() > 1e-6);
     }
 
     #[test]
@@ -830,7 +1516,17 @@ mod tests {
 
     #[test]
     fn selector_fades_out_slowly_and_returns_quickly() {
-        let mut showcase = showcase();
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_exit_triggers: 1,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![
+                FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("slide".to_owned(), anchor(0.0, Some(0)), false),
+            ],
+            2,
+        );
         let mut rng = Rng::new(2);
         showcase.kick(&mut rng);
         assert!(showcase.selector_active());
@@ -849,8 +1545,45 @@ mod tests {
     }
 
     #[test]
-    fn snare_disables_the_selector() {
-        let mut showcase = showcase();
+    fn selector_active_suppresses_the_flip_for_that_snare() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_exit_triggers: 1,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![
+                FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("slide".to_owned(), anchor(0.0, Some(0)), false),
+            ],
+            2,
+        );
+        let mut rng = Rng::new(31);
+        showcase.kick(&mut rng);
+        assert!(showcase.selector_active());
+
+        let outcome = showcase.snare(&mut rng, 5, 2, 0.75);
+        assert!(!outcome.flip, "the enabling beat cannot also flip");
+        assert!(!showcase.selector_active());
+        assert_eq!(showcase.normal_flips(), 1);
+
+        let outcome = showcase.snare(&mut rng, 5, 2, 0.75);
+        assert!(outcome.flip, "the next beat flips normally");
+        assert_eq!(showcase.normal_flips(), 2);
+    }
+
+    #[test]
+    fn the_nth_snare_disables_the_selector() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_exit_triggers: 1,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![
+                FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("slide".to_owned(), anchor(0.0, Some(0)), false),
+            ],
+            2,
+        );
         let mut rng = Rng::new(4);
         showcase.kick(&mut rng);
         assert!(showcase.selector_active());

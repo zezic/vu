@@ -53,8 +53,8 @@ use crate::{
 };
 
 use geometry::{
-    soft_saturate, Camera, Deformation, DepthOpacity, FocusProjection, Pose, Projected, Vec2, Vec3,
-    Wireframe,
+    focus_base_angles, soft_saturate, wrap_angle, Camera, Deformation, DepthOpacity,
+    FocusProjection, Pose, Projected, Vec2, Vec3, Wireframe,
 };
 pub use spectrum::{RelativeExcessSettings, BAND_COUNT};
 use spectrum::{Spectrum, SpectrumAnalyzer};
@@ -2329,6 +2329,13 @@ impl Visualizer {
             Parameter::FocusDamping => self.showcase.settings().focus_damping,
             Parameter::MotionStiffness => self.showcase.settings().motion_stiffness,
             Parameter::MotionDamping => self.showcase.settings().motion_damping,
+            Parameter::OrbitStepMin => self.showcase.settings().orbit_step_min,
+            Parameter::OrbitStepMax => self.showcase.settings().orbit_step_max,
+            Parameter::FovStepMin => self.showcase.settings().fov_step_min,
+            Parameter::FovStepMax => self.showcase.settings().fov_step_max,
+            Parameter::OrbitSpeed => self.showcase.settings().orbit_speed,
+            Parameter::DollyDepth => self.showcase.settings().dolly_depth,
+            Parameter::DollyPeriod => self.showcase.settings().dolly_period,
             Parameter::OrbitStiffness => self.showcase.settings().orbit_stiffness,
             Parameter::OrbitDamping => self.showcase.settings().orbit_damping,
             Parameter::DollyStiffness => self.showcase.settings().dolly_stiffness,
@@ -2337,6 +2344,10 @@ impl Visualizer {
             Parameter::SelectorFadeIn => self.showcase.settings().selector_fade_in,
             Parameter::SelectorFadeOut => self.showcase.settings().selector_fade_out,
             Parameter::SelectorColorChance => self.showcase.settings().selector_color_chance,
+            Parameter::SelectorExitTriggers => {
+                self.showcase.settings().selector_exit_triggers as f32
+            }
+            Parameter::SelectorGapTimeout => self.showcase.settings().selector_gap_timeout,
             Parameter::SnareChoke => self.detectors.snare_choke,
             Parameter::FlipStiffness => self.detectors.flip_stiffness,
             Parameter::FlipDamping => self.detectors.flip_damping,
@@ -2447,6 +2458,31 @@ impl Visualizer {
             Parameter::MotionDamping => {
                 self.showcase.settings_mut().motion_damping = value;
             }
+            Parameter::OrbitStepMin => {
+                let maximum = self.showcase.settings().orbit_step_max;
+                self.showcase.settings_mut().orbit_step_min = value.min(maximum);
+            }
+            Parameter::OrbitStepMax => {
+                let minimum = self.showcase.settings().orbit_step_min;
+                self.showcase.settings_mut().orbit_step_max = value.max(minimum);
+            }
+            Parameter::FovStepMin => {
+                let maximum = self.showcase.settings().fov_step_max;
+                self.showcase.settings_mut().fov_step_min = value.min(maximum);
+            }
+            Parameter::FovStepMax => {
+                let minimum = self.showcase.settings().fov_step_min;
+                self.showcase.settings_mut().fov_step_max = value.max(minimum);
+            }
+            Parameter::OrbitSpeed => {
+                self.showcase.settings_mut().orbit_speed = value;
+            }
+            Parameter::DollyDepth => {
+                self.showcase.settings_mut().dolly_depth = value;
+            }
+            Parameter::DollyPeriod => {
+                self.showcase.settings_mut().dolly_period = value;
+            }
             Parameter::OrbitStiffness => {
                 self.showcase.settings_mut().orbit_stiffness = value;
             }
@@ -2470,6 +2506,12 @@ impl Visualizer {
             }
             Parameter::SelectorColorChance => {
                 self.showcase.settings_mut().selector_color_chance = value;
+            }
+            Parameter::SelectorExitTriggers => {
+                self.showcase.settings_mut().selector_exit_triggers = value.round() as u32;
+            }
+            Parameter::SelectorGapTimeout => {
+                self.showcase.settings_mut().selector_gap_timeout = value;
             }
             Parameter::SnareChoke => self.detectors.snare_choke = value,
             Parameter::FlipStiffness => self.detectors.flip_stiffness = value,
@@ -2827,6 +2869,8 @@ impl Visualizer {
         while let Some(action) = self.pending_actions.pop_front() {
             self.handle_action(action, accent, normal_fov);
         }
+        let status = self.onsets.status();
+        self.showcase.set_gap_armed(status.drop.armed);
         self.showcase.advance(dt);
         self.kick *= (-dt * self.kick_decay).exp();
         if !self.property_gates.plays(Property::Kick) {
@@ -2848,7 +2892,6 @@ impl Visualizer {
             self.detectors.quake_stiffness,
             self.detectors.quake_damping,
         );
-        let status = self.onsets.status();
         let exposure = self.frames.interval(frame, shutter);
         let music = Music {
             bands: self.bands.map(|band| band.value),
@@ -2870,7 +2913,9 @@ impl Visualizer {
         } else {
             0.0
         };
-        let shake = if self.property_gates.plays(Property::Quake) {
+        let shake = if self.showcase.mode() == showcase::ShowcaseMode::Normal
+            && self.property_gates.plays(Property::Quake)
+        {
             Vec2::new(
                 self.quake_x.value() * quake_scale,
                 self.quake_y.value() * quake_scale,
@@ -3124,7 +3169,9 @@ impl Visualizer {
             Action::Kick(power) => {
                 self.showcase.kick(&mut self.rng);
                 self.kick = self.kick.max(power.clamp(0.0, 1.5));
-                if self.property_gates.plays(Property::Quake) {
+                if self.showcase.mode() == showcase::ShowcaseMode::Normal
+                    && self.property_gates.plays(Property::Quake)
+                {
                     let direction = self.kick_sequence.next(self.detectors.kick_sequence_every);
                     self.quake_impulse(direction, power * self.detectors.kick_quake_factor);
                 }
@@ -3142,9 +3189,17 @@ impl Visualizer {
                 }
             }
             Action::Drop(power) => {
+                let was_poi = self.showcase.mode() == showcase::ShowcaseMode::Poi;
                 self.showcase.drop();
                 self.advance_model(accent);
-                if self.property_gates.plays(Property::Quake) {
+                if was_poi {
+                    self.showcase.exit_focus();
+                } else {
+                    self.showcase.enter_focus(&mut self.rng, normal_fov);
+                }
+                if self.showcase.mode() == showcase::ShowcaseMode::Normal
+                    && self.property_gates.plays(Property::Quake)
+                {
                     self.quake_y
                         .impulse(power * self.detectors.drop_quake_factor);
                 }
@@ -3228,11 +3283,6 @@ enum Action {
     Drop(f32),
     GapEntry,
     Hat,
-}
-
-/// Folds an unbounded angle into the closest representation around zero.
-fn wrap_angle(angle: f32) -> f32 {
-    (angle + TAU * 0.5).rem_euclid(TAU) - TAU * 0.5
 }
 
 #[derive(Clone, Copy)]
@@ -3515,6 +3565,20 @@ struct ModelRuntime {
     /// Scale captured when the POI motion fade starts.
     frozen_scale: f32,
     motion_frozen: bool,
+    /// Smoothed outward camera side for the current POI.
+    base_yaw: f32,
+    base_pitch: f32,
+    /// Rotation captured when POI mode exits, so the return can take the
+    /// shortest path back to identity.
+    exit_rotation: bool,
+    exit_total_yaw: f32,
+    exit_total_pitch: f32,
+    was_poi: bool,
+    last_rotation_yaw: f32,
+    last_rotation_pitch: f32,
+    /// Handoff correction when a new POI entry interrupts an exit.
+    rotation_offset_yaw: f32,
+    rotation_offset_pitch: f32,
     /// Vertices that move with the ejecting slide subtree.
     slide_vertices: Vec<bool>,
     history: VecDeque<PoseSnapshot>,
@@ -3595,6 +3659,16 @@ impl ModelRuntime {
             motion_blur,
             frozen_scale: pose.scale,
             motion_frozen: false,
+            base_yaw: 0.0,
+            base_pitch: 0.0,
+            exit_rotation: false,
+            exit_total_yaw: 0.0,
+            exit_total_pitch: 0.0,
+            was_poi: false,
+            last_rotation_yaw: 0.0,
+            last_rotation_pitch: 0.0,
+            rotation_offset_yaw: 0.0,
+            rotation_offset_pitch: 0.0,
             slide_vertices,
             history: VecDeque::with_capacity(MAX_HISTORY),
             vertices: Vec::with_capacity(vertex_capacity),
@@ -3730,13 +3804,63 @@ impl ModelRuntime {
         self.line_energy = gates.drive(Property::Line, mixer.value(MixPoint::Line, &context));
         self.world_vertices.clear();
         self.vertices.clear();
-        let pose = self.pose.with_action(flip_pitch * model_motion, shake);
+        // A flip is a discrete spring transition, not a continuous motion. It
+        // keeps its full spring action across the motion fade so entering POI
+        // mode cannot undo or replay the last flip.
+        let pose = self.pose.with_action(flip_pitch, shake);
+        let in_poi = showcase.focus.freeze_motion;
+        let mut reentered_from_exit = false;
+        if self.was_poi && !in_poi {
+            let blend = showcase.focus.blend.max(1e-4);
+            self.exit_total_yaw = wrap_angle(self.last_rotation_yaw) / blend;
+            self.exit_total_pitch = wrap_angle(self.last_rotation_pitch) / blend;
+            self.exit_rotation = true;
+            self.rotation_offset_yaw = 0.0;
+            self.rotation_offset_pitch = 0.0;
+        } else if !self.was_poi && in_poi && self.exit_rotation {
+            self.exit_rotation = false;
+            reentered_from_exit = true;
+        } else if self.exit_rotation && !in_poi && showcase.focus.blend <= 1e-4 {
+            self.exit_rotation = false;
+        }
+        self.was_poi = in_poi;
+
+        let (target_base_yaw, target_base_pitch) =
+            focus_base_angles(pose.orient(showcase.focus.center));
+        let base_rate = 1.0 - (-14.0 * dt).exp();
+        self.base_yaw += wrap_angle(target_base_yaw - self.base_yaw) * base_rate;
+        self.base_pitch += wrap_angle(target_base_pitch - self.base_pitch) * base_rate;
+        let normal_yaw =
+            (self.base_yaw + showcase.focus.orbit_yaw + showcase.focus.orbit_drift_yaw)
+                * showcase.focus.blend;
+        let normal_pitch = (self.base_pitch + showcase.focus.orbit_pitch) * showcase.focus.blend;
+        if reentered_from_exit {
+            self.rotation_offset_yaw = wrap_angle(self.last_rotation_yaw - normal_yaw);
+            self.rotation_offset_pitch = wrap_angle(self.last_rotation_pitch - normal_pitch);
+        }
+        let (rotation_yaw, rotation_pitch) = if self.exit_rotation {
+            (
+                self.exit_total_yaw * showcase.focus.blend,
+                self.exit_total_pitch * showcase.focus.blend,
+            )
+        } else {
+            (
+                normal_yaw + self.rotation_offset_yaw,
+                normal_pitch + self.rotation_offset_pitch,
+            )
+        };
+        self.last_rotation_yaw = rotation_yaw;
+        self.last_rotation_pitch = rotation_pitch;
+        let offset_decay = (-14.0 * dt).exp();
+        self.rotation_offset_yaw *= offset_decay;
+        self.rotation_offset_pitch *= offset_decay;
         let focus_radius = showcase.focus.radius * self.pose.scale;
-        let focus_distance = showcase::framed_distance(focus_radius, showcase.focus.fov);
+        let focus_distance = showcase::framed_distance(focus_radius, showcase.focus.fov)
+            * showcase.focus.dolly_scale;
         let focus = FocusProjection {
             target: showcase.focus.center,
-            yaw: showcase.focus.orbit_yaw,
-            pitch: showcase.focus.orbit_pitch,
+            rotation_yaw,
+            rotation_pitch,
             distance: focus_distance,
             focal: camera.focal_for_fov(showcase.focus.fov),
             blend: showcase.focus.blend,
@@ -3823,11 +3947,17 @@ impl ModelRuntime {
             } else {
                 self.tint.edge_rgb(palette)
             };
-            let edge_alpha = if showcase.selector.selected == Some(part) {
-                alpha
+            let selector_alpha = if showcase.selector.selected == Some(part) {
+                1.0
             } else {
-                alpha * showcase.selector.attenuation
+                showcase.selector.attenuation
             };
+            let focus_alpha = if showcase.highlight_part.is_some_and(|poi| poi != part) {
+                showcase.mesh_attenuation
+            } else {
+                1.0
+            };
+            let edge_alpha = alpha * selector_alpha * focus_alpha;
 
             let Some(exposure) = &exposure else {
                 let start_color = [
@@ -4723,6 +4853,12 @@ mod tests {
             ..DetectorSettings::default()
         };
         visualizer.set_detector_settings(settings.clone());
+        visualizer
+            .showcase
+            .set_settings(showcase::ShowcaseSettings {
+                selector_exit_triggers: 1,
+                ..showcase::ShowcaseSettings::default()
+            });
 
         visualizer.handle_action(Action::Kick(0.5), 0.0, 0.75);
         assert!(visualizer.kick >= 0.5);
@@ -4735,9 +4871,13 @@ mod tests {
         );
 
         visualizer.handle_action(Action::Snare, 0.0, 0.75);
-        assert!((visualizer.flip_target - TAU * 0.5).abs() < 1e-5);
+        assert_eq!(visualizer.flip_target, 0.0);
+        assert!(
+            !visualizer.showcase.selector_active(),
+            "the snare disables the selector without flipping"
+        );
         visualizer.handle_action(Action::Snare, 0.0, 0.75);
-        assert!((visualizer.flip_target - TAU).abs() < 1e-5);
+        assert!((visualizer.flip_target - TAU * 0.5).abs() < 1e-5);
         visualizer.handle_action(Action::Snare, 0.0, 0.75);
         assert_eq!(
             visualizer.showcase.mode(),
@@ -5018,6 +5158,256 @@ mod tests {
             assert_eq!(edge.start_depth_opacity, 1.0);
             assert_eq!(edge.end_depth_opacity, 1.0);
         }
+    }
+
+    fn test_runtime() -> ModelRuntime {
+        test_runtime_with(Wireframe::from_edges(
+            vec![Vec3::new(-0.3, 0.2, 0.1), Vec3::new(0.3, -0.2, 0.1)],
+            vec![[0, 1]],
+        ))
+    }
+
+    fn test_runtime_with(wireframe: Wireframe) -> ModelRuntime {
+        let mut runtime = ModelRuntime::new(
+            "test".to_owned(),
+            wireframe,
+            Pose {
+                yaw: 0.0,
+                pitch: 0.0,
+                roll: 0.0,
+                scale: 1.0,
+                distance: 4.2,
+                shake: Vec2::new(0.0, 0.0),
+            },
+            Style::default(),
+            ModelTint::solid(0.5),
+            false,
+            &[],
+        );
+        runtime.pitch = Smoother::new(0.0);
+        runtime.roll = Smoother::new(0.0);
+        runtime
+    }
+
+    fn test_showcase_frame(blend: f32, freeze_motion: bool, orbit_yaw: f32) -> ShowcaseFrame {
+        ShowcaseFrame {
+            focus: showcase::FocusView {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 0.5,
+                orbit_yaw,
+                orbit_pitch: 0.0,
+                orbit_drift_yaw: 0.0,
+                dolly_scale: 1.0,
+                fov: 0.75,
+                blend,
+                model_motion: 0.0,
+                freeze_motion,
+            },
+            highlight_part: None,
+            mesh_attenuation: 1.0,
+            slide_offset: Vec3::new(0.0, 0.0, 0.0),
+            selector: showcase::SelectorView::NONE,
+        }
+    }
+
+    fn step_runtime(runtime: &mut ModelRuntime, showcase: &ShowcaseFrame) -> Vec<LineInstance> {
+        let mut muted = [true; Property::COUNT];
+        muted[Property::Line.index()] = false;
+        let gates = PropertyGates {
+            muted,
+            soloed: [false; Property::COUNT],
+        };
+        let music = Music {
+            bands: [0.0; BAND_COUNT],
+            raw_bands: [0.0; BAND_COUNT],
+            power: 0.0,
+            power_level: 0.0,
+            bass: 0.0,
+            bass_level: 0.0,
+            kick: 0.0,
+            kick_onset: 0.0,
+            snare_onset: 0.0,
+            drop_onset: 0.0,
+        };
+        let mut lines = Vec::new();
+        let mut ribbons = Vec::new();
+        runtime.update(
+            1.0 / 60.0,
+            &music,
+            &Gains::default(),
+            &BandRouting::default(),
+            &Mixer::default(),
+            &gates,
+            AudioTime::ZERO,
+            AudioTime::ZERO.shifted(1.0 / 60.0),
+            Camera::new(1280.0, 440.0, 1.0),
+            &Palette::from_theme(ThemeId::default()),
+            0.5,
+            0.6,
+            MotionFade {
+                opacity: MotionOpacity::default(),
+                power: MotionFadePower::default(),
+            },
+            1.0,
+            showcase,
+            1.0,
+            Vec2::new(0.0, 0.0),
+            0.0,
+            &mut lines,
+            &mut ribbons,
+        );
+        lines
+    }
+
+    fn flip_line_endpoints(model_motion: f32) -> [f32; 4] {
+        let mut runtime = test_runtime();
+        let mut showcase = test_showcase_frame(0.0, true, 0.0);
+        showcase.focus.model_motion = model_motion;
+        let lines = step_runtime(&mut runtime, &showcase);
+        assert_eq!(lines.len(), 1);
+        lines[0].endpoints
+    }
+
+    #[test]
+    fn mesh_poi_attenuates_every_line_in_other_parts() {
+        let wireframe = Wireframe::from_parts(
+            vec![
+                Vec3::new(-0.6, 0.2, 0.1),
+                Vec3::new(-0.2, 0.2, 0.1),
+                Vec3::new(0.2, 0.2, 0.1),
+                Vec3::new(0.6, 0.2, 0.1),
+            ],
+            vec![[0, 1], [2, 3]],
+            vec![0, 0, 1, 1],
+            vec![0, 1],
+            2,
+        );
+        let mut runtime = test_runtime_with(wireframe);
+        let mut showcase = test_showcase_frame(1.0, true, 0.0);
+        showcase.highlight_part = Some(0);
+        showcase.mesh_attenuation = 0.2;
+        let lines = step_runtime(&mut runtime, &showcase);
+        assert_eq!(lines.len(), 2);
+        let alpha = |line: &LineInstance| line.start_color[3] + line.end_color[3];
+        assert!(alpha(&lines[0]) > alpha(&lines[1]) * 2.0);
+
+        showcase.highlight_part = None;
+        let lines = step_runtime(&mut runtime, &showcase);
+        assert!((alpha(&lines[0]) - alpha(&lines[1])).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_flip_is_not_scaled_by_the_model_motion_fade() {
+        let half_motion = flip_line_endpoints(0.5);
+        let full_motion = flip_line_endpoints(1.0);
+        for (half, full) in half_motion.iter().zip(full_motion) {
+            assert!(
+                (half - full).abs() < 1e-4,
+                "the flip contribution must not depend on model_motion"
+            );
+        }
+    }
+
+    #[test]
+    fn poi_exit_rotation_takes_the_shortest_path() {
+        use std::f32::consts::PI;
+        let mut runtime = test_runtime();
+        let poi = test_showcase_frame(1.0, true, 1.5 * PI);
+        step_runtime(&mut runtime, &poi);
+        assert!((runtime.last_rotation_yaw - 1.5 * PI).abs() < 1e-5);
+
+        let exit = test_showcase_frame(1.0, false, 1.5 * PI);
+        step_runtime(&mut runtime, &exit);
+        assert!(
+            wrap_angle(runtime.last_rotation_yaw + 0.5 * PI).abs() < 1e-5,
+            "270 degrees must exit through the shorter -90 degree path"
+        );
+
+        let halfway = test_showcase_frame(0.5, false, 1.5 * PI);
+        step_runtime(&mut runtime, &halfway);
+        assert!(wrap_angle(runtime.last_rotation_yaw + 0.25 * PI).abs() < 1e-5);
+    }
+
+    #[test]
+    fn re_entry_mid_exit_hands_the_rotation_off_smoothly() {
+        use std::f32::consts::PI;
+        let mut runtime = test_runtime();
+        let poi = test_showcase_frame(1.0, true, 1.5 * PI);
+        step_runtime(&mut runtime, &poi);
+
+        let exit = test_showcase_frame(0.8, false, 1.5 * PI);
+        step_runtime(&mut runtime, &exit);
+        let exiting = runtime.last_rotation_yaw;
+
+        let reentry = test_showcase_frame(0.8, true, 0.0);
+        step_runtime(&mut runtime, &reentry);
+        assert!(
+            wrap_angle(runtime.last_rotation_yaw - exiting).abs() < 1e-5,
+            "re-entry must not jump the rotation"
+        );
+
+        let next = test_showcase_frame(0.9, true, 0.0);
+        step_runtime(&mut runtime, &next);
+        assert!(
+            runtime.last_rotation_yaw.abs() < exiting.abs(),
+            "the handoff offset keeps decaying"
+        );
+    }
+
+    #[test]
+    fn kick_quake_is_suppressed_in_poi_mode() {
+        let mut visualizer = loaded_visualizer();
+        assert!(visualizer.showcase.enter_focus(&mut visualizer.rng, 0.75));
+        visualizer.handle_action(Action::Kick(0.5), 0.0, 0.75);
+        visualizer.quake_x.advance(
+            0.01,
+            visualizer.detectors.quake_stiffness,
+            visualizer.detectors.quake_damping,
+        );
+        assert_eq!(visualizer.quake_x.value(), 0.0);
+    }
+
+    #[test]
+    fn a_drop_switches_back_to_normal_from_poi() {
+        let mut visualizer = loaded_visualizer();
+        assert!(visualizer.showcase.enter_focus(&mut visualizer.rng, 0.75));
+        assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Poi);
+        visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
+        assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Normal);
+    }
+
+    #[test]
+    fn flips_keep_their_spring_action_through_poi_entry() {
+        let mut visualizer = loaded_visualizer();
+        visualizer.set_detector_settings(DetectorSettings {
+            snare_flip_every: 1,
+            ..DetectorSettings::default()
+        });
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        assert!((visualizer.flip_target - TAU * 0.5).abs() < 1e-5);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Poi);
+
+        let palette = Palette::from_theme(ThemeId::default());
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        for _ in 0..60 {
+            visualizer.update(
+                frame,
+                ShutterFrames::try_from(1.0).unwrap(),
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        }
+        assert!((visualizer.flip_target - TAU * 0.5).abs() < 1e-5);
+        assert!(
+            wrap_angle(visualizer.flip.value() - TAU * 0.5).abs() < 1e-3,
+            "the flip spring finishes even while the model motion fades"
+        );
+        assert!(visualizer.showcase.frame().focus.model_motion < 0.5);
     }
 
     #[test]
@@ -5488,6 +5878,13 @@ mod tests {
         visualizer.set_parameter(Parameter::FocusDamping, 22.0);
         visualizer.set_parameter(Parameter::MotionDamping, 9.5);
         visualizer.set_parameter(Parameter::SelectorColorChance, 0.5);
+        visualizer.set_parameter(Parameter::SelectorExitTriggers, 7.0);
+        visualizer.set_parameter(Parameter::SelectorGapTimeout, 12.0);
+        visualizer.set_parameter(Parameter::OrbitStepMax, 30.0_f32.to_radians());
+        visualizer.set_parameter(Parameter::FovStepMax, 12.0_f32.to_radians());
+        visualizer.set_parameter(Parameter::OrbitSpeed, 8.0_f32.to_radians());
+        visualizer.set_parameter(Parameter::DollyDepth, 0.2);
+        visualizer.set_parameter(Parameter::DollyPeriod, 9.0);
         visualizer.set_parameter(Parameter::Gain(Gain::SpinBand), 3.25);
         visualizer.set_parameter(Parameter::BandSource(BandComponent::Spin), 9.0);
         visualizer.set_parameter(Parameter::Attack(EnvelopeTarget::Power), 22.0);
@@ -5519,6 +5916,14 @@ mod tests {
         assert_eq!(restored.parameter_value(Parameter::FocusDamping), 22.0);
         assert_eq!(restored.parameter_value(Parameter::MotionDamping), 9.5);
         assert!((restored.parameter_value(Parameter::SelectorColorChance) - 0.5).abs() < 1e-6);
+        assert_eq!(
+            restored.parameter_value(Parameter::SelectorExitTriggers),
+            7.0
+        );
+        assert_eq!(
+            restored.parameter_value(Parameter::SelectorGapTimeout),
+            12.0
+        );
         assert_eq!(
             restored.parameter_value(Parameter::Gain(Gain::SpinBand)),
             3.25

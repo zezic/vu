@@ -223,6 +223,13 @@ mod tests {
             "(tuning: (kick_decay: -1.0))",
             "(tuning: (showcase: (focus_stiffness: 0.0)))",
             "(tuning: (showcase: (selector_attenuation: 2.0)))",
+            "(tuning: (showcase: (selector_exit_triggers: 0)))",
+            "(tuning: (showcase: (selector_gap_timeout: 0.0)))",
+            "(tuning: (showcase: (orbit_step_min: 1.0)))",
+            "(tuning: (showcase: (fov_step_min: 1.0)))",
+            "(tuning: (showcase: (orbit_speed: 1.0)))",
+            "(tuning: (showcase: (dolly_depth: 1.0)))",
+            "(tuning: (showcase: (dolly_period: 1.0)))",
             "(tuning: (kick_decay: 21.0))",
             "(tuning: (inputs: (power: (attack: 0.0, release: 4.5, \
              shape: (low: 0.0, high: 1.0, curve: Linear, amount: 1.0, tracking: Manual))))))",
