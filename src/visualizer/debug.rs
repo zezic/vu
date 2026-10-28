@@ -7,7 +7,7 @@ use vello::{
     Scene,
 };
 
-use super::ui::{DebugRefresh, View};
+use super::ui::{DebugRefresh, View, HUD_MARGIN};
 use crate::{
     config::VisualizerTextScale,
     text::{Fonts, Text, UiFace},
@@ -5079,6 +5079,9 @@ fn draw_onset_ticks(
     );
 }
 
+/// A flash at or above this value marks a fresh trigger on the inspector graphs.
+const TRIGGER_FLASH_THRESHOLD: f32 = 0.8;
+
 fn draw_trigger_marks(
     scene: &mut Scene,
     history: &DebugHistory,
@@ -5095,7 +5098,7 @@ fn draw_trigger_marks(
         return;
     }
     for sample in history.samples() {
-        if flash(sample) < 0.8 {
+        if flash(sample) < TRIGGER_FLASH_THRESHOLD {
             continue;
         }
         let x = plot.x0 + f64::from((sample.at - first) / span) * plot.width();
@@ -5108,6 +5111,365 @@ fn draw_trigger_marks(
                 Point::new(x - 0.5 * scale, plot.y0),
                 Size::new(scale.max(0.8), 2.0 * scale),
             ),
+        );
+    }
+}
+
+const TIMELINE_TRACKS: usize = 5;
+const TIMELINE_PAD: f64 = 4.0;
+const TIMELINE_TRACK_HEIGHT: f64 = 10.0;
+const TIMELINE_TRACK_GAP: f64 = 1.5;
+const TIMELINE_GUTTER_WIDTH: f64 = 66.0;
+/// Clearance between the timeline and the bottom HUD line.
+const TIMELINE_HUD_GAP: f64 = 22.0;
+
+/// The five lanes of the light timeline, top to bottom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimelineTrack {
+    Kick,
+    Snare,
+    Hat,
+    DropGap,
+    DropTrigger,
+}
+
+impl TimelineTrack {
+    const ALL: [Self; TIMELINE_TRACKS] = [
+        Self::Kick,
+        Self::Snare,
+        Self::Hat,
+        Self::DropGap,
+        Self::DropTrigger,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Kick => "KICK",
+            Self::Snare => "SNARE",
+            Self::Hat => "HAT",
+            Self::DropGap => "DROP ELIG+CONF",
+            Self::DropTrigger => "DROP TRIGGER",
+        }
+    }
+
+    /// The detector whose confirmed hits the lane marks. The drop gap lane
+    /// graphs state instead of events.
+    fn detector(self) -> Option<Detector> {
+        match self {
+            Self::Kick => Some(Detector::Kick),
+            Self::Snare => Some(Detector::Snare),
+            Self::Hat => Some(Detector::Hat),
+            Self::DropGap => None,
+            Self::DropTrigger => Some(Detector::Drop),
+        }
+    }
+
+    fn color(self, palette: Palette) -> Color {
+        match self {
+            Self::Kick => palette.vivid(0),
+            Self::Snare => palette.vivid(2),
+            Self::Hat => palette.vivid(11),
+            Self::DropGap | Self::DropTrigger => palette.vivid(8),
+        }
+    }
+}
+
+/// Text laid out once for the light timeline. The screen redraws every frame,
+/// so its labels must not be regenerated with it.
+pub(super) struct TimelineLabels {
+    track_labels: [Text; TIMELINE_TRACKS],
+}
+
+impl TimelineLabels {
+    pub(super) fn new(fonts: &mut Fonts) -> Self {
+        Self {
+            track_labels: TimelineTrack::ALL
+                .map(|track| fonts.layout_ui(track.label(), 7.5, UiFace::SemiBold)),
+        }
+    }
+}
+
+/// Geometry of the light timeline. The panel is as wide as the bottom-right
+/// hotkey line and sits directly above it.
+pub(super) struct TimelineLayout {
+    pub panel: Rect,
+    pub tracks: [Rect; TIMELINE_TRACKS],
+    scale: f64,
+    pad: f64,
+}
+
+impl TimelineLayout {
+    /// `hotkey_width` is the unscaled width of the bottom-right hotkey line, so
+    /// both the line and the timeline share one text scale.
+    pub(super) fn new(view: &View, hotkey_width: f64, text_scale: VisualizerTextScale) -> Self {
+        let scale = view.ui_scale() * f64::from(text_scale.factor());
+        let margin = HUD_MARGIN * scale;
+        let pad = TIMELINE_PAD * scale;
+        let track_gap = TIMELINE_TRACK_GAP * scale;
+        let available_width = (view.viewport.width - margin * 2.0).max(1.0);
+        let width = (hotkey_width * scale).clamp(1.0, available_width);
+        let bottom = view.viewport.height - margin - TIMELINE_HUD_GAP * scale;
+        let available_height = (bottom - margin).max(1.0);
+        let body_height = (available_height - pad * 2.0).max(1.0);
+        let track_height = ((body_height - (TIMELINE_TRACKS - 1) as f64 * track_gap)
+            / TIMELINE_TRACKS as f64)
+            .min(TIMELINE_TRACK_HEIGHT * scale)
+            .max(1.0);
+        let body_height =
+            TIMELINE_TRACKS as f64 * track_height + (TIMELINE_TRACKS - 1) as f64 * track_gap;
+        let panel_height = pad * 2.0 + body_height;
+        let panel = Rect::from_origin_size(
+            Point::new(view.viewport.width - margin - width, bottom - panel_height),
+            Size::new(width, panel_height),
+        );
+        let plot_left = panel.x0 + pad + TIMELINE_GUTTER_WIDTH * scale;
+        let plot_right = (panel.x1 - pad).max(plot_left + 1.0);
+        let tracks_top = panel.y0 + pad;
+        let tracks = std::array::from_fn(|index| {
+            Rect::from_origin_size(
+                Point::new(
+                    plot_left,
+                    tracks_top + index as f64 * (track_height + track_gap),
+                ),
+                Size::new(plot_right - plot_left, track_height),
+            )
+        });
+        Self {
+            panel,
+            tracks,
+            scale,
+            pad,
+        }
+    }
+}
+
+/// A fixed four-second horizon ending at the newest recorded sample.
+#[derive(Clone, Copy)]
+struct TimelineWindow {
+    start: f32,
+    span: f32,
+}
+
+impl TimelineWindow {
+    fn around(history: &DebugHistory) -> Option<Self> {
+        let latest = history.latest()?.at;
+        let span = super::DEBUG_HISTORY_SECONDS;
+        Some(Self {
+            start: latest - span,
+            span,
+        })
+    }
+
+    fn x(self, lane: Rect, at: f32) -> f64 {
+        let normalized = ((at - self.start) / self.span).clamp(0.0, 1.0);
+        lane.x0 + f64::from(normalized) * lane.width()
+    }
+}
+
+/// The timeline lays its text out once at unscaled sizes, so drawing it scales
+/// the glyphs to the same chrome scale as its geometry.
+fn draw_scaled_left_center(
+    scene: &mut Scene,
+    text: &Text,
+    x: f64,
+    center: f64,
+    color: Color,
+    scale: f64,
+) {
+    let baseline = center + text.cap_height() * scale * 0.5;
+    text.draw_left(
+        scene,
+        Affine::translate((x, baseline)) * Affine::scale(scale),
+        color,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_timeline(
+    scene: &mut Scene,
+    view: &View,
+    hotkey_width: f64,
+    history: &DebugHistory,
+    drop_gap_threshold: f32,
+    palette: Palette,
+    colors: ThemeColors,
+    text_scale: VisualizerTextScale,
+    labels: &TimelineLabels,
+) {
+    let layout = TimelineLayout::new(view, hotkey_width, text_scale);
+    let scale = layout.scale;
+    let panel = layout.panel;
+    if panel.width() < 1.0 || panel.height() < 1.0 {
+        return;
+    }
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        colors.background.with_alpha(0.92),
+        None,
+        &panel,
+    );
+    scene.stroke(
+        &Stroke::new(1.0),
+        Affine::IDENTITY,
+        palette.neutral[2].with_alpha(0.55),
+        None,
+        &panel,
+    );
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        palette.vivid(9).with_alpha(0.55),
+        None,
+        &Rect::from_origin_size(
+            Point::new(panel.x0, panel.y0),
+            Size::new(2.0 * scale, panel.height()),
+        ),
+    );
+
+    for ((track, lane), label) in TimelineTrack::ALL
+        .into_iter()
+        .zip(layout.tracks)
+        .zip(&labels.track_labels)
+    {
+        draw_scaled_left_center(
+            scene,
+            label,
+            panel.x0 + layout.pad,
+            lane.center().y,
+            track.color(palette).with_alpha(0.9),
+            scale,
+        );
+    }
+
+    if let Some(window) = TimelineWindow::around(history) {
+        for (track, lane) in TimelineTrack::ALL.into_iter().zip(layout.tracks) {
+            if let Some(detector) = track.detector() {
+                draw_timeline_triggers(
+                    scene,
+                    history,
+                    window,
+                    lane,
+                    detector,
+                    track.color(palette),
+                    scale,
+                );
+            } else {
+                draw_timeline_drop_gap(
+                    scene,
+                    history,
+                    window,
+                    lane,
+                    drop_gap_threshold,
+                    palette,
+                    scale,
+                );
+            }
+        }
+    }
+}
+
+fn draw_timeline_triggers(
+    scene: &mut Scene,
+    history: &DebugHistory,
+    window: TimelineWindow,
+    lane: Rect,
+    detector: Detector,
+    color: Color,
+    scale: f64,
+) {
+    let width = 2.5 * scale;
+    let height = (lane.height() * 0.5).max(2.0 * scale);
+    let top = lane.center().y - height * 0.5;
+    let mut previous: Option<u32> = None;
+    for sample in history.samples() {
+        let hits = trigger_sample(sample, detector).count;
+        if previous.is_some_and(|prev| hits > prev) {
+            let x = window.x(lane, sample.at);
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                color.with_alpha(0.95),
+                None,
+                &Rect::new(x - width * 0.5, top, x + width * 0.5, top + height),
+            );
+        }
+        previous = Some(hits);
+    }
+}
+
+fn draw_timeline_drop_gap(
+    scene: &mut Scene,
+    history: &DebugHistory,
+    window: TimelineWindow,
+    lane: Rect,
+    threshold: f32,
+    palette: Palette,
+    scale: f64,
+) {
+    let eligibility = palette.vivid(8);
+    let confidence = palette.vivid(4);
+    let range = (DROP_GAP_THRESHOLD_MIN, DROP_GAP_THRESHOLD_MAX);
+
+    // The latch fills the lane while it is armed. One rectangle per continuous
+    // run keeps the fill solid without seams.
+    let mut run_start: Option<f64> = None;
+    for sample in history.samples() {
+        let x = window.x(lane, sample.at);
+        if sample.drop_onset.armed {
+            run_start.get_or_insert(x);
+        } else if let Some(start) = run_start.take() {
+            if x > start {
+                scene.fill(
+                    Fill::NonZero,
+                    Affine::IDENTITY,
+                    eligibility.with_alpha(0.22),
+                    None,
+                    &Rect::new(start, lane.y0, x, lane.y1),
+                );
+            }
+        }
+    }
+    if let Some(start) = run_start {
+        if lane.x1 > start {
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                eligibility.with_alpha(0.22),
+                None,
+                &Rect::new(start, lane.y0, lane.x1, lane.y1),
+            );
+        }
+    }
+
+    draw_level_line(
+        scene,
+        lane,
+        range,
+        threshold,
+        palette.neutral[1].with_alpha(0.35),
+        scale,
+    );
+
+    let mut trace = BezPath::new();
+    let mut started = false;
+    for sample in history.samples() {
+        let x = window.x(lane, sample.at);
+        let y = map_level(lane, range, sample.drop_status.confidence);
+        if started {
+            trace.line_to(Point::new(x, y));
+        } else {
+            trace.move_to(Point::new(x, y));
+            started = true;
+        }
+    }
+    if started {
+        scene.stroke(
+            &Stroke::new(1.1 * scale),
+            Affine::IDENTITY,
+            confidence.with_alpha(0.95),
+            None,
+            &trace,
         );
     }
 }
@@ -5345,6 +5707,45 @@ mod tests {
     fn layout() -> Layout {
         let view = View::fit(Size::new(1280.0, 440.0));
         Layout::new(&view, reference_scale())
+    }
+
+    #[test]
+    fn light_timeline_matches_the_bottom_hotkey_line() {
+        let view = View::fit(Size::new(1280.0, 440.0));
+        let layout = TimelineLayout::new(&view, 700.0, reference_scale());
+        assert_eq!(layout.panel.width(), 700.0);
+        assert_eq!(layout.panel.x1, 1280.0 - HUD_MARGIN);
+        assert_eq!(layout.panel.y1, 440.0 - HUD_MARGIN - TIMELINE_HUD_GAP);
+        assert_eq!(
+            layout.panel.height(),
+            TIMELINE_PAD * 2.0
+                + TIMELINE_TRACKS as f64 * TIMELINE_TRACK_HEIGHT
+                + (TIMELINE_TRACKS - 1) as f64 * TIMELINE_TRACK_GAP
+        );
+        assert_eq!(layout.tracks[0].y0, layout.panel.y0 + TIMELINE_PAD);
+        assert_eq!(
+            layout.tracks[TIMELINE_TRACKS - 1].y1,
+            layout.panel.y1 - TIMELINE_PAD
+        );
+        assert_eq!(layout.tracks.len(), TimelineTrack::ALL.len());
+        for pair in layout.tracks.windows(2) {
+            assert_eq!(pair[0].x0, pair[1].x0);
+            assert_eq!(pair[0].y1 + TIMELINE_TRACK_GAP, pair[1].y0);
+        }
+    }
+
+    #[test]
+    fn timeline_window_keeps_a_fixed_four_second_horizon() {
+        let window = TimelineWindow {
+            start: 6.0,
+            span: crate::visualizer::DEBUG_HISTORY_SECONDS,
+        };
+        let lane = Rect::new(100.0, 0.0, 500.0, 10.0);
+        assert_eq!(window.x(lane, 6.0), 100.0);
+        assert_eq!(window.x(lane, 8.0), 300.0);
+        assert_eq!(window.x(lane, 10.0), 500.0);
+        assert_eq!(window.x(lane, 0.0), 100.0);
+        assert_eq!(window.x(lane, 20.0), 500.0);
     }
 
     #[test]

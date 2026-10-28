@@ -52,7 +52,6 @@ enum Setting {
     Preamp,
     FrameRate,
     Shutter,
-    KickOnsetMinInterval,
     DropGapThreshold,
     DepthFade,
     NearOpacity,
@@ -106,17 +105,6 @@ impl App {
             Setting::FrameRate => {
                 settings.frame_rate_limit = settings.frame_rate_limit.adjusted(adjustment);
                 self.frames.limit_changed(Instant::now());
-            }
-            Setting::KickOnsetMinInterval => {
-                let mut detectors = self.ui.detector_settings();
-                let delta = match adjustment {
-                    Adjustment::Decrease => -0.005,
-                    Adjustment::Increase => 0.005,
-                };
-                detectors.kick_onset_min_interval = (detectors.kick_onset_min_interval + delta)
-                    .clamp(visualizer::FLUX_INTERVAL_MIN, visualizer::FLUX_INTERVAL_MAX);
-                settings.detectors = detectors.clone();
-                self.ui.set_detector_settings(detectors);
             }
             Setting::DropGapThreshold => {
                 let mut detectors = self.ui.detector_settings();
@@ -261,11 +249,8 @@ impl App {
                         KeyCode::KeyD if !event.repeat => {
                             self.ui.set_debug(!self.ui.debug());
                         }
-                        KeyCode::KeyG => {
-                            self.adjust_setting(Setting::KickOnsetMinInterval, Adjustment::Decrease)
-                        }
-                        KeyCode::KeyH => {
-                            self.adjust_setting(Setting::KickOnsetMinInterval, Adjustment::Increase)
+                        KeyCode::KeyG if !event.repeat => {
+                            self.ui.set_timeline(!self.ui.timeline());
                         }
                         KeyCode::KeyJ => {
                             self.adjust_setting(Setting::DropGapThreshold, Adjustment::Decrease)

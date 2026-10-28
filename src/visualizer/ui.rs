@@ -24,7 +24,7 @@ use super::{
     Property, TreeTarget, Visualizer, VisualizerTuning, BAND_COUNT,
 };
 
-const HUD_MARGIN: f64 = 24.0;
+pub(super) const HUD_MARGIN: f64 = 24.0;
 
 /// Window-relative drawing state shared by the HUD and the inspector.
 #[derive(Clone, Copy, PartialEq)]
@@ -92,6 +92,14 @@ impl Readout {
             hints: hints
                 .map(|hint| fonts.layout_ui(hint, 10.0, UiFace::LightItalic))
                 .into(),
+        }
+    }
+
+    /// A caption-only readout for a value without a hotkey.
+    fn label(fonts: &mut Fonts, caption: &str) -> Self {
+        Self {
+            caption: Some(fonts.layout_ui(caption, 8.0, UiFace::Light)),
+            hints: Vec::new(),
         }
     }
 
@@ -260,6 +268,10 @@ pub struct Ui {
     debug_readout: Readout,
     debug_value: Text,
     debug: bool,
+    timeline_readout: Readout,
+    timeline_value: Text,
+    timeline: bool,
+    timeline_labels: debug::TimelineLabels,
     debug_refresh: DebugRefresh,
     debug_snapshot: Option<DebugSnapshot>,
     debug_selection: Option<DebugSelection>,
@@ -358,6 +370,13 @@ impl Ui {
         self.face_settings = None;
     }
 
+    /// Unscaled width of the bottom-right hotkey line, from its left caption to
+    /// the shutter readout. The light timeline uses the same width and scale.
+    fn hotkey_line_width(&self) -> f64 {
+        let shutter = self.shutter_readout.inline_width(&self.shutter_value);
+        shutter + 16.0 + self.line_count_value.width() + 24.0 + self.line_status_value.width()
+    }
+
     fn model_composite(theme: ThemeId) -> ModelComposite {
         if theme.is_light() {
             ModelComposite::Multiplicative
@@ -372,6 +391,9 @@ impl Ui {
         let scene_readout = Readout::inline(&mut fonts, ["MODEL"]);
         let debug_readout = Readout::inline(&mut fonts, ["[D]", "[B]"]);
         let debug_value = Readout::value(&mut fonts, "Debug Off");
+        let timeline_readout = Readout::inline(&mut fonts, ["[G]"]);
+        let timeline_value = Readout::value(&mut fonts, "Timeline Off");
+        let timeline_labels = debug::TimelineLabels::new(&mut fonts);
         let text_scale = config.visualizer_text_scale;
         let text_scale_readout = Readout::inline(&mut fonts, ["[-]", "[+]"]);
         let text_scale_value =
@@ -380,7 +402,7 @@ impl Ui {
         let mut visualizer = Visualizer::new();
         visualizer.set_model_composite(Self::model_composite(selected));
         visualizer.set_detector_settings(detectors.clone());
-        let kick_gap_readout = Readout::new(&mut fonts, "Kick Gap", ["[G]", "[H]"]);
+        let kick_gap_readout = Readout::label(&mut fonts, "Kick Gap");
         let kick_gap_value = Readout::value(
             &mut fonts,
             &format!("{:.0}ms", detectors.kick_onset_min_interval * 1000.0),
@@ -456,6 +478,10 @@ impl Ui {
             debug_readout,
             debug_value,
             debug: false,
+            timeline_readout,
+            timeline_value,
+            timeline: false,
+            timeline_labels,
             debug_refresh: DebugRefresh::default(),
             debug_snapshot: None,
             debug_selection: None,
@@ -530,6 +556,24 @@ impl Ui {
 
     pub fn debug(&self) -> bool {
         self.debug
+    }
+
+    pub fn timeline(&self) -> bool {
+        self.timeline
+    }
+
+    pub fn set_timeline(&mut self, timeline: bool) {
+        if self.timeline == timeline {
+            return;
+        }
+        self.timeline = timeline;
+        let label = if timeline {
+            "Timeline On"
+        } else {
+            "Timeline Off"
+        };
+        self.timeline_value = Readout::value(&mut self.fonts, label);
+        self.face_settings = None;
     }
 
     pub fn set_debug(&mut self, debug: bool) {
@@ -1380,9 +1424,16 @@ impl Ui {
             &hud_colors,
             HintOrder::BeforeValue,
         );
-        self.text_scale_readout.draw_inline(
+        self.timeline_readout.draw_inline(
             scene,
             hud_left * Affine::translate((0.0, -72.0)),
+            &self.timeline_value,
+            &hud_colors,
+            HintOrder::BeforeValue,
+        );
+        self.text_scale_readout.draw_inline(
+            scene,
+            hud_left * Affine::translate((0.0, -96.0)),
             &self.text_scale_value,
             &hud_colors,
             HintOrder::BeforeValue,
@@ -1505,6 +1556,19 @@ impl Ui {
             self.draw_face(view, limit);
             self.face_settings = Some(settings);
         }
+        if self.timeline {
+            debug::draw_timeline(
+                scene,
+                view,
+                self.hotkey_line_width(),
+                self.visualizer.debug_history(),
+                self.detectors.drop_gap_threshold,
+                self.visualizer.palette(),
+                self.theme.colors,
+                self.text_scale,
+                &self.timeline_labels,
+            );
+        }
         if !tree_open {
             if let Some(text) = &self.diagnosis_text {
                 Self::draw_diagnosis(
@@ -1518,7 +1582,8 @@ impl Ui {
             }
         }
         let diagnosis_visible = !tree_open && self.diagnosis_text.is_some();
-        let foreground_changed = diagnosis_visible || self.diagnosis_visible_last_frame;
+        let foreground_changed =
+            diagnosis_visible || self.diagnosis_visible_last_frame || self.timeline;
         self.diagnosis_visible_last_frame = diagnosis_visible;
         let background = if rebuild {
             Frame::Rebuilt(&self.face)
@@ -1575,6 +1640,35 @@ mod tests {
             ),
             "MODEL [\\] 2/3   BLUR [T] ON   WIDTH [;] ['] 100%   FLOOR [L] [R]  35%   POWER [Y] 1.0"
         );
+    }
+
+    #[test]
+    fn light_timeline_redraws_the_foreground_each_frame() {
+        let mut ui = Ui::new(&Config::default()).expect("the bundled fonts and models load");
+        let view = View::fit(Size::new(1280.0, 440.0));
+        let now = Instant::now();
+        let frame_time = FrameTime::new(now, now + Duration::from_millis(16));
+        let mut scene = Scene::new();
+
+        ui.set_timeline(true);
+        {
+            let frame = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
+            assert!(matches!(frame.background, Frame::Rebuilt(_)));
+        }
+        {
+            let frame = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
+            assert!(matches!(frame.background, Frame::Retained(_)));
+        }
+
+        ui.set_timeline(false);
+        {
+            let frame = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
+            assert!(matches!(frame.background, Frame::Rebuilt(_)));
+        }
+        {
+            let frame = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
+            assert!(matches!(frame.background, Frame::Unchanged(_)));
+        }
     }
 
     #[test]

@@ -202,11 +202,11 @@ impl From<NearOpacity> for f32 {
 pub struct CreaseThreshold(f32);
 
 impl CreaseThreshold {
-    pub const MIN_DEGREES: f32 = 10.0;
+    pub const MIN_DEGREES: f32 = 0.0;
     pub const MAX_DEGREES: f32 = 80.0;
     pub const MIN: Self = Self(Self::MIN_DEGREES);
     pub const MAX: Self = Self(Self::MAX_DEGREES);
-    const STEP_DEGREES: f32 = 5.0;
+    const STEP_DEGREES: f32 = 2.5;
 
     pub fn degrees(self) -> f32 {
         self.0
@@ -2749,10 +2749,22 @@ impl Visualizer {
             bass: self.bass.value,
             raw_bass: self.last_spectrum.bass,
             kick: self.kick,
-            kick_onset: status.kick,
-            snare_onset: status.snare,
-            hat_onset: status.hat,
-            drop_onset: status.drop,
+            kick_onset: TriggerStatus {
+                count: self.kick_hits,
+                ..status.kick
+            },
+            snare_onset: TriggerStatus {
+                count: self.snare_hits,
+                ..status.snare
+            },
+            hat_onset: TriggerStatus {
+                count: self.hat_hits,
+                ..status.hat
+            },
+            drop_onset: TriggerStatus {
+                count: self.drop_hits,
+                ..status.drop
+            },
             drop_status: status.drop_status,
             kick_flux: status.kick_flux,
             snare_flux: status.snare_flux,
@@ -2819,10 +2831,22 @@ impl Visualizer {
                 raw: self.last_spectrum.treble,
             },
             kick: self.kick,
-            kick_onset: status.kick,
-            snare_onset: status.snare,
-            hat_onset: status.hat,
-            drop_onset: status.drop,
+            kick_onset: TriggerStatus {
+                count: self.kick_hits,
+                ..status.kick
+            },
+            snare_onset: TriggerStatus {
+                count: self.snare_hits,
+                ..status.snare
+            },
+            hat_onset: TriggerStatus {
+                count: self.hat_hits,
+                ..status.hat
+            },
+            drop_onset: TriggerStatus {
+                count: self.drop_hits,
+                ..status.drop
+            },
             drop_status: status.drop_status,
             kick_flux: status.kick_flux,
             snare_flux: status.snare_flux,
@@ -5020,6 +5044,16 @@ mod tests {
         );
         assert!(quake_seen, "a kick must inject a quake impulse");
         assert!(visualizer.debug_snapshot().kick_hits > 0);
+        assert_eq!(
+            visualizer
+                .debug_history()
+                .latest()
+                .expect("the display recorded a sample")
+                .kick_onset
+                .count,
+            visualizer.debug_snapshot().kick_hits,
+            "history samples carry the confirmed trigger count"
+        );
     }
 
     #[test]

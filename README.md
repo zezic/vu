@@ -28,10 +28,9 @@ On macOS, allow system audio recording when prompted.
   200%. The setting persists in the config file.
 - `C` / `V` - decrease or increase shutter exposure by half a frame, from 1 to
   16 frame intervals.
-- `G` / `H` - decrease or increase the kick onset minimum gap in 5 ms steps,
-  from 5 to 200 ms.
+- `G` - toggle the light onset/drop timeline above the bottom hotkey line.
 - `J` / `K` - decrease or increase the drop gap confidence threshold in 0.05
-  steps, from -1.0 to +1.0. Both detector settings persist in the config file.
+  steps, from -1.0 to +1.0. The setting persists in the config file.
 - `O` / `P` - decrease or increase the depth opacity modulation in 5% steps,
   from 0% (all vertices opaque) to 100% (the farthest vertices fully
   transparent). The setting persists in the config file.
@@ -264,6 +263,14 @@ that is an integer number of cycles for every phase-driven deformation. Crossing
 The selected Gogh theme drives the scene through its four neutral and twelve
 vivid colors. Theme changes crossfade the wireframe palette along with the HUD.
 
+Press `G` to show the light debug timeline above the bottom-right hotkey
+readout. It spans the same four-second display-rate history as the inspector
+graphs and carries five tracks: kick, snare, and hat onset marks; the drop
+eligibility latch and gap confidence line in one drop lane, with the configured
+confidence threshold drawn across it; and confirmed drop triggers. The timeline
+redraws every display frame and is independent of the analysis panel, so `D`
+can stay closed while it runs.
+
 Press `D` to show the live analysis panel. It refreshes once per completed FFT
 hop by default; `B` cycles through FFT-hop, 20, 10, 5, 2, and 1 Hz. The panel
 renders:
@@ -412,14 +419,14 @@ The inspector follows the selection:
   Per-band ABL settings persist as one recipe per band, while the
   relative-excess settings are global. Configs with the previous per-band flux
   recipes still load and use the new defaults.
-- every inspector edit persists in the config: detector changes (also reachable
-  through the `G` / `H` and `J` / `K` hotkeys), envelope rates, kick decay,
-  style values, component gains, band routing, input shaping, mix modes, extra
-  inputs, base values, property mutes, solo state, and adaptive reference
-  tracking. A tuned style value is applied to the current model and to the next
-  model shown; untuned style values keep the defaults. Adaptive reference
-  positions are tracking state, so only the `AUTO REFS` choice is stored and
-  the references adapt again after a restart.
+- every inspector edit persists in the config: detector changes (the drop gap
+  threshold is also reachable through the `J` / `K` hotkeys), envelope rates,
+  kick decay, style values, component gains, band routing, input shaping, mix
+  modes, extra inputs, base values, property mutes, solo state, and adaptive
+  reference tracking. A tuned style value is applied to the current model and to
+  the next model shown; untuned style values keep the defaults. Adaptive
+  reference positions are tracking state, so only the `AUTO REFS` choice is
+  stored and the references adapt again after a restart.
 - composite onset graphs show the decaying trigger flash and mark confirmed
   triggers along the top. The band onset graph shows raw relative excess and
   the processed continuous onset flow, without per-band trigger marks. Every
