@@ -42,6 +42,7 @@ pub enum Detector {
     Flux,
     Kick,
     Snare,
+    Hat,
     Drop,
 }
 
@@ -51,6 +52,7 @@ impl Detector {
             Self::Flux => "FLUX ONSET",
             Self::Kick => "KICK",
             Self::Snare => "SNARE",
+            Self::Hat => "HAT",
             Self::Drop => "DROP",
         }
     }
@@ -88,9 +90,21 @@ impl Detector {
                 Parameter::OnsetFlux(Detector::Snare, FluxSetting::MinInterval),
                 Parameter::OnsetSuppression(Detector::Snare),
                 Parameter::SnareFlipEvery,
+                Parameter::SnarePoiSwitches,
                 Parameter::SnareChoke,
                 Parameter::FlipStiffness,
                 Parameter::FlipDamping,
+            ],
+            Self::Hat => vec![
+                Parameter::PatternArea(Detector::Hat),
+                Parameter::OnsetFlux(Detector::Hat, FluxSetting::PreGain),
+                Parameter::OnsetFlux(Detector::Hat, FluxSetting::Attack),
+                Parameter::OnsetFlux(Detector::Hat, FluxSetting::Release),
+                Parameter::OnsetFlux(Detector::Hat, FluxSetting::Average),
+                Parameter::OnsetFlux(Detector::Hat, FluxSetting::Sensitivity),
+                Parameter::OnsetFlux(Detector::Hat, FluxSetting::MinThreshold),
+                Parameter::OnsetFlux(Detector::Hat, FluxSetting::MinInterval),
+                Parameter::OnsetSuppression(Detector::Hat),
             ],
             Self::Drop => vec![
                 Parameter::DropGapWindow,
@@ -793,6 +807,7 @@ pub enum Parameter {
     KickQuakeFactor,
     KickSequenceEvery,
     SnareFlipEvery,
+    SnarePoiSwitches,
     SnareChoke,
     FlipStiffness,
     FlipDamping,
@@ -804,6 +819,18 @@ pub enum Parameter {
     DropQuakeFactor,
     QuakeStiffness,
     QuakeDamping,
+    FocusStiffness,
+    FocusDamping,
+    MotionStiffness,
+    MotionDamping,
+    OrbitStiffness,
+    OrbitDamping,
+    DollyStiffness,
+    DollyDamping,
+    SelectorAttenuation,
+    SelectorFadeIn,
+    SelectorFadeOut,
+    SelectorColorChance,
     Attack(EnvelopeTarget),
     Release(EnvelopeTarget),
     KickDecay,
@@ -837,7 +864,8 @@ impl Parameter {
             Self::KickDropChoke => "DROP CHOKE",
             Self::KickQuakeFactor => "QUAKE x",
             Self::KickSequenceEvery => "SEQUENCE N",
-            Self::SnareFlipEvery => "FLIP EVERY",
+            Self::SnareFlipEvery => "NORMAL FLIPS",
+            Self::SnarePoiSwitches => "POI SWITCHES",
             Self::SnareChoke => "CHOKE s",
             Self::FlipStiffness => "FLIP K",
             Self::FlipDamping => "FLIP D",
@@ -849,6 +877,18 @@ impl Parameter {
             Self::DropQuakeFactor => "QUAKE x",
             Self::QuakeStiffness => "QUAKE K",
             Self::QuakeDamping => "QUAKE D",
+            Self::FocusStiffness => "FOCUS K",
+            Self::FocusDamping => "FOCUS D",
+            Self::MotionStiffness => "MOTION K",
+            Self::MotionDamping => "MOTION D",
+            Self::OrbitStiffness => "ORBIT K",
+            Self::OrbitDamping => "ORBIT D",
+            Self::DollyStiffness => "DOLLY K",
+            Self::DollyDamping => "DOLLY D",
+            Self::SelectorAttenuation => "SEL ATTEN",
+            Self::SelectorFadeIn => "SEL FADE IN",
+            Self::SelectorFadeOut => "SEL FADE OUT",
+            Self::SelectorColorChance => "SEL COLOR %",
             Self::Attack(_) => "ATTACK",
             Self::Release(_) => "RELEASE",
             Self::KickDecay => "DECAY",
@@ -891,17 +931,32 @@ impl Parameter {
                 super::SEQUENCE_EVERY_MIN as f32,
                 super::SEQUENCE_EVERY_MAX as f32,
             ),
-            Self::SnareFlipEvery => (
+            Self::SnareFlipEvery | Self::SnarePoiSwitches => (
                 super::SEQUENCE_EVERY_MIN as f32,
                 super::SEQUENCE_EVERY_MAX as f32,
             ),
             Self::SnareChoke => (super::CHOKE_MIN, super::CHOKE_MAX),
-            Self::FlipStiffness | Self::QuakeStiffness => {
-                (super::SPRING_STIFFNESS_MIN, super::SPRING_STIFFNESS_MAX)
-            }
-            Self::FlipDamping | Self::QuakeDamping => {
-                (super::SPRING_DAMPING_MIN, super::SPRING_DAMPING_MAX)
-            }
+            Self::FlipStiffness
+            | Self::QuakeStiffness
+            | Self::FocusStiffness
+            | Self::MotionStiffness
+            | Self::OrbitStiffness
+            | Self::DollyStiffness => (super::SPRING_STIFFNESS_MIN, super::SPRING_STIFFNESS_MAX),
+            Self::FlipDamping
+            | Self::QuakeDamping
+            | Self::FocusDamping
+            | Self::MotionDamping
+            | Self::OrbitDamping
+            | Self::DollyDamping => (super::SPRING_DAMPING_MIN, super::SPRING_DAMPING_MAX),
+            Self::SelectorAttenuation | Self::SelectorColorChance => (0.0, 1.0),
+            Self::SelectorFadeIn => (
+                super::showcase::SELECTOR_FADE_IN_MIN,
+                super::showcase::SELECTOR_FADE_IN_MAX,
+            ),
+            Self::SelectorFadeOut => (
+                super::showcase::SELECTOR_FADE_OUT_MIN,
+                super::showcase::SELECTOR_FADE_OUT_MAX,
+            ),
             Self::DropGapWindow => (super::DROP_GAP_WINDOW_MIN, super::DROP_GAP_WINDOW_MAX),
             Self::DropGapGain => (super::DROP_GAP_GAIN_MIN, super::DROP_GAP_GAIN_MAX),
             Self::DropGapThreshold => {
@@ -939,7 +994,7 @@ impl Parameter {
             Self::ExcessFloor => 0.001,
             Self::OnsetFlux(_, setting) => setting.step(),
             Self::OnsetSuppression(_) => 0.01,
-            Self::KickSequenceEvery | Self::SnareFlipEvery => 1.0,
+            Self::KickSequenceEvery | Self::SnareFlipEvery | Self::SnarePoiSwitches => 1.0,
             Self::DropGapWindow
             | Self::DropGapGain
             | Self::DropGapThreshold
@@ -950,9 +1005,20 @@ impl Parameter {
             | Self::SnareChoke
             | Self::KickQuakeFactor
             | Self::DropQuakeFactor => 0.01,
-            Self::FlipStiffness | Self::FlipDamping | Self::QuakeStiffness | Self::QuakeDamping => {
-                0.5
-            }
+            Self::FlipStiffness
+            | Self::FlipDamping
+            | Self::QuakeStiffness
+            | Self::QuakeDamping
+            | Self::FocusStiffness
+            | Self::FocusDamping
+            | Self::MotionStiffness
+            | Self::MotionDamping
+            | Self::OrbitStiffness
+            | Self::OrbitDamping
+            | Self::DollyStiffness
+            | Self::DollyDamping => 0.5,
+            Self::SelectorFadeIn | Self::SelectorFadeOut => 0.005,
+            Self::SelectorAttenuation | Self::SelectorColorChance => 0.01,
             Self::Attack(_) | Self::Release(_) => 0.5,
             Self::KickDecay => 0.1,
             Self::Style(_) => 0.01,
@@ -976,9 +1042,24 @@ impl Parameter {
             }
             Self::ExcessFloor => format!("{value:.3}"),
             Self::OnsetFlux(_, setting) => setting.format(value),
-            Self::FlipStiffness | Self::QuakeStiffness => format!("{value:.1}"),
+            Self::FlipStiffness
+            | Self::QuakeStiffness
+            | Self::FocusStiffness
+            | Self::OrbitStiffness
+            | Self::DollyStiffness
+            | Self::FocusDamping
+            | Self::MotionStiffness
+            | Self::MotionDamping
+            | Self::OrbitDamping
+            | Self::DollyDamping => format!("{value:.1}"),
+            Self::SelectorFadeIn | Self::SelectorFadeOut => format!("{:.0}ms", value * 1000.0),
+            Self::SelectorAttenuation | Self::SelectorColorChance => {
+                format!("{:.0}%", value * 100.0)
+            }
             Self::BandSource(_) => format!("B{:02}", value.round() as usize),
-            Self::KickSequenceEvery | Self::SnareFlipEvery => format!("{value:.0}"),
+            Self::KickSequenceEvery | Self::SnareFlipEvery | Self::SnarePoiSwitches => {
+                format!("{value:.0}")
+            }
             Self::Attack(_) | Self::Release(_) => format!("{value:.1}"),
             Self::InputCurve(_) => Curve::from_index(value.round() as usize).name().to_owned(),
             Self::ExtraSource(_) => Input::from_selectable(value.round() as usize)

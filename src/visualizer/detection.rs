@@ -1,4 +1,4 @@
-//! Per-band relative-excess extraction and the kick, snare, and drop detectors.
+//! Per-band relative-excess extraction and the kick, snare, hi-hat, and drop detectors.
 //!
 //! Every band extracts a continuous onset signal from its FFT bins. Each bin
 //! keeps a background envelope, and the positive relative excess over that
@@ -6,7 +6,7 @@
 //! then position that signal relative to the whole spectrum before the composite
 //! detectors multiply it by their kernels.
 //!
-//! Only the kick, snare, and drop detectors produce boolean onsets, from the
+//! Only the kick, snare, hi-hat, and drop detectors produce boolean onsets, from the
 //! kernel-projected continuous flow. The drop also projects the band levels onto
 //! a low and a high kernel, accumulates their difference in a rolling window,
 //! and gates its onset detector with that window's confidence.
@@ -359,6 +359,33 @@ impl TemporalPattern {
         }
     }
 
+    /// A short, high-band transient that follows a hi-hat rather than a snare.
+    pub fn hat_initial() -> Self {
+        Self {
+            inner: vec![
+                [0.0, 0.62],
+                [0.055, 0.58],
+                [0.11, 0.64],
+                [0.15, 0.78],
+                [0.12, 0.90],
+                [0.05, 1.0],
+                [0.0, 1.0],
+            ],
+            outer: vec![
+                [0.0, 0.50],
+                [0.09, 0.46],
+                [0.19, 0.56],
+                [0.23, 0.76],
+                [0.20, 0.94],
+                [0.09, 1.0],
+                [0.0, 1.0],
+            ],
+            suppression_inner: vec![[0.0, 0.0], [0.07, 0.0], [0.09, 0.22], [0.0, 0.26]],
+            suppression_outer: vec![[0.0, 0.0], [0.12, 0.0], [0.15, 0.30], [0.0, 0.36]],
+            effective: 0.18,
+        }
+    }
+
     /// Approximates a previous step-grid pattern with a band-region rectangle.
     pub fn from_legacy_steps(steps: &[[f32; BAND_COUNT]]) -> Self {
         let mut minimum = BAND_COUNT;
@@ -641,9 +668,22 @@ pub struct DetectorSettings {
     /// Weight of the snare suppression-kernel flow subtracted from its onset flow.
     pub snare_onset_suppression: f32,
     pub snare_flip_every: u32,
+    pub snare_poi_switches: u32,
     pub snare_choke: f32,
     pub flip_stiffness: f32,
     pub flip_damping: f32,
+    /// Temporal onset template for the hi-hat detector.
+    pub hat_pattern: TemporalPattern,
+    /// Trim applied to the hi-hat pattern projection before onset tracking.
+    pub hat_onset_pre_gain: f32,
+    pub hat_onset_attack: f32,
+    pub hat_onset_release: f32,
+    pub hat_onset_average: f32,
+    pub hat_onset_sensitivity: f32,
+    pub hat_onset_min_threshold: f32,
+    pub hat_onset_min_interval: f32,
+    /// Weight of the hi-hat suppression-kernel flow subtracted from its onset flow.
+    pub hat_onset_suppression: f32,
     /// Per-band weights for the low, high, and onset projections.
     pub drop_kernels: DropKernels,
     /// Length of the rolling high-minus-low window in seconds.
@@ -700,9 +740,19 @@ impl Default for DetectorSettings {
             snare_onset_min_interval: 0.100148335,
             snare_onset_suppression: 0.32999998,
             snare_flip_every: 1,
+            snare_poi_switches: 3,
             snare_choke: 0.099999994,
             flip_stiffness: 349.5,
             flip_damping: 18.5,
+            hat_pattern: TemporalPattern::hat_initial(),
+            hat_onset_pre_gain: 1.0054638,
+            hat_onset_attack: 0.001,
+            hat_onset_release: 0.005,
+            hat_onset_average: 0.05,
+            hat_onset_sensitivity: 0.5,
+            hat_onset_min_threshold: 0.125,
+            hat_onset_min_interval: 0.06,
+            hat_onset_suppression: 0.32999998,
             drop_kernels: DropKernels::default(),
             drop_gap_window: 1.0,
             drop_gap_threshold: -0.3,
@@ -922,6 +972,54 @@ impl DetectorSettings {
                 FLUX_SUPPRESSION_MIN,
                 FLUX_SUPPRESSION_MAX,
             ),
+            (
+                "hat_onset_pre_gain",
+                self.hat_onset_pre_gain,
+                FLUX_PRE_GAIN_MIN,
+                FLUX_PRE_GAIN_MAX,
+            ),
+            (
+                "hat_onset_attack",
+                self.hat_onset_attack,
+                FLUX_ATTACK_MIN,
+                FLUX_ATTACK_MAX,
+            ),
+            (
+                "hat_onset_release",
+                self.hat_onset_release,
+                FLUX_RELEASE_MIN,
+                FLUX_RELEASE_MAX,
+            ),
+            (
+                "hat_onset_average",
+                self.hat_onset_average,
+                FLUX_AVERAGE_MIN,
+                FLUX_AVERAGE_MAX,
+            ),
+            (
+                "hat_onset_sensitivity",
+                self.hat_onset_sensitivity,
+                FLUX_SENSITIVITY_MIN,
+                FLUX_SENSITIVITY_MAX,
+            ),
+            (
+                "hat_onset_min_threshold",
+                self.hat_onset_min_threshold,
+                FLUX_THRESHOLD_MIN,
+                ONSET_THRESHOLD_MAX,
+            ),
+            (
+                "hat_onset_min_interval",
+                self.hat_onset_min_interval,
+                FLUX_INTERVAL_MIN,
+                FLUX_INTERVAL_MAX,
+            ),
+            (
+                "hat_onset_suppression",
+                self.hat_onset_suppression,
+                FLUX_SUPPRESSION_MIN,
+                FLUX_SUPPRESSION_MAX,
+            ),
         ] {
             anyhow::ensure!(
                 value.is_finite() && (minimum..=maximum).contains(&value),
@@ -930,6 +1028,7 @@ impl DetectorSettings {
         }
         self.kick_pattern.validate()?;
         self.snare_pattern.validate()?;
+        self.hat_pattern.validate()?;
         for (name, choke) in [
             ("kick_snare_choke", self.kick_snare_choke),
             ("kick_drop_choke", self.kick_drop_choke),
@@ -956,6 +1055,10 @@ impl DetectorSettings {
         anyhow::ensure!(
             (SEQUENCE_EVERY_MIN..=SEQUENCE_EVERY_MAX).contains(&self.snare_flip_every),
             "the snare flip count must be between {SEQUENCE_EVERY_MIN} and {SEQUENCE_EVERY_MAX}"
+        );
+        anyhow::ensure!(
+            (SEQUENCE_EVERY_MIN..=SEQUENCE_EVERY_MAX).contains(&self.snare_poi_switches),
+            "the POI switch count must be between {SEQUENCE_EVERY_MIN} and {SEQUENCE_EVERY_MAX}"
         );
         self.drop_kernels.validate()?;
         anyhow::ensure!(
@@ -1046,12 +1149,27 @@ impl DetectorSettings {
         }
     }
 
+    fn hat_onset_tracker(&self) -> FluxSettings {
+        FluxSettings {
+            attack: self.hat_onset_attack,
+            release: self.hat_onset_release,
+            average: self.hat_onset_average,
+            sensitivity: self.hat_onset_sensitivity,
+            min_threshold: self.hat_onset_min_threshold,
+            min_interval: self.hat_onset_min_interval,
+        }
+    }
+
     pub fn kick_contains(&self, band: usize) -> bool {
         self.kick_pattern.contains_band(band)
     }
 
     pub fn snare_contains(&self, band: usize) -> bool {
         self.snare_pattern.contains_band(band)
+    }
+
+    pub fn hat_contains(&self, band: usize) -> bool {
+        self.hat_pattern.contains_band(band)
     }
 
     pub fn drop_kernel_weights(&self, kernel: DropKernel) -> [f32; BAND_COUNT] {
@@ -1217,9 +1335,19 @@ struct DetectorSettingsRaw {
     snare_onset_min_interval: f32,
     snare_onset_suppression: f32,
     snare_flip_every: u32,
+    snare_poi_switches: u32,
     snare_choke: f32,
     flip_stiffness: f32,
     flip_damping: f32,
+    hat_pattern: Option<TemporalPatternRaw>,
+    hat_onset_pre_gain: f32,
+    hat_onset_attack: f32,
+    hat_onset_release: f32,
+    hat_onset_average: f32,
+    hat_onset_sensitivity: f32,
+    hat_onset_min_threshold: f32,
+    hat_onset_min_interval: f32,
+    hat_onset_suppression: f32,
     drop_gap_window: f32,
     drop_gap_threshold: f32,
     drop_gap_gain: f32,
@@ -1276,6 +1404,7 @@ impl Default for DetectorSettingsRaw {
         raw.legacy_band_flux.clear();
         raw.kick_pattern = None;
         raw.snare_pattern = None;
+        raw.hat_pattern = None;
         raw.legacy_kick_kernel = None;
         raw.legacy_snare_kernel = None;
         raw
@@ -1325,6 +1454,15 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
             snare_pattern.suppression_inner = initial.suppression_inner;
             snare_pattern.suppression_outer = initial.suppression_outer;
         }
+        let mut hat_pattern = raw.hat_pattern.map_or_else(
+            TemporalPattern::hat_initial,
+            TemporalPatternRaw::into_pattern,
+        );
+        if hat_pattern.suppression_inner.len() < 3 || hat_pattern.suppression_outer.len() < 3 {
+            let initial = TemporalPattern::hat_initial();
+            hat_pattern.suppression_inner = initial.suppression_inner;
+            hat_pattern.suppression_outer = initial.suppression_outer;
+        }
         Self {
             band_onset,
             excess: raw.excess,
@@ -1351,9 +1489,19 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
             snare_onset_min_interval: raw.snare_onset_min_interval,
             snare_onset_suppression: raw.snare_onset_suppression,
             snare_flip_every: raw.snare_flip_every,
+            snare_poi_switches: raw.snare_poi_switches,
             snare_choke: raw.snare_choke,
             flip_stiffness: raw.flip_stiffness,
             flip_damping: raw.flip_damping,
+            hat_pattern,
+            hat_onset_pre_gain: raw.hat_onset_pre_gain,
+            hat_onset_attack: raw.hat_onset_attack,
+            hat_onset_release: raw.hat_onset_release,
+            hat_onset_average: raw.hat_onset_average,
+            hat_onset_sensitivity: raw.hat_onset_sensitivity,
+            hat_onset_min_threshold: raw.hat_onset_min_threshold,
+            hat_onset_min_interval: raw.hat_onset_min_interval,
+            hat_onset_suppression: raw.hat_onset_suppression,
             drop_kernels: DropKernels {
                 low: raw.drop_low_kernel,
                 high: raw.drop_high_kernel,
@@ -1423,9 +1571,19 @@ impl From<DetectorSettings> for DetectorSettingsRaw {
             snare_onset_min_interval: settings.snare_onset_min_interval,
             snare_onset_suppression: settings.snare_onset_suppression,
             snare_flip_every: settings.snare_flip_every,
+            snare_poi_switches: settings.snare_poi_switches,
             snare_choke: settings.snare_choke,
             flip_stiffness: settings.flip_stiffness,
             flip_damping: settings.flip_damping,
+            hat_pattern: Some(settings.hat_pattern.clone().into()),
+            hat_onset_pre_gain: settings.hat_onset_pre_gain,
+            hat_onset_attack: settings.hat_onset_attack,
+            hat_onset_release: settings.hat_onset_release,
+            hat_onset_average: settings.hat_onset_average,
+            hat_onset_sensitivity: settings.hat_onset_sensitivity,
+            hat_onset_min_threshold: settings.hat_onset_min_threshold,
+            hat_onset_min_interval: settings.hat_onset_min_interval,
+            hat_onset_suppression: settings.hat_onset_suppression,
             drop_gap_window: settings.drop_gap_window,
             drop_gap_threshold: settings.drop_gap_threshold,
             drop_gap_gain: settings.drop_gap_gain,
@@ -1469,7 +1627,10 @@ impl From<DetectorSettings> for DetectorSettingsRaw {
 pub struct DetectorEvents {
     pub kick: Option<f32>,
     pub snare: Option<f32>,
+    pub hat: Option<f32>,
     pub drop: Option<f32>,
+    /// The gap-confidence latch crossed from unarmed to armed on this hop.
+    pub gap_entry: bool,
 }
 
 /// One onset tracker recipe. Each composite detector keeps its own copy for
@@ -1727,6 +1888,8 @@ struct DropTracker {
     confidence: f32,
     /// Latches high when the window is confident; an onset resets it.
     eligible: bool,
+    /// Whether this hop crossed from unarmed to armed.
+    gap_entry: bool,
     flash: f32,
     last_power: f32,
 }
@@ -1750,6 +1913,7 @@ impl DropTracker {
             diff: 0.0,
             confidence: 0.0,
             eligible: false,
+            gap_entry: false,
             flash: 0.0,
             last_power: 0.0,
         }
@@ -1787,8 +1951,10 @@ impl DropTracker {
         self.confidence = self.window.mean() * settings.drop_gap_gain;
         // A confident window latches eligibility high. Only a composite
         // onset clears it again.
+        let was_eligible = self.eligible;
         self.eligible |= self.window.is_full(now, settings.drop_gap_window)
             && self.confidence >= settings.drop_gap_threshold;
+        self.gap_entry = !was_eligible && self.eligible;
 
         let onset_settings = settings.drop_onset_recipe().tracker;
         let power = self.onset.observe(onset_flux, now, dt, &onset_settings)?;
@@ -1814,12 +1980,13 @@ impl DropTracker {
         self.diff = 0.0;
         self.confidence = 0.0;
         self.eligible = false;
+        self.gap_entry = false;
         self.flash = 0.0;
         self.last_power = 0.0;
     }
 }
 
-/// All per-band trackers and the three confirmed detectors. One `observe` call
+/// All per-band trackers and the four confirmed detectors. One `observe` call
 /// advances the state by one analysis hop.
 pub struct OnsetBank {
     band_excess: [f32; BAND_COUNT],
@@ -1827,14 +1994,16 @@ pub struct OnsetBank {
     band_abl: [f32; BAND_COUNT],
     band_drp: [f32; BAND_COUNT],
     band_onset: [f32; BAND_COUNT],
-    /// Newest per-hop onset flows, used by the temporal kick and snare
-    /// templates.
+    /// Newest per-hop onset flows, used by the temporal kick, snare, and
+    /// hi-hat templates.
     onset_history: VecDeque<[f32; BAND_COUNT]>,
     kick: KickTracker,
     snare: SnareTracker,
+    hat: SnareTracker,
     drop: DropTracker,
     kick_projection: OnsetProjection,
     snare_projection: OnsetProjection,
+    hat_projection: OnsetProjection,
     drop_projection: OnsetProjection,
     time: f32,
 }
@@ -1856,16 +2025,19 @@ impl OnsetBank {
             onset_history: VecDeque::with_capacity(PATTERN_MAX_STEPS),
             kick: KickTracker::default(),
             snare: SnareTracker::default(),
+            hat: SnareTracker::default(),
             drop: DropTracker::default(),
             kick_projection: OnsetProjection::default(),
             snare_projection: OnsetProjection::default(),
+            hat_projection: OnsetProjection::default(),
             drop_projection: OnsetProjection::default(),
             time: 0.0,
         }
     }
 
     /// Feeds one analysis hop. The continuous per-band onset flow is appended
-    /// to the pattern history; kick and snare match their temporal templates
+    /// to the pattern history; kick, snare, and hi-hat match their temporal
+    /// templates
     /// against it, while drop projects the current flow through its onset
     /// kernel. Each composite detector then tracks its own onsets.
     pub fn observe(
@@ -1914,13 +2086,27 @@ impl OnsetBank {
             events.snare = Some(snare);
             self.kick.choke(self.time, settings.snare_choke);
         }
+        let hat_projection = settings.hat_pattern.project(
+            &self.onset_history,
+            settings.hat_onset_suppression,
+            settings.hat_onset_pre_gain,
+            pattern_steps,
+        );
+        self.hat_projection = hat_projection;
+        events.hat = self.hat.observe(
+            hat_projection.residual,
+            self.time,
+            dt,
+            &settings.hat_onset_tracker(),
+        );
         let drop_recipe = settings.drop_onset_recipe();
         let drop_projection = drop_recipe.project(&tracked);
         self.drop_projection = drop_projection;
-        if let Some(drop) =
-            self.drop
-                .observe(self.time, spectrum, drop_projection.residual, settings, dt)
-        {
+        let drop = self
+            .drop
+            .observe(self.time, spectrum, drop_projection.residual, settings, dt);
+        events.gap_entry = self.drop.gap_entry;
+        if let Some(drop) = drop {
             events.drop = Some(drop);
             self.kick.choke(self.time, settings.kick_drop_choke);
         }
@@ -1949,9 +2135,11 @@ impl OnsetBank {
         self.onset_history.clear();
         self.kick.reset();
         self.snare.reset();
+        self.hat.reset();
         self.drop.reset();
         self.kick_projection = OnsetProjection::default();
         self.snare_projection = OnsetProjection::default();
+        self.hat_projection = OnsetProjection::default();
         self.drop_projection = OnsetProjection::default();
         self.time = 0.0;
     }
@@ -1983,6 +2171,13 @@ impl OnsetBank {
                 armed: false,
                 choked: false,
             },
+            hat: TriggerStatus {
+                flash: self.hat.flash,
+                power: self.hat.last_power,
+                count: 0,
+                armed: false,
+                choked: false,
+            },
             drop: TriggerStatus {
                 flash: self.drop.flash,
                 power: self.drop.last_power,
@@ -1992,6 +2187,7 @@ impl OnsetBank {
             },
             kick_flux: onset_flux_status(&self.kick.onset, self.kick_projection),
             snare_flux: onset_flux_status(&self.snare.onset, self.snare_projection),
+            hat_flux: onset_flux_status(&self.hat.onset, self.hat_projection),
             drop_status: DropStatus {
                 low: self.drop.low,
                 high: self.drop.high,
@@ -2075,9 +2271,11 @@ pub struct DetectionStatus {
     pub bands: [BandStatus; BAND_COUNT],
     pub kick: TriggerStatus,
     pub snare: TriggerStatus,
+    pub hat: TriggerStatus,
     pub drop: TriggerStatus,
     pub kick_flux: OnsetFluxStatus,
     pub snare_flux: OnsetFluxStatus,
+    pub hat_flux: OnsetFluxStatus,
     pub drop_status: DropStatus,
 }
 
@@ -2274,6 +2472,35 @@ mod tests {
         assert!(settings.snare_contains(4));
         assert!(settings.snare_contains(15));
         assert!(!settings.snare_contains(1));
+        assert!(settings.hat_contains(15));
+        assert!(!settings.hat_contains(0));
+    }
+
+    #[test]
+    fn the_hat_kernel_matches_high_band_flow() {
+        let settings = defaults();
+        let mut high = VecDeque::new();
+        let mut low = VecDeque::new();
+        for _ in 0..8 {
+            high.push_back(std::array::from_fn(
+                |band| if band >= 9 { 1.0 } else { 0.0 },
+            ));
+            low.push_back(std::array::from_fn(|band| if band < 6 { 1.0 } else { 0.0 }));
+        }
+        let high = settings.hat_pattern.project(
+            &high,
+            settings.hat_onset_suppression,
+            settings.hat_onset_pre_gain,
+            8,
+        );
+        let low = settings.hat_pattern.project(
+            &low,
+            settings.hat_onset_suppression,
+            settings.hat_onset_pre_gain,
+            8,
+        );
+        assert!(high.residual > low.residual);
+        assert!(high.residual > 0.0);
     }
 
     #[test]
@@ -2395,6 +2622,7 @@ mod tests {
         for pattern in [
             TemporalPattern::kick_initial(),
             TemporalPattern::snare_initial(),
+            TemporalPattern::hat_initial(),
         ] {
             pattern.validate().expect("initial patterns stay valid");
         }
@@ -2573,11 +2801,16 @@ mod tests {
         let mut drop = DropTracker::default();
         let dt = 1.0 / 86.0;
         let mut now = 0.0;
+        let mut entries = 0;
         for _ in 0..12 {
             now += dt;
             drop.observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt);
+            if drop.gap_entry {
+                entries += 1;
+            }
         }
         assert!(drop.eligible);
+        assert_eq!(entries, 1, "eligibility reports one entry edge");
 
         // The bass returns and confidence falls, but no onset has cleared the
         // latched eligibility yet.

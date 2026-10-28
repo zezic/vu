@@ -657,12 +657,65 @@ impl Ui {
             }
         }
         let layout = debug::Layout::new(view, self.text_scale);
-        if layout.flux_button.contains(position) {
-            self.debug_selection = Some(DebugSelection::Flux);
-            self.tree_target = None;
-            self.clear_drag();
-            self.face_settings = None;
-            return true;
+        for (button, selection) in [
+            (layout.hat_button, DebugSelection::Hat),
+            (layout.scene_button, DebugSelection::Scene),
+            (layout.flux_button, DebugSelection::Flux),
+        ] {
+            if button.contains(position) {
+                self.debug_selection = Some(selection);
+                self.tree_target = None;
+                self.clear_drag();
+                self.face_settings = None;
+                return true;
+            }
+        }
+        if self.debug_selection == Some(DebugSelection::Hat) {
+            let panel = debug::hat_analyzer_layout(view, self.text_scale);
+            let panel_scale = view.ui_scale() * f64::from(self.text_scale.factor());
+            if panel.rect.width() >= debug::TREE_MIN_VISIBLE_WIDTH * panel_scale
+                && panel.rect.height() >= 200.0 * panel_scale
+                && panel.rect.contains(position)
+            {
+                if let Some(action) = panel.action_at(position) {
+                    self.apply_tree_action(action);
+                    return true;
+                }
+                if let Some(slider) = panel.slider_at(position) {
+                    self.begin_slider(slider.parameter, slider.track, position);
+                    return true;
+                }
+                if let Some(temporal) = panel.temporal {
+                    if temporal.offset.contains(position) {
+                        self.begin_offset(temporal.offset, position);
+                        return true;
+                    }
+                    if temporal.canvas.contains(position) {
+                        self.handle_pattern_click(
+                            temporal.detector,
+                            temporal.canvas,
+                            position,
+                            panel_scale,
+                        );
+                        return true;
+                    }
+                }
+                return true;
+            }
+        }
+        if self.debug_selection == Some(DebugSelection::Scene) {
+            let panel = debug::scene_analyzer_layout(view, self.text_scale);
+            let panel_scale = view.ui_scale() * f64::from(self.text_scale.factor());
+            if panel.rect.width() >= debug::TREE_MIN_VISIBLE_WIDTH * panel_scale
+                && panel.rect.height() >= 200.0 * panel_scale
+                && panel.rect.contains(position)
+            {
+                if let Some(slider) = panel.slider_at(position) {
+                    self.begin_slider(slider.parameter, slider.track, position);
+                    return true;
+                }
+                return true;
+            }
         }
         if self.debug_selection == Some(DebugSelection::Flux) {
             let panel = debug::flux_analyzer_layout(view, self.text_scale, self.flux_band);
@@ -833,6 +886,7 @@ impl Ui {
         let pattern = match detector {
             Detector::Kick => &settings.kick_pattern,
             Detector::Snare => &settings.snare_pattern,
+            Detector::Hat => &settings.hat_pattern,
             Detector::Drop | Detector::Flux => return,
         };
         let kernel = self.temporal_view.kernel;
@@ -1535,6 +1589,27 @@ mod tests {
             Some(DebugSelection::Property(Property::Pulse))
         );
         assert!(!ui.click_debug(&view, Point::new(1.0, 1.0)));
+    }
+
+    #[test]
+    fn header_buttons_open_hat_and_scene_panels() {
+        let (mut ui, view) = drawn_ui();
+        let layout = debug::Layout::new(&view, ui.text_scale);
+        assert!(ui.click_debug(&view, layout.hat_button.center()));
+        assert_eq!(ui.debug_selection, Some(DebugSelection::Hat));
+        let hat = debug::hat_analyzer_layout(&view, ui.text_scale);
+        assert!(!hat.sliders.is_empty());
+        assert!(hat.temporal.is_some(), "the hat pattern editor is shown");
+
+        assert!(ui.click_debug(&view, layout.scene_button.center()));
+        assert_eq!(ui.debug_selection, Some(DebugSelection::Scene));
+        let scene = debug::scene_analyzer_layout(&view, ui.text_scale);
+        assert_eq!(scene.sliders.len(), 12);
+        let slider = scene.sliders[0];
+        let before = ui.visualizer.parameter_value(slider.parameter);
+        assert!(ui.click_debug(&view, Point::new(slider.track.x0, slider.track.center().y)));
+        let after = ui.visualizer.parameter_value(slider.parameter);
+        assert!(after < before, "the scene slider edits the live setting");
     }
 
     #[test]

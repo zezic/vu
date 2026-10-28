@@ -1,7 +1,7 @@
 //! Loads the binary glTF meshes backing the model visualizer.
 
 use std::{
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet},
     fs,
     path::Path,
 };
@@ -17,11 +17,21 @@ use super::{
 /// and any external resources out of the crate's compiled assets.
 const MODEL_DIRECTORY: &str = "assets/models";
 
+/// The node whose subtree moves backward when the ejection port is focused.
+pub(super) const SLIDE_NODE: &str = "slide";
+
 /// A loaded model centered on the origin and normalized to unit radius.
 pub struct Model {
+    /// Title-cased file stem for the HUD.
     pub name: String,
+    /// Exact file stem, used to match the authored weapon catalog.
+    pub id: String,
     vertices: Vec<Vec3>,
     edges: Vec<ModelEdge>,
+    vertex_parts: Vec<u16>,
+    parts: Vec<ModelPart>,
+    anchors: BTreeMap<String, Anchor>,
+    node_parts: BTreeMap<String, Vec<u16>>,
 }
 
 impl Model {
@@ -45,46 +55,220 @@ impl Model {
             .default_scene()
             .or_else(|| gltf.scenes().next())
             .context("the model has no scene to load")?;
-        let mut builder = Builder::default();
+        let meshes: Vec<_> = gltf.meshes().collect();
+        let mut nodes: Vec<Option<RawNode>> = (0..gltf.nodes().count()).map(|_| None).collect();
         let mut stack: Vec<_> = scene
             .nodes()
-            .map(|node| (node, Transform::IDENTITY))
+            .map(|node| (node, Transform::IDENTITY, None))
             .collect();
-        while let Some((node, parent)) = stack.pop() {
+        while let Some((node, parent, parent_index)) = stack.pop() {
             let transform = parent.then(Transform::from_gltf(node.transform().matrix()));
-            if let Some(mesh) = node.mesh() {
-                builder.push_mesh(&mesh, transform, &get_buffer)?;
-            }
+            let index = node.index();
+            ensure!(
+                nodes[index].is_none(),
+                "the model scene visits node {index} twice"
+            );
+            nodes[index] = Some(RawNode {
+                name: node.name().unwrap_or("").to_owned(),
+                parent: parent_index,
+                transform,
+                mesh: node.mesh().map(|mesh| mesh.index()),
+            });
             for child in node.children() {
-                stack.push((child, transform));
+                stack.push((child, transform, Some(index)));
             }
         }
-        let (vertices, edges) = builder.finish()?;
-        let model = Self {
+
+        let mut builder = Builder::default();
+        let mut node_part = vec![None; nodes.len()];
+        for (index, node) in nodes.iter().enumerate() {
+            let Some(node) = node else {
+                continue;
+            };
+            let Some(mesh_index) = node.mesh else {
+                continue;
+            };
+            let mesh = meshes
+                .get(mesh_index)
+                .context("the model references an unknown mesh")?;
+            let name = if node.name.is_empty() {
+                mesh.name().unwrap_or("part").to_owned()
+            } else {
+                node.name.clone()
+            };
+            let part = builder.push_part(mesh, node.transform, name, &get_buffer)?;
+            node_part[index] = Some(part);
+        }
+        let BuiltModel {
+            mut vertices,
+            vertex_parts,
+            edges,
+            parts,
+        } = builder.finish()?;
+        ensure!(
+            !vertices.is_empty(),
+            "the model has no mesh geometry to show"
+        );
+        let (model_center, model_scale) = fit_to_unit_radius(&mut vertices)?;
+
+        let mut anchors = BTreeMap::new();
+        let mut part_anchors = Vec::with_capacity(parts.len());
+        for part in &parts {
+            let range = part.start..part.start + part.len;
+            let (center, radius, size) = bounds(&vertices[range]);
+            part_anchors.push(Anchor {
+                center,
+                radius,
+                size,
+                part: Some(part.index),
+            });
+        }
+        for (index, node) in nodes.iter().enumerate() {
+            let Some(node) = node else {
+                continue;
+            };
+            if node.name.is_empty() {
+                continue;
+            }
+            let anchor = match node_part[index] {
+                Some(part) => part_anchors[part as usize],
+                None => {
+                    let center = (node.transform.translation() - model_center) * model_scale;
+                    let size = node.transform.scale() * model_scale;
+                    Anchor {
+                        center,
+                        radius: 0.5 * size.length(),
+                        size,
+                        part: None,
+                    }
+                }
+            };
+            if let Entry::Vacant(entry) = anchors.entry(node.name.clone()) {
+                entry.insert(anchor);
+            }
+        }
+
+        let children = child_indices(&nodes);
+        let mut node_parts: BTreeMap<String, Vec<u16>> = BTreeMap::new();
+        for (index, node) in nodes.iter().enumerate() {
+            let Some(node) = node else {
+                continue;
+            };
+            if node.name.is_empty() {
+                continue;
+            }
+            let mut parts = BTreeSet::new();
+            collect_parts(index, &node_part, &children, &mut parts);
+            node_parts
+                .entry(node.name.clone())
+                .or_default()
+                .extend(parts);
+        }
+        for parts in node_parts.values_mut() {
+            parts.sort_unstable();
+            parts.dedup();
+        }
+
+        let id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .context("the model file name is not valid UTF-8")?
+            .to_owned();
+        Ok(Self {
             name: display_name(path),
+            id,
             vertices,
             edges,
-        };
-        ensure!(
-            model.edges_at(CreaseThreshold::MIN).next().is_some(),
-            "the model has no feature edges at the {} degree minimum crease threshold",
-            CreaseThreshold::MIN_DEGREES
-        );
-        Ok(model)
+            vertex_parts,
+            parts,
+            anchors,
+            node_parts,
+        })
     }
 
     /// Builds the wireframe for one crease angle. The model's vertices are
     /// already normalized, so changing the threshold keeps the framing.
     pub fn wireframe(&self, crease: CreaseThreshold) -> Wireframe {
-        Wireframe::from_edges(self.vertices.clone(), self.edges_at(crease).collect())
+        let cosine_limit = crease.degrees().to_radians().cos();
+        let mut edges = Vec::new();
+        let mut edge_parts = Vec::new();
+        for edge in &self.edges {
+            if edge.kind.visible_at(cosine_limit) {
+                edges.push(edge.points);
+                edge_parts.push(edge.part);
+            }
+        }
+        Wireframe::from_parts(
+            self.vertices.clone(),
+            edges,
+            self.vertex_parts.clone(),
+            edge_parts,
+            u16::try_from(self.parts.len()).expect("the model has too many mesh parts"),
+        )
     }
 
-    fn edges_at(&self, crease: CreaseThreshold) -> impl Iterator<Item = [u16; 2]> + '_ {
-        let cosine_limit = crease.degrees().to_radians().cos();
-        self.edges
-            .iter()
-            .filter(move |edge| edge.kind.visible_at(cosine_limit))
-            .map(|edge| edge.points)
+    /// The mesh part or empty box registered under a glTF node name.
+    pub fn anchor(&self, name: &str) -> Option<Anchor> {
+        self.anchors.get(name).copied()
+    }
+
+    /// Mesh parts belonging to a named node and all of its descendants.
+    pub fn node_parts(&self, name: &str) -> &[u16] {
+        self.node_parts.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn part_name(&self, part: u16) -> &str {
+        &self.parts[part as usize].name
+    }
+
+    pub fn part_count(&self) -> u16 {
+        u16::try_from(self.parts.len()).expect("the model has too many mesh parts")
+    }
+}
+
+/// One semantic target in the model: a mesh part or a scaled empty box.
+#[derive(Clone, Copy, Debug)]
+pub struct Anchor {
+    /// Bounds center in normalized model space.
+    pub center: Vec3,
+    /// Bounding-sphere radius in normalized model space.
+    pub radius: f32,
+    /// Full box or mesh AABB dimensions in normalized model space.
+    pub size: Vec3,
+    /// The mesh part this anchor highlights, or `None` for an empty.
+    pub part: Option<u16>,
+}
+
+/// A loaded mesh node's vertex range in the model wireframe.
+struct ModelPart {
+    name: String,
+    index: u16,
+    start: usize,
+    len: usize,
+}
+
+/// One unique geometric edge and how sharply its two faces meet.
+#[derive(Clone, Copy)]
+struct ModelEdge {
+    points: [u16; 2],
+    kind: EdgeKind,
+    part: u16,
+}
+
+#[derive(Clone, Copy)]
+enum EdgeKind {
+    /// Boundary or non-manifold edges stay at every threshold.
+    Always,
+    /// Absolute cosine of the angle between the two adjacent face normals.
+    Crease(f32),
+}
+
+impl EdgeKind {
+    fn visible_at(self, cosine_limit: f32) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Crease(cosine) => cosine < cosine_limit,
+        }
     }
 }
 
@@ -128,30 +312,6 @@ impl ModelSet {
     /// One-based position and total count for the HUD.
     pub fn position(&self) -> (usize, usize) {
         (self.current + 1, self.models.len())
-    }
-}
-
-/// One unique geometric edge and how sharply its two faces meet.
-#[derive(Clone, Copy)]
-struct ModelEdge {
-    points: [u16; 2],
-    kind: EdgeKind,
-}
-
-#[derive(Clone, Copy)]
-enum EdgeKind {
-    /// Boundary or non-manifold edges stay at every threshold.
-    Always,
-    /// Absolute cosine of the angle between the two adjacent face normals.
-    Crease(f32),
-}
-
-impl EdgeKind {
-    fn visible_at(self, cosine_limit: f32) -> bool {
-        match self {
-            Self::Always => true,
-            Self::Crease(cosine) => cosine < cosine_limit,
-        }
     }
 }
 
@@ -238,15 +398,150 @@ impl Transform {
         }
         Self(result)
     }
+
+    fn translation(self) -> Vec3 {
+        Vec3::new(self.0[3][0], self.0[3][1], self.0[3][2])
+    }
+
+    fn scale(self) -> Vec3 {
+        let column = |index: usize| Vec3::new(self.0[index][0], self.0[index][1], self.0[index][2]);
+        Vec3::new(column(0).length(), column(1).length(), column(2).length())
+    }
+}
+
+struct RawNode {
+    name: String,
+    parent: Option<usize>,
+    transform: Transform,
+    mesh: Option<usize>,
+}
+
+fn child_indices(nodes: &[Option<RawNode>]) -> Vec<Vec<usize>> {
+    let mut children = vec![Vec::new(); nodes.len()];
+    for (index, node) in nodes.iter().enumerate() {
+        if let Some(parent) = node.as_ref().and_then(|node| node.parent) {
+            children[parent].push(index);
+        }
+    }
+    children
+}
+
+fn collect_parts(
+    node: usize,
+    node_part: &[Option<u16>],
+    children: &[Vec<usize>],
+    parts: &mut BTreeSet<u16>,
+) {
+    if let Some(part) = node_part[node] {
+        parts.insert(part);
+    }
+    for &child in &children[node] {
+        collect_parts(child, node_part, children, parts);
+    }
+}
+
+fn bounds(vertices: &[Vec3]) -> (Vec3, f32, Vec3) {
+    let mut minimum = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let mut maximum = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for vertex in vertices {
+        minimum.x = minimum.x.min(vertex.x);
+        minimum.y = minimum.y.min(vertex.y);
+        minimum.z = minimum.z.min(vertex.z);
+        maximum.x = maximum.x.max(vertex.x);
+        maximum.y = maximum.y.max(vertex.y);
+        maximum.z = maximum.z.max(vertex.z);
+    }
+    let center = (minimum + maximum) * 0.5;
+    let radius = vertices
+        .iter()
+        .map(|&vertex| (vertex - center).length())
+        .fold(0.0_f32, f32::max);
+    (center, radius, maximum - minimum)
+}
+
+struct BuiltModel {
+    vertices: Vec<Vec3>,
+    vertex_parts: Vec<u16>,
+    edges: Vec<ModelEdge>,
+    parts: Vec<ModelPart>,
 }
 
 #[derive(Default)]
 struct Builder {
     vertices: Vec<Vec3>,
-    triangles: Vec<[u32; 3]>,
+    vertex_parts: Vec<u16>,
+    edges: Vec<ModelEdge>,
+    parts: Vec<ModelPart>,
 }
 
 impl Builder {
+    fn push_part<'s, F>(
+        &mut self,
+        mesh: &gltf::Mesh<'_>,
+        transform: Transform,
+        name: String,
+        get_buffer: &F,
+    ) -> anyhow::Result<u16>
+    where
+        F: for<'a> Fn(gltf::Buffer<'a>) -> Option<&'s [u8]> + Clone,
+    {
+        let mut local = LocalBuilder::default();
+        local.push_mesh(mesh, transform, get_buffer)?;
+        let (part_vertices, part_edges) = local.finish()?;
+        let index = u16::try_from(self.parts.len()).context("the model has too many mesh parts")?;
+        let start = self.vertices.len();
+        let base = u16::try_from(start).context("the model has too many vertices")?;
+        for vertex in part_vertices {
+            self.vertices.push(vertex);
+            self.vertex_parts.push(index);
+        }
+        for edge in part_edges {
+            self.edges.push(ModelEdge {
+                points: [
+                    base.checked_add(edge.points[0])
+                        .context("the model has too many vertices")?,
+                    base.checked_add(edge.points[1])
+                        .context("the model has too many vertices")?,
+                ],
+                kind: edge.kind,
+                part: index,
+            });
+        }
+        self.parts.push(ModelPart {
+            name,
+            index,
+            start,
+            len: self.vertices.len() - start,
+        });
+        Ok(index)
+    }
+
+    fn finish(self) -> anyhow::Result<BuiltModel> {
+        ensure!(
+            !self.vertices.is_empty(),
+            "the model has no non-degenerate triangles"
+        );
+        ensure!(
+            self.vertices.len() <= u16::MAX as usize + 1,
+            "the model has {} distinct vertices, but the wireframe renderer indexes with u16",
+            self.vertices.len()
+        );
+        Ok(BuiltModel {
+            vertices: self.vertices,
+            vertex_parts: self.vertex_parts,
+            edges: self.edges,
+            parts: self.parts,
+        })
+    }
+}
+
+#[derive(Default)]
+struct LocalBuilder {
+    vertices: Vec<Vec3>,
+    triangles: Vec<[u32; 3]>,
+}
+
+impl LocalBuilder {
     fn push_mesh<'s, F>(
         &mut self,
         mesh: &gltf::Mesh<'_>,
@@ -335,11 +630,11 @@ impl Builder {
             .collect();
         ensure!(
             !triangles.is_empty(),
-            "the model has no non-degenerate triangles"
+            "the model part has no non-degenerate triangles"
         );
         ensure!(
             vertices.len() <= u16::MAX as usize + 1,
-            "the model has {} distinct vertices, but the wireframe renderer indexes with u16",
+            "the model part has {} distinct vertices, but the wireframe renderer indexes with u16",
             vertices.len()
         );
         let normals: Vec<Option<Vec3>> = triangles
@@ -376,40 +671,29 @@ impl Builder {
                     _ => EdgeKind::Always,
                 };
                 ModelEdge {
-                    points: [a as u16, b as u16],
+                    points: [
+                        u16::try_from(a).expect("part vertices fit u16"),
+                        u16::try_from(b).expect("part vertices fit u16"),
+                    ],
                     kind,
+                    part: 0,
                 }
             })
             .collect();
-        fit_to_unit_radius(&mut vertices)?;
         Ok((vertices, edges))
     }
 }
 
 /// Centers the wireframe on the origin and scales it to unit radius so every
-/// model uses the same camera framing.
-fn fit_to_unit_radius(vertices: &mut [Vec3]) -> anyhow::Result<()> {
-    let mut minimum = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
-    let mut maximum = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for vertex in vertices.iter() {
-        minimum.x = minimum.x.min(vertex.x);
-        minimum.y = minimum.y.min(vertex.y);
-        minimum.z = minimum.z.min(vertex.z);
-        maximum.x = maximum.x.max(vertex.x);
-        maximum.y = maximum.y.max(vertex.y);
-        maximum.z = maximum.z.max(vertex.z);
-    }
-    let center = (minimum + maximum) * 0.5;
-    let radius = vertices
-        .iter()
-        .map(|&vertex| (vertex - center).length())
-        .fold(0.0_f32, f32::max);
+/// model uses the same camera framing. Returns the applied center and scale.
+fn fit_to_unit_radius(vertices: &mut [Vec3]) -> anyhow::Result<(Vec3, f32)> {
+    let (center, radius, _) = bounds(vertices);
     ensure!(radius > 1e-6, "the model has no spatial extent");
     let scale = 1.0 / radius;
     for vertex in vertices {
         *vertex = (*vertex - center) * scale;
     }
-    Ok(())
+    Ok((center, scale))
 }
 
 fn triangle_normal(a: Vec3, b: Vec3, c: Vec3) -> Option<Vec3> {
@@ -434,6 +718,12 @@ mod tests {
             assert!((edge[0] as usize) < wireframe.vertex_count());
             assert!((edge[1] as usize) < wireframe.vertex_count());
             assert_ne!(edge[0], edge[1]);
+        }
+        for (index, edge) in wireframe.edges().iter().enumerate() {
+            assert_eq!(
+                wireframe.edge_part(index),
+                wireframe.vertex_part(edge[0] as usize)
+            );
         }
         let mut sorted = wireframe.edges().to_vec();
         sorted.sort_unstable();
@@ -476,6 +766,39 @@ mod tests {
             let wireframe = model.wireframe(CreaseThreshold::MIN);
             assert!(wireframe.vertex_count() > 0);
             assert!(!wireframe.edges().is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn deagle_exposes_named_anchors_and_mesh_parts() -> anyhow::Result<()> {
+        let path = model_paths()?
+            .into_iter()
+            .find(|path| path.file_stem().is_some_and(|stem| stem == "pist_deagle"))
+            .context("the deagle model is bundled")?;
+        let model = Model::load_file(&path)?;
+        assert_eq!(model.id, "pist_deagle");
+        assert!(model.part_count() >= 7);
+
+        let slide = model.anchor("slide").context("the slide anchor exists")?;
+        assert!(slide.part.is_some());
+        assert!(slide.radius > 0.0);
+        let slide_parts = model.node_parts(SLIDE_NODE);
+        assert!(
+            slide_parts.len() >= 2,
+            "the slide subtree includes the rear sight"
+        );
+        assert!(slide_parts.contains(&slide.part.expect("a mesh anchor has a part")));
+
+        let port = model
+            .anchor("ejection_port")
+            .context("the ejection port anchor exists")?;
+        assert!(port.part.is_none());
+        assert!(port.size.z > 0.0);
+        assert!(port.radius > 0.0);
+
+        for name in ["muzzle", "trigger_guard", "frame", "magazine"] {
+            assert!(model.anchor(name).is_some(), "{name} is a POI anchor");
         }
         Ok(())
     }

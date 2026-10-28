@@ -149,18 +149,48 @@ impl std::ops::Mul<f32> for Vec3 {
 pub struct Wireframe {
     vertices: Vec<Vec3>,
     edges: Vec<[u16; 2]>,
+    /// Mesh part that owns each vertex.
+    vertex_parts: Vec<u16>,
+    /// Mesh part that owns each edge.
+    edge_parts: Vec<u16>,
 }
 
 impl Wireframe {
-    /// Builds a wireframe from an indexed mesh. Vertices must already be in
-    /// model space; the caller is responsible for fitting them to the camera.
-    /// The edge list may be empty when a coarse crease threshold hides every
-    /// feature of a smooth model.
+    /// Builds a single-part wireframe from an indexed mesh. Vertices must
+    /// already be in model space; the caller is responsible for fitting them
+    /// to the camera. The edge list may be empty when a coarse crease
+    /// threshold hides every feature of a smooth model.
+    #[cfg(test)]
     pub fn from_edges(vertices: Vec<Vec3>, edges: Vec<[u16; 2]>) -> Self {
+        let vertex_parts = vec![0; vertices.len()];
+        let edge_parts = vec![0; edges.len()];
+        Self::from_parts(vertices, edges, vertex_parts, edge_parts, 1)
+    }
+
+    /// Builds a wireframe whose vertices and edges remember the glTF mesh
+    /// part they came from.
+    pub fn from_parts(
+        vertices: Vec<Vec3>,
+        edges: Vec<[u16; 2]>,
+        vertex_parts: Vec<u16>,
+        edge_parts: Vec<u16>,
+        part_count: u16,
+    ) -> Self {
         assert!(!vertices.is_empty(), "a wireframe needs a vertex");
+        assert!(part_count > 0, "a wireframe needs a mesh part");
         assert!(
             vertices.len() <= u16::MAX as usize + 1,
             "wireframe vertices are indexed by u16"
+        );
+        assert_eq!(
+            vertex_parts.len(),
+            vertices.len(),
+            "every wireframe vertex must belong to a mesh part"
+        );
+        assert_eq!(
+            edge_parts.len(),
+            edges.len(),
+            "every wireframe edge must belong to a mesh part"
         );
         let vertex_count = vertices.len();
         assert!(
@@ -169,7 +199,20 @@ impl Wireframe {
             }),
             "every wireframe edge must join two distinct vertices"
         );
-        Self { vertices, edges }
+        assert!(
+            vertex_parts.iter().all(|&part| part < part_count),
+            "every wireframe vertex part must exist"
+        );
+        assert!(
+            edge_parts.iter().all(|&part| part < part_count),
+            "every wireframe edge part must exist"
+        );
+        Self {
+            vertices,
+            edges,
+            vertex_parts,
+            edge_parts,
+        }
     }
 
     pub fn vertex_count(&self) -> usize {
@@ -182,6 +225,14 @@ impl Wireframe {
 
     pub fn vertex(&self, index: usize) -> Vec3 {
         self.vertices[index]
+    }
+
+    pub fn vertex_part(&self, index: usize) -> u16 {
+        self.vertex_parts[index]
+    }
+
+    pub fn edge_part(&self, index: usize) -> u16 {
+        self.edge_parts[index]
     }
 }
 
@@ -281,37 +332,106 @@ impl Pose {
             ..self
         }
     }
+
+    /// Applies the model orientation and scale without projecting.
+    pub fn orient(self, vertex: Vec3) -> Vec3 {
+        vertex
+            .rotate_y(self.yaw)
+            .rotate_x(self.pitch)
+            .rotate_z(self.roll)
+            * self.scale
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
     pub center: Vec2,
     pub focal: f32,
+    /// Smaller viewport extent, used to convert between focal length and FOV.
+    pub minimum: f32,
 }
 
 impl Camera {
     pub fn new(width: f32, height: f32, zoom: f32) -> Self {
-        let minimum = width.min(height);
+        let minimum = width.min(height).max(1.0);
         Self {
             center: Vec2::new(width / 2.0, height / 2.0),
-            focal: minimum.max(1.0) * 1.28 * zoom.clamp(0.35, 3.0),
+            focal: minimum * 1.28 * zoom.clamp(0.35, 3.0),
+            minimum,
         }
     }
 
-    pub fn project(self, vertex: Vec3, pose: Pose) -> Projected {
-        let rotated = vertex
-            .rotate_y(pose.yaw)
-            .rotate_x(pose.pitch)
-            .rotate_z(pose.roll)
-            * pose.scale;
-        let depth = (rotated.z + pose.distance).max(0.4);
-        let perspective = self.focal / depth;
-        let screen = Vec2::new(
-            self.center.x + rotated.x * perspective + pose.shake.x,
-            self.center.y + rotated.y * perspective + pose.shake.y,
+    /// Final focal length for a vertical/horizontal reference FOV.
+    pub fn focal_for_fov(self, fov: f32) -> f32 {
+        assert!(
+            fov.is_finite() && fov > 0.0 && fov < std::f32::consts::PI,
+            "camera FOV must be finite and between zero and pi"
         );
-        Projected { screen, depth }
+        self.minimum * 0.5 / (fov * 0.5).tan()
     }
+
+    /// The FOV represented by the current focal length.
+    pub fn fov(self) -> f32 {
+        2.0 * (self.minimum * 0.5 / self.focal).atan()
+    }
+
+    pub fn project(self, vertex: Vec3, pose: Pose) -> Projected {
+        let rotated = pose.orient(vertex);
+        self.project_oriented(rotated, pose.distance, pose.shake, self.focal, 0.4)
+    }
+
+    /// Projects a vertex after blending toward a POI-focused view. The target
+    /// and orbit are expressed in model space and blended by `focus.blend`.
+    pub fn project_focused(self, vertex: Vec3, pose: Pose, focus: FocusProjection) -> Projected {
+        let posed = pose.orient(vertex);
+        let target = pose.orient(focus.target) * focus.blend;
+        let relative = posed - target;
+        let rotated = relative
+            .rotate_y(focus.yaw * focus.blend)
+            .rotate_x(focus.pitch * focus.blend);
+        let distance = pose.distance + (focus.distance - pose.distance) * focus.blend;
+        let focal = self.focal + (focus.focal - self.focal) * focus.blend;
+        let focused_near = (focus.distance * 0.05).max(0.001);
+        let near = 0.4 + (focused_near - 0.4) * focus.blend;
+        self.project_oriented(rotated, distance, pose.shake, focal, near)
+    }
+
+    fn project_oriented(
+        self,
+        vertex: Vec3,
+        distance: f32,
+        shake: Vec2,
+        focal: f32,
+        near: f32,
+    ) -> Projected {
+        let raw_depth = vertex.z + distance;
+        let depth = raw_depth.max(near);
+        let perspective = focal / depth;
+        let screen = Vec2::new(
+            self.center.x + vertex.x * perspective + shake.x,
+            self.center.y + vertex.y * perspective + shake.y,
+        );
+        Projected {
+            screen,
+            depth,
+            visible: raw_depth > near,
+        }
+    }
+}
+
+/// A partially blended POI view applied after the model pose.
+#[derive(Clone, Copy, Debug)]
+pub struct FocusProjection {
+    /// POI center in model space.
+    pub target: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    /// Camera distance for the focused framing.
+    pub distance: f32,
+    /// Camera focal length for the focused FOV.
+    pub focal: f32,
+    /// Zero keeps the normal view; one uses the focused view.
+    pub blend: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -319,6 +439,8 @@ pub struct Projected {
     pub screen: Vec2,
     /// View-space distance from the camera before projection.
     pub depth: f32,
+    /// Whether the vertex is in front of the near plane.
+    pub visible: bool,
 }
 
 /// Maps one model's view depths onto the edge opacity ramp. The closest vertex
@@ -369,6 +491,7 @@ impl DepthOpacity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::visualizer::showcase::framed_distance;
 
     fn cube() -> Wireframe {
         let mut vertices = Vec::new();
@@ -419,6 +542,82 @@ mod tests {
             }
         }
         assert!(near > far, "the front face projects larger than the back");
+    }
+
+    #[test]
+    fn focused_projection_centers_the_poi() {
+        let camera = Camera::new(1280.0, 440.0, 1.0);
+        let pose = Pose::default();
+        let target = Vec3::new(0.2, 0.1, -0.1);
+        let focus = FocusProjection {
+            target,
+            yaw: 0.6,
+            pitch: 0.3,
+            distance: 3.0,
+            focal: camera.focal_for_fov(0.7),
+            blend: 1.0,
+        };
+        let projected = camera.project_focused(target, pose, focus);
+        assert!((projected.screen.x - camera.center.x).abs() < 1e-4);
+        assert!((projected.screen.y - camera.center.y).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zero_focus_blend_matches_the_normal_projection() {
+        let camera = Camera::new(1280.0, 440.0, 1.0);
+        let pose = Pose::default();
+        let vertex = Vec3::new(0.4, -0.2, 0.3);
+        let focus = FocusProjection {
+            target: Vec3::new(0.2, 0.1, -0.1),
+            yaw: 0.6,
+            pitch: 0.3,
+            distance: 3.0,
+            focal: camera.focal_for_fov(0.7),
+            blend: 0.0,
+        };
+        let normal = camera.project(vertex, pose);
+        let focused = camera.project_focused(vertex, pose, focus);
+        assert!((normal.screen - focused.screen).length() < 1e-4);
+        assert!((normal.depth - focused.depth).abs() < 1e-4);
+    }
+
+    #[test]
+    fn focused_projection_marks_vertices_behind_the_camera_invisible() {
+        let camera = Camera::new(1280.0, 440.0, 1.0);
+        let pose = Pose::default();
+        let focus = FocusProjection {
+            target: Vec3::new(0.0, 0.0, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 0.1,
+            focal: camera.focal_for_fov(2.0),
+            blend: 1.0,
+        };
+        let behind = camera.project_focused(Vec3::new(0.0, 0.0, -1.0), pose, focus);
+        assert!(!behind.visible);
+        let in_front = camera.project_focused(Vec3::new(0.0, 0.0, 0.02), pose, focus);
+        assert!(in_front.visible);
+        assert!(
+            in_front.depth < 0.4,
+            "close focus uses a near plane below the normal one"
+        );
+    }
+
+    #[test]
+    fn camera_fov_round_trips_and_dolly_distance_shrinks_with_wide_fov() {
+        let camera = Camera::new(1280.0, 440.0, 1.0);
+        for fov in [
+            30.0_f32.to_radians(),
+            60.0_f32.to_radians(),
+            120.0_f32.to_radians(),
+        ] {
+            let focal = camera.focal_for_fov(fov);
+            let described = Camera { focal, ..camera };
+            assert!((described.fov() - fov).abs() < 1e-4);
+        }
+        let narrow = framed_distance(1.0, 30.0_f32.to_radians());
+        let wide = framed_distance(1.0, 120.0_f32.to_radians());
+        assert!(narrow > wide, "wide FOV uses a closer camera");
     }
 
     #[test]

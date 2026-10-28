@@ -67,6 +67,8 @@ pub(super) struct Layout {
     pub panel: Rect,
     pub extension: Rect,
     pub flux_button: Rect,
+    pub hat_button: Rect,
+    pub scene_button: Rect,
     band_rows: [Rect; BAND_COUNT],
     property_cells: [Rect; Property::COUNT],
     property_mute: [Rect; Property::COUNT],
@@ -100,13 +102,30 @@ impl Layout {
             .max(1.0);
         let panel =
             Rect::from_origin_size(Point::new(x0, y0), Size::new(panel_width, panel_height));
-        let flux_button_width = 58.0 * scale;
+        let button_gap = 3.0 * scale;
+        let flux_button_width = 44.0 * scale;
+        let scene_button_width = 42.0 * scale;
+        let hat_button_width = 28.0 * scale;
         let flux_button = Rect::from_origin_size(
             Point::new(
                 x0 + panel_width - 8.0 * scale - flux_button_width,
                 y0 + 2.0 * scale,
             ),
             Size::new(flux_button_width, header_height - 4.0 * scale),
+        );
+        let scene_button = Rect::from_origin_size(
+            Point::new(
+                flux_button.x0 - button_gap - scene_button_width,
+                y0 + 2.0 * scale,
+            ),
+            Size::new(scene_button_width, header_height - 4.0 * scale),
+        );
+        let hat_button = Rect::from_origin_size(
+            Point::new(
+                scene_button.x0 - button_gap - hat_button_width,
+                y0 + 2.0 * scale,
+            ),
+            Size::new(hat_button_width, header_height - 4.0 * scale),
         );
 
         let band_top = y0 + header_height;
@@ -166,6 +185,8 @@ impl Layout {
             panel,
             extension,
             flux_button,
+            hat_button,
+            scene_button,
             band_rows,
             property_cells,
             property_mute,
@@ -251,6 +272,26 @@ pub(super) fn draw(
             flux_band, pointer,
         );
         extension
+    } else if matches!(selection, Some(DebugSelection::Hat)) {
+        let (_, extension) = inspector_panes(view, text_scale);
+        draw_hat_analyzer(
+            fonts,
+            scene,
+            view,
+            visualizer,
+            palette,
+            colors,
+            text_scale,
+            temporal_view,
+            pointer,
+        );
+        extension
+    } else if matches!(selection, Some(DebugSelection::Scene)) {
+        let (_, extension) = inspector_panes(view, text_scale);
+        draw_scene_analyzer(
+            fonts, scene, view, visualizer, palette, colors, text_scale, pointer,
+        );
+        extension
     } else if let Some(property) = property {
         let (_, extension) = inspector_panes(view, text_scale);
         draw_computation_tree(
@@ -330,7 +371,7 @@ fn draw_panel(
         ),
         (9.5 * scale) as f32,
         UiFace::SemiBold,
-        panel.width() - 16.0 * scale - layout.flux_button.width() - 6.0 * scale,
+        layout.hat_button.x0 - panel.x0 - 14.0 * scale,
     );
     let header_center = panel.y0 + HEADER_HEIGHT * scale * 0.5;
     draw_left_center(
@@ -340,45 +381,28 @@ fn draw_panel(
         header_center,
         palette.vivid(9),
     );
-    let flux_active = selection == Some(DebugSelection::Flux);
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        if flux_active {
-            palette.vivid(9).with_alpha(0.24)
-        } else {
-            palette.neutral[0].with_alpha(0.08)
-        },
-        None,
-        &layout.flux_button,
-    );
-    scene.stroke(
-        &Stroke::new(0.8 * scale),
-        Affine::IDENTITY,
-        palette
-            .vivid(9)
-            .with_alpha(if flux_active { 0.9 } else { 0.5 }),
-        None,
-        &layout.flux_button,
-    );
-    let flux_label = fit(
-        fonts,
-        "FLUX ENV",
-        (7.0 * scale) as f32,
-        UiFace::SemiBold,
-        layout.flux_button.width() - 4.0 * scale,
-    );
-    draw_left_center(
-        scene,
-        &flux_label,
-        layout.flux_button.center().x - flux_label.width() * 0.5,
-        layout.flux_button.center().y,
-        if flux_active {
-            palette.vivid(9)
-        } else {
-            palette.neutral[1]
-        },
-    );
+    for (button, label, active, color) in [
+        (
+            layout.hat_button,
+            "HAT",
+            selection == Some(DebugSelection::Hat),
+            palette.vivid(11),
+        ),
+        (
+            layout.scene_button,
+            "SCENE",
+            selection == Some(DebugSelection::Scene),
+            palette.vivid(3),
+        ),
+        (
+            layout.flux_button,
+            "FLUX",
+            selection == Some(DebugSelection::Flux),
+            palette.vivid(9),
+        ),
+    ] {
+        draw_header_button(fonts, scene, button, label, active, color, palette, scale);
+    }
 
     for (index, band) in snapshot.bands.iter().enumerate() {
         let row = layout.band_rows[index];
@@ -644,6 +668,51 @@ fn draw_panel(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn draw_header_button(
+    fonts: &mut Fonts,
+    scene: &mut Scene,
+    rect: Rect,
+    label: &str,
+    active: bool,
+    color: Color,
+    palette: Palette,
+    scale: f64,
+) {
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        if active {
+            color.with_alpha(0.24)
+        } else {
+            palette.neutral[0].with_alpha(0.08)
+        },
+        None,
+        &rect,
+    );
+    scene.stroke(
+        &Stroke::new(0.8 * scale),
+        Affine::IDENTITY,
+        color.with_alpha(if active { 0.9 } else { 0.5 }),
+        None,
+        &rect,
+    );
+    let label = fit(
+        fonts,
+        label,
+        (6.5 * scale) as f32,
+        UiFace::SemiBold,
+        rect.width() - 4.0 * scale,
+    );
+    draw_left_center(
+        scene,
+        &label,
+        rect.center().x - label.width() * 0.5,
+        rect.center().y,
+        if active { color } else { palette.neutral[1] },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_extension(
     fonts: &mut Fonts,
     scene: &mut Scene,
@@ -738,11 +807,18 @@ fn draw_extension(
             DebugSelection::Flux => {
                 unreachable!("the flux analyzer uses InspectorFocus::Flux")
             }
+            DebugSelection::Hat => {
+                unreachable!("the hi-hat analyzer uses InspectorFocus::Detector")
+            }
+            DebugSelection::Scene => {
+                unreachable!("the scene panel uses InspectorFocus::Scene")
+            }
         },
         InspectorFocus::Detector(detector) => {
             detector_extension_text(detector, snapshot, visualizer)
         }
         InspectorFocus::Flux(band) => flux_extension_text(band, snapshot, visualizer),
+        InspectorFocus::Scene => scene_extension_text(snapshot, visualizer),
     };
 
     let heading = fit(
@@ -828,12 +904,35 @@ fn detector_extension_text(
     let hits = match detector {
         Detector::Kick => snapshot.kick_hits,
         Detector::Snare => snapshot.snare_hits,
+        Detector::Hat => snapshot.hat_hits,
         _ => 0,
     };
     (
         format!("{} TRIGGER  {}", detector.name(), trigger_state(&trigger)),
         format!("ONSET FLUX {:.3}/{:.3}", onset.smoothed, onset.threshold),
         format!("HITS {hits}  LAST {:.2}", trigger.power),
+    )
+}
+
+fn scene_extension_text(
+    snapshot: &DebugSnapshot,
+    visualizer: &Visualizer,
+) -> (String, String, String) {
+    let selector = if visualizer.showcase_selector_active() {
+        visualizer.showcase_selected_mesh().unwrap_or("ON")
+    } else {
+        "OFF"
+    };
+    (
+        format!("SCENE {}", visualizer.showcase_mode_name()),
+        format!(
+            "POI {}  TARGETS {}  N {}  M {}",
+            visualizer.showcase_target_name().unwrap_or("-"),
+            visualizer.showcase_poi_count(),
+            visualizer.showcase_poi_switches(),
+            visualizer.showcase_normal_flips()
+        ),
+        format!("SELECTOR {selector}  HAT HITS {}", snapshot.hat_hits),
     )
 }
 
@@ -973,7 +1072,7 @@ pub(super) struct ActionRow {
 }
 
 /// The onset-input spectrogram and per-band temporal template editor for the
-/// kick and snare detectors.
+/// kick, snare, and hi-hat detectors.
 #[derive(Clone, Copy)]
 pub(super) struct TemporalBank {
     pub detector: Detector,
@@ -2033,6 +2132,290 @@ fn draw_flux_analyzer(
     }
 }
 
+pub(super) fn hat_analyzer_layout(view: &View, text_scale: VisualizerTextScale) -> TreeLayout {
+    let scale = view.ui_scale() * f64::from(text_scale.factor());
+    let rect = tree_rect(view, text_scale);
+    let parameter_panel = Rect::new(
+        rect.x0 + 8.0 * scale,
+        rect.y0 + 25.0 * scale,
+        rect.x1 - 8.0 * scale,
+        rect.y1 - 5.0 * scale,
+    );
+    let parameters = Detector::Hat.parameters();
+    let action_rows = Vec::new();
+    let sliders = slider_rows(
+        parameter_panel,
+        &parameters,
+        scale,
+        0,
+        TREE_PARAM_ROW * scale,
+    );
+    let temporal = temporal_bank(
+        parameter_panel,
+        &sliders,
+        &action_rows,
+        scale,
+        Detector::Hat,
+    );
+    TreeLayout {
+        rect,
+        rows: Vec::new(),
+        sliders,
+        actions: action_rows,
+        kernels: Vec::new(),
+        temporal,
+        flux_bank: None,
+        onset_graphs: None,
+        parameter_title: "ONSET & PATTERN".to_owned(),
+        parameter_panel,
+    }
+}
+
+pub(super) fn scene_analyzer_layout(view: &View, text_scale: VisualizerTextScale) -> TreeLayout {
+    let scale = view.ui_scale() * f64::from(text_scale.factor());
+    let rect = tree_rect(view, text_scale);
+    let parameter_panel = Rect::new(
+        rect.x0 + 8.0 * scale,
+        rect.y0 + 25.0 * scale,
+        rect.x1 - 8.0 * scale,
+        rect.y1 - 5.0 * scale,
+    );
+    let parameters = vec![
+        Parameter::FocusStiffness,
+        Parameter::FocusDamping,
+        Parameter::MotionStiffness,
+        Parameter::MotionDamping,
+        Parameter::OrbitStiffness,
+        Parameter::OrbitDamping,
+        Parameter::DollyStiffness,
+        Parameter::DollyDamping,
+        Parameter::SelectorAttenuation,
+        Parameter::SelectorFadeIn,
+        Parameter::SelectorFadeOut,
+        Parameter::SelectorColorChance,
+    ];
+    let action_rows = Vec::new();
+    let sliders = slider_rows(
+        parameter_panel,
+        &parameters,
+        scale,
+        0,
+        TREE_PARAM_ROW * scale,
+    );
+    TreeLayout {
+        rect,
+        rows: Vec::new(),
+        sliders,
+        actions: action_rows,
+        kernels: Vec::new(),
+        temporal: None,
+        flux_bank: None,
+        onset_graphs: None,
+        parameter_title: "SHOWCASE".to_owned(),
+        parameter_panel,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_hat_analyzer(
+    fonts: &mut Fonts,
+    scene: &mut Scene,
+    view: &View,
+    visualizer: &Visualizer,
+    palette: Palette,
+    colors: ThemeColors,
+    text_scale: VisualizerTextScale,
+    temporal_view: &TemporalView,
+    pointer: Option<Point>,
+) {
+    let scale = view.ui_scale() * f64::from(text_scale.factor());
+    let layout = hat_analyzer_layout(view, text_scale);
+    let rect = layout.rect;
+    if rect.width() < TREE_MIN_VISIBLE_WIDTH * scale || rect.height() < 200.0 * scale {
+        return;
+    }
+    let color = palette.vivid(11);
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        colors.background.with_alpha(0.94),
+        None,
+        &rect,
+    );
+    scene.stroke(
+        &Stroke::new(1.0),
+        Affine::IDENTITY,
+        color.with_alpha(0.55),
+        None,
+        &rect,
+    );
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        color.with_alpha(0.85),
+        None,
+        &Rect::from_origin_size(
+            Point::new(rect.x0, rect.y0),
+            Size::new(2.0 * scale, rect.height()),
+        ),
+    );
+    let heading = fit(
+        fonts,
+        "HI-HAT DETECTOR",
+        (9.5 * scale) as f32,
+        UiFace::SemiBold,
+        rect.width() - 70.0 * scale,
+    );
+    draw_left_center(
+        scene,
+        &heading,
+        rect.x0 + 8.0 * scale,
+        rect.y0 + 8.0 * scale,
+        color,
+    );
+    let subtitle = fit(
+        fonts,
+        "short high-band transient / drives the selector",
+        (7.0 * scale) as f32,
+        UiFace::LightItalic,
+        rect.width() - 16.0 * scale,
+    );
+    draw_left_center(
+        scene,
+        &subtitle,
+        rect.x0 + 8.0 * scale,
+        rect.y0 + 18.0 * scale,
+        palette.neutral[1].with_alpha(0.75),
+    );
+    draw_slider_content(
+        fonts,
+        scene,
+        layout.parameter_panel,
+        &layout.parameter_title,
+        &layout.sliders,
+        &layout.actions,
+        &[],
+        None,
+        visualizer,
+        palette,
+        colors,
+        scale,
+        pointer,
+    );
+    if let Some(temporal) = layout.temporal {
+        draw_temporal_bank(
+            fonts,
+            scene,
+            temporal,
+            visualizer,
+            palette,
+            scale,
+            temporal_view,
+            pointer,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_scene_analyzer(
+    fonts: &mut Fonts,
+    scene: &mut Scene,
+    view: &View,
+    visualizer: &Visualizer,
+    palette: Palette,
+    colors: ThemeColors,
+    text_scale: VisualizerTextScale,
+    pointer: Option<Point>,
+) {
+    let scale = view.ui_scale() * f64::from(text_scale.factor());
+    let layout = scene_analyzer_layout(view, text_scale);
+    let rect = layout.rect;
+    if rect.width() < TREE_MIN_VISIBLE_WIDTH * scale || rect.height() < 200.0 * scale {
+        return;
+    }
+    let color = palette.vivid(3);
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        colors.background.with_alpha(0.94),
+        None,
+        &rect,
+    );
+    scene.stroke(
+        &Stroke::new(1.0),
+        Affine::IDENTITY,
+        color.with_alpha(0.55),
+        None,
+        &rect,
+    );
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        color.with_alpha(0.85),
+        None,
+        &Rect::from_origin_size(
+            Point::new(rect.x0, rect.y0),
+            Size::new(2.0 * scale, rect.height()),
+        ),
+    );
+    let heading = fit(
+        fonts,
+        "SCENE / SHOWCASE",
+        (9.5 * scale) as f32,
+        UiFace::SemiBold,
+        rect.width() - 70.0 * scale,
+    );
+    draw_left_center(
+        scene,
+        &heading,
+        rect.x0 + 8.0 * scale,
+        rect.y0 + 8.0 * scale,
+        color,
+    );
+    let selector = if visualizer.showcase_selector_active() {
+        visualizer.showcase_selected_mesh().unwrap_or("ON")
+    } else {
+        "OFF"
+    };
+    let subtitle = format!(
+        "{}  POI {}  N {}  M {}  SEL {}",
+        visualizer.showcase_mode_name(),
+        visualizer.showcase_target_name().unwrap_or("-"),
+        visualizer.showcase_poi_switches(),
+        visualizer.showcase_normal_flips(),
+        selector
+    );
+    let subtitle = fit(
+        fonts,
+        &subtitle,
+        (7.0 * scale) as f32,
+        UiFace::LightItalic,
+        rect.width() - 16.0 * scale,
+    );
+    draw_left_center(
+        scene,
+        &subtitle,
+        rect.x0 + 8.0 * scale,
+        rect.y0 + 18.0 * scale,
+        palette.neutral[1].with_alpha(0.75),
+    );
+    draw_slider_content(
+        fonts,
+        scene,
+        layout.parameter_panel,
+        &layout.parameter_title,
+        &layout.sliders,
+        &layout.actions,
+        &layout.kernels,
+        None,
+        visualizer,
+        palette,
+        colors,
+        scale,
+        pointer,
+    );
+}
+
 fn target_input(target: TreeTarget) -> Option<Input> {
     match target {
         TreeTarget::Contribution(Contribution::Fixed(point, index)) => {
@@ -2139,6 +2522,7 @@ fn target_color(row: &TreeRow, palette: Palette, routing: &BandRouting, mixer: &
             Detector::Flux => palette.vivid(9),
             Detector::Kick => palette.vivid(0),
             Detector::Snare => palette.vivid(2),
+            Detector::Hat => palette.vivid(11),
             Detector::Drop => palette.vivid(8),
         };
     }
@@ -2728,6 +3112,7 @@ fn draw_temporal_bank(
     let pattern = match temporal.detector {
         Detector::Kick => &settings.kick_pattern,
         Detector::Snare => &settings.snare_pattern,
+        Detector::Hat => &settings.hat_pattern,
         Detector::Drop | Detector::Flux => return,
     };
     let kernel = view.kernel;
@@ -3479,6 +3864,8 @@ enum InspectorFocus {
     Detector(Detector),
     /// The per-band onset analyzer, with the selected band.
     Flux(usize),
+    /// The normal/POI showcase settings and live state.
+    Scene,
 }
 
 fn inspector_focus(
@@ -3489,6 +3876,12 @@ fn inspector_focus(
     if selection == DebugSelection::Flux {
         return InspectorFocus::Flux(flux_band);
     }
+    if selection == DebugSelection::Hat {
+        return InspectorFocus::Detector(Detector::Hat);
+    }
+    if selection == DebugSelection::Scene {
+        return InspectorFocus::Scene;
+    }
     let detector = match tree_target {
         Some(TreeTarget::Detector(detector)) => Some(detector),
         Some(TreeTarget::Input(Input::KickOnset)) => Some(Detector::Kick),
@@ -3497,7 +3890,7 @@ fn inspector_focus(
         _ => None,
     };
     match detector {
-        Some(detector @ (Detector::Kick | Detector::Snare | Detector::Drop)) => {
+        Some(detector @ (Detector::Kick | Detector::Snare | Detector::Hat | Detector::Drop)) => {
             InspectorFocus::Detector(detector)
         }
         _ => InspectorFocus::Selection(selection),
@@ -3511,7 +3904,7 @@ pub(super) fn detector_focused(
 ) -> bool {
     matches!(
         inspector_focus(selection, tree_target, flux_band),
-        InspectorFocus::Detector(_) | InspectorFocus::Flux(_)
+        InspectorFocus::Detector(_) | InspectorFocus::Flux(_) | InspectorFocus::Scene
     )
 }
 
@@ -3521,8 +3914,10 @@ impl InspectorFocus {
             Self::Selection(selection) => selection.color(palette),
             Self::Detector(Detector::Kick) => palette.vivid(0),
             Self::Detector(Detector::Snare) => palette.vivid(2),
+            Self::Detector(Detector::Hat) => palette.vivid(11),
             Self::Detector(Detector::Drop) | Self::Detector(Detector::Flux) => palette.vivid(8),
             Self::Flux(_) => palette.vivid(9),
+            Self::Scene => palette.vivid(3),
         }
     }
 }
@@ -3532,6 +3927,7 @@ fn trigger_sample(sample: &DebugSample, detector: Detector) -> TriggerStatus {
         Detector::Flux => TriggerStatus::ZERO,
         Detector::Kick => sample.kick_onset,
         Detector::Snare => sample.snare_onset,
+        Detector::Hat => sample.hat_onset,
         Detector::Drop => sample.drop_onset,
     }
 }
@@ -3541,6 +3937,7 @@ fn trigger_snapshot(snapshot: &DebugSnapshot, detector: Detector) -> TriggerStat
         Detector::Flux => TriggerStatus::ZERO,
         Detector::Kick => snapshot.kick_onset,
         Detector::Snare => snapshot.snare_onset,
+        Detector::Hat => snapshot.hat_onset,
         Detector::Drop => snapshot.drop_onset,
     }
 }
@@ -3549,6 +3946,7 @@ fn onset_flux_snapshot(snapshot: &DebugSnapshot, detector: Detector) -> OnsetFlu
     match detector {
         Detector::Kick => snapshot.kick_flux,
         Detector::Snare => snapshot.snare_flux,
+        Detector::Hat => snapshot.hat_flux,
         Detector::Drop => snapshot.drop_status.onset,
         Detector::Flux => OnsetFluxStatus::default(),
     }
@@ -3558,6 +3956,7 @@ fn onset_flux_sample(sample: &DebugSample, detector: Detector) -> OnsetFluxStatu
     match detector {
         Detector::Kick => sample.kick_flux,
         Detector::Snare => sample.snare_flux,
+        Detector::Hat => sample.hat_flux,
         Detector::Drop => sample.drop_status.onset,
         Detector::Flux => OnsetFluxStatus::default(),
     }
@@ -3612,6 +4011,7 @@ impl GraphSource {
             Self::Onset(Detector::Flux) => palette.vivid(9),
             Self::Onset(Detector::Kick) => palette.vivid(0),
             Self::Onset(Detector::Snare) => palette.vivid(2),
+            Self::Onset(Detector::Hat) => palette.vivid(11),
             Self::Onset(Detector::Drop) | Self::DropEligible => palette.vivid(8),
             Self::Kick => palette.vivid(0),
             Self::Property(property) => palette.vivid(property.index()),
@@ -3624,6 +4024,9 @@ impl GraphSource {
             }
             Self::DetectorOnsetFlux(Detector::Snare)
             | Self::DetectorSuppression(Detector::Snare) => palette.vivid(2),
+            Self::DetectorOnsetFlux(Detector::Hat) | Self::DetectorSuppression(Detector::Hat) => {
+                palette.vivid(11)
+            }
             Self::DetectorOnsetFlux(Detector::Drop)
             | Self::DetectorOnsetFlux(Detector::Flux)
             | Self::DetectorSuppression(Detector::Drop)
@@ -3796,6 +4199,11 @@ fn detector_graph_sources(detector: Detector, flux_band: usize) -> Vec<GraphSour
             GraphSource::DetectorSuppression(Detector::Snare),
             GraphSource::Onset(Detector::Snare),
         ],
+        Detector::Hat => vec![
+            GraphSource::DetectorOnsetFlux(Detector::Hat),
+            GraphSource::DetectorSuppression(Detector::Hat),
+            GraphSource::Onset(Detector::Hat),
+        ],
         Detector::Flux => vec![
             GraphSource::BandOnset(flux_band),
             GraphSource::Band(flux_band),
@@ -3851,7 +4259,7 @@ fn graph_sources(selection: DebugSelection, visualizer: &Visualizer) -> Vec<Grap
                 }
             }
         }
-        DebugSelection::Flux => {}
+        DebugSelection::Flux | DebugSelection::Hat | DebugSelection::Scene => {}
     }
     graphs
 }
@@ -3881,6 +4289,7 @@ fn extension_graph_cells(
         InspectorFocus::Selection(selection) => graph_sources(selection, visualizer),
         InspectorFocus::Detector(detector) => detector_graph_sources(detector, 0),
         InspectorFocus::Flux(band) => detector_graph_sources(Detector::Flux, band),
+        InspectorFocus::Scene => Vec::new(),
     };
     if graphs.is_empty() || graphs_top >= inner.y1 {
         return (Vec::new(), 0);
@@ -4143,7 +4552,7 @@ fn graph_usage_for_focus(
             | GraphSource::DetectorOnsetFlux(_)
             | GraphSource::DetectorSuppression(_) => "",
         },
-        DebugSelection::Flux => "",
+        DebugSelection::Flux | DebugSelection::Hat | DebugSelection::Scene => "",
     }
 }
 

@@ -6,6 +6,7 @@ mod detection;
 mod geometry;
 mod model;
 mod renderer;
+mod showcase;
 mod spectrum;
 mod ui;
 
@@ -31,6 +32,8 @@ pub use detection::{
     SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX, SPRING_STIFFNESS_MIN,
 };
 use detection::{OnsetBank, QuakeSequence, Spring};
+pub use showcase::ShowcaseSettings;
+use showcase::{FocusPoi, Showcase, ShowcaseFrame};
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -50,7 +53,8 @@ use crate::{
 };
 
 use geometry::{
-    soft_saturate, Camera, Deformation, DepthOpacity, Pose, Projected, Vec2, Vec3, Wireframe,
+    soft_saturate, Camera, Deformation, DepthOpacity, FocusProjection, Pose, Projected, Vec2, Vec3,
+    Wireframe,
 };
 pub use spectrum::{RelativeExcessSettings, BAND_COUNT};
 use spectrum::{Spectrum, SpectrumAnalyzer};
@@ -625,6 +629,7 @@ pub struct VisualizerTuning {
     pub mixer: MixerTuning,
     pub gates: PropertyGatesTuning,
     pub style: StyleTuning,
+    pub showcase: ShowcaseSettings,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -637,6 +642,7 @@ struct VisualizerTuningRaw {
     mixer: MixerTuning,
     gates: PropertyGatesTuning,
     style: StyleTuning,
+    showcase: ShowcaseSettings,
 }
 
 impl TryFrom<VisualizerTuningRaw> for VisualizerTuning {
@@ -651,6 +657,7 @@ impl TryFrom<VisualizerTuningRaw> for VisualizerTuning {
             mixer: raw.mixer,
             gates: raw.gates,
             style: raw.style,
+            showcase: raw.showcase,
         };
         tuning.validate()?;
         Ok(tuning)
@@ -665,6 +672,7 @@ impl VisualizerTuning {
         self.routing.validate()?;
         self.mixer.to_mixer()?;
         self.style.validate()?;
+        self.showcase.validate()?;
         Ok(())
     }
 }
@@ -1146,6 +1154,8 @@ pub enum DebugSelection {
     Band(usize),
     Property(Property),
     Flux,
+    Hat,
+    Scene,
 }
 
 impl DebugSelection {
@@ -1154,6 +1164,8 @@ impl DebugSelection {
             Self::Band(index) => palette.vivid(index),
             Self::Property(property) => palette.vivid(property.index()),
             Self::Flux => palette.vivid(9),
+            Self::Hat => palette.vivid(11),
+            Self::Scene => palette.vivid(3),
         }
     }
 }
@@ -1179,10 +1191,12 @@ pub struct DebugSample {
     pub kick: f32,
     pub kick_onset: TriggerStatus,
     pub snare_onset: TriggerStatus,
+    pub hat_onset: TriggerStatus,
     pub drop_onset: TriggerStatus,
     pub drop_status: DropStatus,
     pub kick_flux: OnsetFluxStatus,
     pub snare_flux: OnsetFluxStatus,
+    pub hat_flux: OnsetFluxStatus,
     pub properties: [f32; Property::COUNT],
 }
 
@@ -1257,12 +1271,15 @@ pub struct DebugSnapshot {
     pub kick: f32,
     pub kick_onset: TriggerStatus,
     pub snare_onset: TriggerStatus,
+    pub hat_onset: TriggerStatus,
     pub drop_onset: TriggerStatus,
     pub drop_status: DropStatus,
     pub kick_flux: OnsetFluxStatus,
     pub snare_flux: OnsetFluxStatus,
+    pub hat_flux: OnsetFluxStatus,
     pub kick_hits: u32,
     pub snare_hits: u32,
+    pub hat_hits: u32,
     pub drop_hits: u32,
     pub scene: String,
     pub outgoing: Option<String>,
@@ -1460,6 +1477,8 @@ pub struct Visualizer {
     pending_actions: VecDeque<Action>,
     rng: Rng,
     scene: Scene,
+    showcase: Showcase,
+    catalog: Option<crate::weapon::Catalog>,
     models: Models,
     model_composite: ModelComposite,
     model_lines: Vec<LineInstance>,
@@ -1473,7 +1492,6 @@ pub struct Visualizer {
     kick_decay: f32,
     flip: Spring,
     flip_target: f32,
-    flip_count: u32,
     quake_x: Spring,
     quake_y: Spring,
     kick_sequence: QuakeSequence,
@@ -1495,6 +1513,7 @@ pub struct Visualizer {
     analysis_revision: u64,
     kick_hits: u32,
     snare_hits: u32,
+    hat_hits: u32,
     drop_hits: u32,
     diagnosis: Diagnosis,
     debug_history: DebugHistory,
@@ -1507,6 +1526,7 @@ impl Visualizer {
         let tuning = VisualizerTuning::default();
         let inputs = tuning.inputs;
         let rng = Rng::new(0x005e_ed0f_7e5e_1e55u64);
+        let showcase = Showcase::new(tuning.showcase.clone());
         let mut visualizer = Self {
             analyzer: SpectrumAnalyzer::new(48_000),
             bands: inputs
@@ -1520,6 +1540,8 @@ impl Visualizer {
             pending_actions: VecDeque::with_capacity(MAX_PENDING_ACTIONS),
             rng,
             scene: Scene::new(),
+            showcase,
+            catalog: None,
             models: Models::Unloaded,
             model_composite: ModelComposite::default(),
             model_lines: Vec::new(),
@@ -1533,7 +1555,6 @@ impl Visualizer {
             kick_decay: tuning.kick_decay,
             flip: Spring::default(),
             flip_target: 0.0,
-            flip_count: 0,
             quake_x: Spring::default(),
             quake_y: Spring::default(),
             kick_sequence: QuakeSequence::default(),
@@ -1558,6 +1579,7 @@ impl Visualizer {
             analysis_revision: 0,
             kick_hits: 0,
             snare_hits: 0,
+            hat_hits: 0,
             drop_hits: 0,
             diagnosis: Diagnosis::new(),
             debug_history: DebugHistory::default(),
@@ -1572,6 +1594,13 @@ impl Visualizer {
 
     /// Loads the model directory on first use and shows its current model.
     fn load_models(&mut self) {
+        self.catalog = match crate::weapon::Catalog::load() {
+            Ok(catalog) => Some(catalog),
+            Err(error) => {
+                log::error!("could not load the weapon catalog: {error:#}");
+                None
+            }
+        };
         let accent = self.accent();
         match model::ModelSet::load() {
             Ok(models) => {
@@ -1585,12 +1614,39 @@ impl Visualizer {
                     &self.style_tuning,
                 );
                 self.models = Models::Ready(Box::new(models));
+                self.sync_showcase();
             }
             Err(error) => {
                 log::error!("could not load the models: {error:#}");
                 self.models = Models::Failed;
             }
         }
+    }
+
+    /// Rebuild the POI list for the model the scene is showing.
+    fn sync_showcase(&mut self) {
+        let Models::Ready(models) = &self.models else {
+            self.showcase.set_model(Vec::new(), 0);
+            return;
+        };
+        let model = models.current();
+        let mut pois = Vec::new();
+        if let Some(weapon) = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.weapons.get(&model.id))
+        {
+            for poi in &weapon.poi {
+                if let Some(anchor) = model.anchor(&poi.anchor.name) {
+                    pois.push(FocusPoi::new(
+                        poi.anchor.name.clone(),
+                        anchor,
+                        poi.id == "ejection_port" && anchor.part.is_none(),
+                    ));
+                }
+            }
+        }
+        self.showcase.set_model(pois, model.part_count());
     }
 
     /// Steps to the next model. Drops advance the set; the hotkey calls this
@@ -1608,6 +1664,7 @@ impl Visualizer {
             self.model_motion,
             accent,
         );
+        self.sync_showcase();
     }
 
     pub fn next_model(&mut self) {
@@ -1652,6 +1709,7 @@ impl Visualizer {
             .expect("validated mixer tuning builds a mixer");
         self.property_gates = tuning.gates.into();
         self.style_tuning = tuning.style;
+        self.showcase.set_settings(tuning.showcase);
         self.apply_style_tuning();
     }
 
@@ -1686,6 +1744,7 @@ impl Visualizer {
             mixer: self.mixer.tuning(),
             gates: self.property_gates.into(),
             style: self.style_tuning.clone(),
+            showcase: self.showcase.settings().clone(),
         }
     }
 
@@ -1715,7 +1774,7 @@ impl Visualizer {
         self.kick = 0.0;
         self.flip.reset(0.0);
         self.flip_target = 0.0;
-        self.flip_count = 0;
+        self.showcase.reset_cycle();
         self.quake_x.reset(0.0);
         self.quake_y.reset(0.0);
         self.kick_sequence.reset();
@@ -1723,6 +1782,7 @@ impl Visualizer {
         self.analysis_revision = 0;
         self.kick_hits = 0;
         self.snare_hits = 0;
+        self.hat_hits = 0;
         self.drop_hits = 0;
         self.diagnosis.reset();
         self.debug_history.clear();
@@ -1771,6 +1831,9 @@ impl Visualizer {
         let events = self
             .onsets
             .observe(&spectrum, &band_abdr, &band_abl, &self.detectors, hop);
+        if events.gap_entry {
+            self.push_action(Action::GapEntry);
+        }
         if let Some(power) = events.drop {
             self.drop_hits = self.drop_hits.saturating_add(1);
             self.push_action(Action::Drop(power));
@@ -1778,6 +1841,10 @@ impl Visualizer {
         if events.snare.is_some() {
             self.snare_hits = self.snare_hits.saturating_add(1);
             self.push_action(Action::Snare);
+        }
+        if events.hat.is_some() {
+            self.hat_hits = self.hat_hits.saturating_add(1);
+            self.push_action(Action::Hat);
         }
         if let Some(power) = events.kick {
             self.kick_hits = self.kick_hits.saturating_add(1);
@@ -1835,6 +1902,43 @@ impl Visualizer {
             model_lines: &self.model_lines,
             ribbons: &self.model_ribbons,
             model_composite: self.model_composite,
+        }
+    }
+
+    pub fn showcase_mode_name(&self) -> &'static str {
+        match self.showcase.mode() {
+            showcase::ShowcaseMode::Normal => "NORMAL",
+            showcase::ShowcaseMode::Poi => "POI FOCUS",
+        }
+    }
+
+    pub fn showcase_target_name(&self) -> Option<&str> {
+        self.showcase.target_name()
+    }
+
+    pub fn showcase_poi_count(&self) -> usize {
+        self.showcase.poi_count()
+    }
+
+    pub fn showcase_normal_flips(&self) -> u32 {
+        self.showcase.normal_flips()
+    }
+
+    pub fn showcase_poi_switches(&self) -> u32 {
+        self.showcase.poi_switches()
+    }
+
+    pub fn showcase_selector_active(&self) -> bool {
+        self.showcase.selector_active()
+    }
+
+    pub fn showcase_selected_mesh(&self) -> Option<&str> {
+        let part = self.showcase.selected_mesh()?;
+        match &self.models {
+            Models::Ready(models) if part < models.current().part_count() => {
+                Some(models.current().part_name(part))
+            }
+            _ => None,
         }
     }
 
@@ -1900,8 +2004,9 @@ impl Visualizer {
         match detector {
             Detector::Kick => self.detectors.kick_pattern = TemporalPattern::kick_initial(),
             Detector::Snare => self.detectors.snare_pattern = TemporalPattern::snare_initial(),
+            Detector::Hat => self.detectors.hat_pattern = TemporalPattern::hat_initial(),
             Detector::Drop | Detector::Flux => {
-                unreachable!("only kick and snare have temporal patterns")
+                unreachable!("only kick, snare and hat have temporal patterns")
             }
         }
     }
@@ -1917,8 +2022,9 @@ impl Visualizer {
         let pattern = match detector {
             Detector::Kick => &mut self.detectors.kick_pattern,
             Detector::Snare => &mut self.detectors.snare_pattern,
+            Detector::Hat => &mut self.detectors.hat_pattern,
             Detector::Drop | Detector::Flux => {
-                unreachable!("only kick and snare have temporal patterns")
+                unreachable!("only kick, snare and hat have temporal patterns")
             }
         };
         let polygon = match (kernel, layer) {
@@ -1945,8 +2051,9 @@ impl Visualizer {
         let pattern = match detector {
             Detector::Kick => &mut self.detectors.kick_pattern,
             Detector::Snare => &mut self.detectors.snare_pattern,
+            Detector::Hat => &mut self.detectors.hat_pattern,
             Detector::Drop | Detector::Flux => {
-                unreachable!("only kick and snare have temporal patterns")
+                unreachable!("only kick, snare and hat have temporal patterns")
             }
         };
         let polygon = match (kernel, layer) {
@@ -1975,8 +2082,9 @@ impl Visualizer {
         let pattern = match detector {
             Detector::Kick => &mut self.detectors.kick_pattern,
             Detector::Snare => &mut self.detectors.snare_pattern,
+            Detector::Hat => &mut self.detectors.hat_pattern,
             Detector::Drop | Detector::Flux => {
-                unreachable!("only kick and snare have temporal patterns")
+                unreachable!("only kick, snare and hat have temporal patterns")
             }
         };
         let polygon = match (kernel, layer) {
@@ -2094,6 +2202,15 @@ impl Visualizer {
                 FluxSetting::MinThreshold => detectors.snare_onset_min_threshold,
                 FluxSetting::MinInterval => detectors.snare_onset_min_interval,
             },
+            Detector::Hat => match setting {
+                FluxSetting::PreGain => detectors.hat_onset_pre_gain,
+                FluxSetting::Attack => detectors.hat_onset_attack,
+                FluxSetting::Release => detectors.hat_onset_release,
+                FluxSetting::Average => detectors.hat_onset_average,
+                FluxSetting::Sensitivity => detectors.hat_onset_sensitivity,
+                FluxSetting::MinThreshold => detectors.hat_onset_min_threshold,
+                FluxSetting::MinInterval => detectors.hat_onset_min_interval,
+            },
             Detector::Drop => match setting {
                 FluxSetting::PreGain => detectors.drop_onset_pre_gain,
                 FluxSetting::Attack => detectors.drop_onset_attack,
@@ -2130,6 +2247,15 @@ impl Visualizer {
                 FluxSetting::MinThreshold => &mut detectors.snare_onset_min_threshold,
                 FluxSetting::MinInterval => &mut detectors.snare_onset_min_interval,
             },
+            Detector::Hat => match setting {
+                FluxSetting::PreGain => &mut detectors.hat_onset_pre_gain,
+                FluxSetting::Attack => &mut detectors.hat_onset_attack,
+                FluxSetting::Release => &mut detectors.hat_onset_release,
+                FluxSetting::Average => &mut detectors.hat_onset_average,
+                FluxSetting::Sensitivity => &mut detectors.hat_onset_sensitivity,
+                FluxSetting::MinThreshold => &mut detectors.hat_onset_min_threshold,
+                FluxSetting::MinInterval => &mut detectors.hat_onset_min_interval,
+            },
             Detector::Drop => match setting {
                 FluxSetting::PreGain => &mut detectors.drop_onset_pre_gain,
                 FluxSetting::Attack => &mut detectors.drop_onset_attack,
@@ -2150,6 +2276,7 @@ impl Visualizer {
         match detector {
             Detector::Kick => self.detectors.kick_onset_suppression,
             Detector::Snare => self.detectors.snare_onset_suppression,
+            Detector::Hat => self.detectors.hat_onset_suppression,
             Detector::Drop => self.detectors.drop_onset_suppression,
             Detector::Flux => {
                 unreachable!("the per-band onset analyzer has no composite suppression")
@@ -2161,6 +2288,7 @@ impl Visualizer {
         let slot = match detector {
             Detector::Kick => &mut self.detectors.kick_onset_suppression,
             Detector::Snare => &mut self.detectors.snare_onset_suppression,
+            Detector::Hat => &mut self.detectors.hat_onset_suppression,
             Detector::Drop => &mut self.detectors.drop_onset_suppression,
             Detector::Flux => {
                 unreachable!("the per-band onset analyzer has no composite suppression")
@@ -2175,8 +2303,9 @@ impl Visualizer {
             Parameter::PatternArea(detector) => match detector {
                 Detector::Kick => self.detectors.kick_pattern.effective,
                 Detector::Snare => self.detectors.snare_pattern.effective,
+                Detector::Hat => self.detectors.hat_pattern.effective,
                 Detector::Drop | Detector::Flux => {
-                    unreachable!("only kick and snare have temporal patterns")
+                    unreachable!("only kick, snare and hat have temporal patterns")
                 }
             },
             Parameter::BandAblGain(band) => self.detectors.band_onset[band].abl_gain,
@@ -2195,6 +2324,19 @@ impl Visualizer {
             Parameter::KickQuakeFactor => self.detectors.kick_quake_factor,
             Parameter::KickSequenceEvery => self.detectors.kick_sequence_every as f32,
             Parameter::SnareFlipEvery => self.detectors.snare_flip_every as f32,
+            Parameter::SnarePoiSwitches => self.detectors.snare_poi_switches as f32,
+            Parameter::FocusStiffness => self.showcase.settings().focus_stiffness,
+            Parameter::FocusDamping => self.showcase.settings().focus_damping,
+            Parameter::MotionStiffness => self.showcase.settings().motion_stiffness,
+            Parameter::MotionDamping => self.showcase.settings().motion_damping,
+            Parameter::OrbitStiffness => self.showcase.settings().orbit_stiffness,
+            Parameter::OrbitDamping => self.showcase.settings().orbit_damping,
+            Parameter::DollyStiffness => self.showcase.settings().dolly_stiffness,
+            Parameter::DollyDamping => self.showcase.settings().dolly_damping,
+            Parameter::SelectorAttenuation => self.showcase.settings().selector_attenuation,
+            Parameter::SelectorFadeIn => self.showcase.settings().selector_fade_in,
+            Parameter::SelectorFadeOut => self.showcase.settings().selector_fade_out,
+            Parameter::SelectorColorChance => self.showcase.settings().selector_color_chance,
             Parameter::SnareChoke => self.detectors.snare_choke,
             Parameter::FlipStiffness => self.detectors.flip_stiffness,
             Parameter::FlipDamping => self.detectors.flip_damping,
@@ -2250,8 +2392,9 @@ impl Visualizer {
                 let pattern = match detector {
                     Detector::Kick => &mut self.detectors.kick_pattern,
                     Detector::Snare => &mut self.detectors.snare_pattern,
+                    Detector::Hat => &mut self.detectors.hat_pattern,
                     Detector::Drop | Detector::Flux => {
-                        unreachable!("only kick and snare have temporal patterns")
+                        unreachable!("only kick, snare and hat have temporal patterns")
                     }
                 };
                 pattern.effective = value;
@@ -2289,6 +2432,45 @@ impl Visualizer {
                 self.detectors.kick_sequence_every = value.round() as u32
             }
             Parameter::SnareFlipEvery => self.detectors.snare_flip_every = value.round() as u32,
+            Parameter::SnarePoiSwitches => {
+                self.detectors.snare_poi_switches = value.round() as u32;
+            }
+            Parameter::FocusStiffness => {
+                self.showcase.settings_mut().focus_stiffness = value;
+            }
+            Parameter::FocusDamping => {
+                self.showcase.settings_mut().focus_damping = value;
+            }
+            Parameter::MotionStiffness => {
+                self.showcase.settings_mut().motion_stiffness = value;
+            }
+            Parameter::MotionDamping => {
+                self.showcase.settings_mut().motion_damping = value;
+            }
+            Parameter::OrbitStiffness => {
+                self.showcase.settings_mut().orbit_stiffness = value;
+            }
+            Parameter::OrbitDamping => {
+                self.showcase.settings_mut().orbit_damping = value;
+            }
+            Parameter::DollyStiffness => {
+                self.showcase.settings_mut().dolly_stiffness = value;
+            }
+            Parameter::DollyDamping => {
+                self.showcase.settings_mut().dolly_damping = value;
+            }
+            Parameter::SelectorAttenuation => {
+                self.showcase.settings_mut().selector_attenuation = value;
+            }
+            Parameter::SelectorFadeIn => {
+                self.showcase.settings_mut().selector_fade_in = value;
+            }
+            Parameter::SelectorFadeOut => {
+                self.showcase.settings_mut().selector_fade_out = value;
+            }
+            Parameter::SelectorColorChance => {
+                self.showcase.settings_mut().selector_color_chance = value;
+            }
             Parameter::SnareChoke => self.detectors.snare_choke = value,
             Parameter::FlipStiffness => self.detectors.flip_stiffness = value,
             Parameter::FlipDamping => self.detectors.flip_damping = value,
@@ -2505,10 +2687,12 @@ impl Visualizer {
             kick: self.kick,
             kick_onset: status.kick,
             snare_onset: status.snare,
+            hat_onset: status.hat,
             drop_onset: status.drop,
             drop_status: status.drop_status,
             kick_flux: status.kick_flux,
             snare_flux: status.snare_flux,
+            hat_flux: status.hat_flux,
             properties: self.property_values(),
         }
     }
@@ -2573,12 +2757,15 @@ impl Visualizer {
             kick: self.kick,
             kick_onset: status.kick,
             snare_onset: status.snare,
+            hat_onset: status.hat,
             drop_onset: status.drop,
             drop_status: status.drop_status,
             kick_flux: status.kick_flux,
             snare_flux: status.snare_flux,
+            hat_flux: status.hat_flux,
             kick_hits: self.kick_hits,
             snare_hits: self.snare_hits,
+            hat_hits: self.hat_hits,
             drop_hits: self.drop_hits,
             scene: self.scene_name().to_owned(),
             outgoing: self
@@ -2634,10 +2821,13 @@ impl Visualizer {
         }
         self.palette.approach(*palette, dt, 10.0);
         self.time += dt;
+        let camera = Camera::new(viewport.0, viewport.1, zoom);
+        let normal_fov = camera.fov();
         let accent = self.accent();
         while let Some(action) = self.pending_actions.pop_front() {
-            self.handle_action(action, accent);
+            self.handle_action(action, accent, normal_fov);
         }
+        self.showcase.advance(dt);
         self.kick *= (-dt * self.kick_decay).exp();
         if !self.property_gates.plays(Property::Kick) {
             self.kick = 0.0;
@@ -2660,7 +2850,6 @@ impl Visualizer {
         );
         let status = self.onsets.status();
         let exposure = self.frames.interval(frame, shutter);
-        let camera = Camera::new(viewport.0, viewport.1, zoom);
         let music = Music {
             bands: self.bands.map(|band| band.value),
             raw_bands: self.last_spectrum.bands,
@@ -2698,6 +2887,7 @@ impl Visualizer {
             self.record_debug_sample();
             return;
         }
+        let showcase = self.showcase.frame();
         self.scene.update(
             dt,
             &music,
@@ -2716,6 +2906,7 @@ impl Visualizer {
                 power: self.motion_fade_power,
             },
             width,
+            &showcase,
             flip_pitch,
             shake,
             self.time,
@@ -2928,9 +3119,10 @@ impl Visualizer {
         );
     }
 
-    fn handle_action(&mut self, action: Action, accent: f32) {
+    fn handle_action(&mut self, action: Action, accent: f32, normal_fov: f32) {
         match action {
             Action::Kick(power) => {
+                self.showcase.kick(&mut self.rng);
                 self.kick = self.kick.max(power.clamp(0.0, 1.5));
                 if self.property_gates.plays(Property::Quake) {
                     let direction = self.kick_sequence.next(self.detectors.kick_sequence_every);
@@ -2939,21 +3131,26 @@ impl Visualizer {
             }
             Action::Snare => {
                 self.kick_sequence.reset();
-                self.flip_count += 1;
-                if self.flip_count >= self.detectors.snare_flip_every {
-                    self.flip_count = 0;
-                    if self.property_gates.plays(Property::Flip) {
-                        self.flip_target += TAU * 0.5;
-                    }
+                let outcome = self.showcase.snare(
+                    &mut self.rng,
+                    self.detectors.snare_flip_every,
+                    self.detectors.snare_poi_switches,
+                    normal_fov,
+                );
+                if outcome.flip && self.property_gates.plays(Property::Flip) {
+                    self.flip_target += TAU * 0.5;
                 }
             }
             Action::Drop(power) => {
+                self.showcase.drop();
                 self.advance_model(accent);
                 if self.property_gates.plays(Property::Quake) {
                     self.quake_y
                         .impulse(power * self.detectors.drop_quake_factor);
                 }
             }
+            Action::GapEntry => self.showcase.gap_entry(),
+            Action::Hat => self.showcase.hat(&mut self.rng),
         }
     }
 
@@ -3029,6 +3226,8 @@ enum Action {
     Kick(f32),
     Snare,
     Drop(f32),
+    GapEntry,
+    Hat,
 }
 
 /// Folds an unbounded angle into the closest representation around zero.
@@ -3120,6 +3319,7 @@ impl Scene {
             style,
             ModelTint::solid(accent),
             motion == ModelMotion::Swept,
+            model.node_parts(model::SLIDE_NODE),
         ));
         self.outgoing = None;
         self.transition = 1.0;
@@ -3152,6 +3352,7 @@ impl Scene {
             current.target_style,
             ModelTint::solid(accent),
             motion == ModelMotion::Swept,
+            model.node_parts(model::SLIDE_NODE),
         );
         entering.pose = current.pose;
         entering.pitch = current.pitch;
@@ -3197,6 +3398,7 @@ impl Scene {
         near_opacity: f32,
         motion_fade: MotionFade,
         width: f32,
+        showcase: &ShowcaseFrame,
         flip_pitch: f32,
         shake: Vec2,
         time: f32,
@@ -3252,6 +3454,7 @@ impl Scene {
                 near_opacity,
                 motion_fade,
                 width,
+                showcase,
                 flip_pitch,
                 shake,
                 time,
@@ -3275,6 +3478,7 @@ impl Scene {
                 near_opacity,
                 motion_fade,
                 width,
+                showcase,
                 flip_pitch,
                 shake,
                 time,
@@ -3308,6 +3512,11 @@ struct ModelRuntime {
     entrance: f32,
     opacity: f32,
     motion_blur: bool,
+    /// Scale captured when the POI motion fade starts.
+    frozen_scale: f32,
+    motion_frozen: bool,
+    /// Vertices that move with the ejecting slide subtree.
+    slide_vertices: Vec<bool>,
     history: VecDeque<PoseSnapshot>,
     vertices: Vec<Projected>,
     world_vertices: Vec<Vec3>,
@@ -3329,6 +3538,7 @@ struct LineGeometry {
     end: Vec2,
     start_depth_opacity: f32,
     end_depth_opacity: f32,
+    visible: bool,
 }
 
 /// Per-edge ink for one screen-space exposure sweep.
@@ -3357,9 +3567,13 @@ impl ModelRuntime {
         target_style: Style,
         tint: ModelTint,
         motion_blur: bool,
+        slide_parts: &[u16],
     ) -> Self {
         let vertex_capacity = wireframe.vertex_count();
         let edge_capacity = wireframe.edges().len();
+        let slide_vertices = (0..wireframe.vertex_count())
+            .map(|index| slide_parts.contains(&wireframe.vertex_part(index)))
+            .collect();
         Self {
             name,
             wireframe,
@@ -3379,6 +3593,9 @@ impl ModelRuntime {
             entrance: 1.0,
             opacity: 1.0,
             motion_blur,
+            frozen_scale: pose.scale,
+            motion_frozen: false,
+            slide_vertices,
             history: VecDeque::with_capacity(MAX_HISTORY),
             vertices: Vec::with_capacity(vertex_capacity),
             world_vertices: Vec::with_capacity(vertex_capacity),
@@ -3436,6 +3653,7 @@ impl ModelRuntime {
         near_opacity: f32,
         motion_fade: MotionFade,
         base_width: f32,
+        showcase: &ShowcaseFrame,
         flip_pitch: f32,
         shake: Vec2,
         time: f32,
@@ -3468,16 +3686,24 @@ impl ModelRuntime {
         );
         let spin = gates.drive(Property::Spin, mixer.value(MixPoint::SpinSpeed, &context));
         self.spin_speed = spin;
-        self.pose.yaw =
-            (self.pose.yaw + dt * spin * (0.3 + self.style.axis.x.abs())).rem_euclid(TAU);
+        let model_motion = showcase.focus.model_motion.clamp(0.0, 1.0);
+        if showcase.focus.freeze_motion && !self.motion_frozen {
+            self.frozen_scale = self.pose.scale;
+            self.motion_frozen = true;
+        } else if !showcase.focus.freeze_motion {
+            self.motion_frozen = false;
+        }
+        self.pose.yaw = (self.pose.yaw
+            + dt * spin * model_motion * (0.3 + self.style.axis.x.abs()))
+        .rem_euclid(TAU);
         let pitch_target = gates.drive(
             Property::Pitch,
             mixer.value(MixPoint::PitchTarget, &context),
         );
-        let pitch_rate = mixer.value(MixPoint::PitchRate, &context);
+        let pitch_rate = mixer.value(MixPoint::PitchRate, &context) * model_motion;
         self.pose.pitch = self.pitch.approach(pitch_target, dt, pitch_rate);
         let roll_target = gates.drive(Property::Roll, mixer.value(MixPoint::RollTarget, &context));
-        let roll_rate = mixer.value(MixPoint::RollRate, &context);
+        let roll_rate = mixer.value(MixPoint::RollRate, &context) * model_motion;
         self.pose.roll = self.roll.approach(roll_target, dt, roll_rate);
         self.phase_speed =
             gates.drive(Property::Phase, mixer.value(MixPoint::PhaseSpeed, &context));
@@ -3495,7 +3721,8 @@ impl ModelRuntime {
             mixer.value(MixPoint::PulseEnergy, &context),
         );
         let scale = entrance_scale * energy * self.style.zoom_bias * camera_zoom;
-        self.pose.scale = soft_saturate(scale, 1.45).max(0.35);
+        let target_scale = soft_saturate(scale, 1.45).max(0.35);
+        self.pose.scale = self.frozen_scale + (target_scale - self.frozen_scale) * model_motion;
         // Models are rigid, so the vertex distortion controls contribute an
         // identity transform.
         let deformation = Deformation::default();
@@ -3503,27 +3730,59 @@ impl ModelRuntime {
         self.line_energy = gates.drive(Property::Line, mixer.value(MixPoint::Line, &context));
         self.world_vertices.clear();
         self.vertices.clear();
-        let pose = self.pose.with_action(flip_pitch, shake);
+        let pose = self.pose.with_action(flip_pitch * model_motion, shake);
+        let focus_radius = showcase.focus.radius * self.pose.scale;
+        let focus_distance = showcase::framed_distance(focus_radius, showcase.focus.fov);
+        let focus = FocusProjection {
+            target: showcase.focus.center,
+            yaw: showcase.focus.orbit_yaw,
+            pitch: showcase.focus.orbit_pitch,
+            distance: focus_distance,
+            focal: camera.focal_for_fov(showcase.focus.fov),
+            blend: showcase.focus.blend,
+        };
         for index in 0..self.wireframe.vertex_count() {
-            let world = deformation.apply(self.wireframe.vertex(index));
+            let mut rest = self.wireframe.vertex(index);
+            if self.slide_vertices[index] {
+                rest = rest + showcase.slide_offset;
+            }
+            let world = deformation.apply(rest);
             self.world_vertices.push(world);
-            self.vertices.push(camera.project(world, pose));
+            self.vertices.push(if showcase.focus.blend > 0.0 {
+                camera.project_focused(world, pose, focus)
+            } else {
+                camera.project(world, pose)
+            });
         }
         self.update_kinematics(dt);
         // Models are fitted to a unit radius, so `pose.scale` is the model
         // radius in view space. Keep the depth planes on that fitted sphere
         // instead of following the silhouette of the current pose.
-        let depth_opacity = DepthOpacity::centered(self.pose.distance, self.pose.scale, depth_fade);
+        let depth_center =
+            self.pose.distance + (focus_distance - self.pose.distance) * showcase.focus.blend;
+        let depth_radius =
+            self.pose.scale + (focus_radius - self.pose.scale) * showcase.focus.blend;
+        let depth_opacity = DepthOpacity::centered(depth_center, depth_radius.max(0.0), depth_fade);
         self.current.clear();
         self.current
             .extend(self.wireframe.edges().iter().map(|edge| {
                 let a = self.vertices[edge[0] as usize];
                 let b = self.vertices[edge[1] as usize];
+                let visible = a.visible && b.visible;
                 LineGeometry {
-                    start: a.screen,
-                    end: b.screen,
-                    start_depth_opacity: depth_opacity.factor(a.depth),
-                    end_depth_opacity: depth_opacity.factor(b.depth),
+                    start: if visible { a.screen } else { camera.center },
+                    end: if visible { b.screen } else { camera.center },
+                    start_depth_opacity: if visible {
+                        depth_opacity.factor(a.depth)
+                    } else {
+                        0.0
+                    },
+                    end_depth_opacity: if visible {
+                        depth_opacity.factor(b.depth)
+                    } else {
+                        0.0
+                    },
+                    visible,
                 }
             }));
         let exposure = if self.motion_blur {
@@ -3553,11 +3812,36 @@ impl ModelRuntime {
         let alpha = (self.opacity * base_opacity).clamp(0.0, 1.0);
         let width = base_width * (1.0 + music.kick * 0.25);
         for (index, current) in self.current.iter().enumerate() {
-            let rgb = self.tint.edge_rgb(palette);
+            if !current.visible {
+                continue;
+            }
+            let part = self.wireframe.edge_part(index);
+            let alternate = showcase.highlight_part == Some(part)
+                || (showcase.selector.alternate_color && showcase.selector.selected == Some(part));
+            let rgb = if alternate {
+                self.tint.alternate_edge_rgb(palette)
+            } else {
+                self.tint.edge_rgb(palette)
+            };
+            let edge_alpha = if showcase.selector.selected == Some(part) {
+                alpha
+            } else {
+                alpha * showcase.selector.attenuation
+            };
 
             let Some(exposure) = &exposure else {
-                let start_color = [rgb[0], rgb[1], rgb[2], alpha * current.start_depth_opacity];
-                let end_color = [rgb[0], rgb[1], rgb[2], alpha * current.end_depth_opacity];
+                let start_color = [
+                    rgb[0],
+                    rgb[1],
+                    rgb[2],
+                    edge_alpha * current.start_depth_opacity,
+                ];
+                let end_color = [
+                    rgb[0],
+                    rgb[1],
+                    rgb[2],
+                    edge_alpha * current.end_depth_opacity,
+                ];
                 out.push(LineInstance::flat(
                     current.start,
                     current.end,
@@ -3571,7 +3855,11 @@ impl ModelRuntime {
             push_sweep(
                 exposure.first[index],
                 exposure.last[index],
-                SweepInk { rgb, alpha, width },
+                SweepInk {
+                    rgb,
+                    alpha: edge_alpha,
+                    width,
+                },
                 motion_fade,
                 out_ribbons,
             );
@@ -3701,6 +3989,7 @@ fn lerp_line(from: LineGeometry, to: LineGeometry, fraction: f32) -> LineGeometr
             + (to.start_depth_opacity - from.start_depth_opacity) * fraction,
         end_depth_opacity: from.end_depth_opacity
             + (to.end_depth_opacity - from.end_depth_opacity) * fraction,
+        visible: from.visible && to.visible,
     }
 }
 
@@ -3965,6 +4254,16 @@ impl ModelTint {
             color.components[2],
         ]
     }
+
+    /// A contrasting vivid color for a highlighted or selector-picked mesh.
+    fn alternate_edge_rgb(self, palette: &Palette) -> [f32; 3] {
+        let color = palette.vivid(self.accent + Palette::VIVID_COUNT / 3);
+        [
+            color.components[0],
+            color.components[1],
+            color.components[2],
+        ]
+    }
 }
 
 fn smoothstep(value: f32) -> f32 {
@@ -4041,6 +4340,9 @@ mod tests {
         assert_eq!(detectors.snare_onset_attack, 0.001);
         assert_eq!(detectors.snare_onset_pre_gain, 1.0054638);
         assert_eq!(detectors.snare_onset_suppression, 0.32999998);
+        assert_eq!(detectors.hat_onset_min_interval, 0.06);
+        assert_eq!(detectors.hat_onset_pre_gain, 1.0054638);
+        assert_eq!(detectors.snare_poi_switches, 3);
         assert_eq!(detectors.drop_gap_window, 1.0);
         assert_eq!(detectors.drop_gap_threshold, -0.3);
         assert_eq!(detectors.drop_gap_gain, 1.0);
@@ -4422,7 +4724,7 @@ mod tests {
         };
         visualizer.set_detector_settings(settings.clone());
 
-        visualizer.handle_action(Action::Kick(0.5), 0.0);
+        visualizer.handle_action(Action::Kick(0.5), 0.0, 0.75);
         assert!(visualizer.kick >= 0.5);
         visualizer
             .quake_x
@@ -4432,13 +4734,19 @@ mod tests {
             "the first kick shakes left"
         );
 
-        visualizer.handle_action(Action::Snare, 0.0);
-        assert_eq!(visualizer.flip_target, 0.0);
-        visualizer.handle_action(Action::Snare, 0.0);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
         assert!((visualizer.flip_target - TAU * 0.5).abs() < 1e-5);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        assert!((visualizer.flip_target - TAU).abs() < 1e-5);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        assert_eq!(
+            visualizer.showcase.mode(),
+            showcase::ShowcaseMode::Poi,
+            "the next snare enters the POI cycle"
+        );
 
         let before = visualizer.scene_name().to_owned();
-        visualizer.handle_action(Action::Drop(1.0), 0.0);
+        visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
         assert_ne!(
             visualizer.scene_name(),
             before,
@@ -4709,6 +5017,109 @@ mod tests {
         {
             assert_eq!(edge.start_depth_opacity, 1.0);
             assert_eq!(edge.end_depth_opacity, 1.0);
+        }
+    }
+
+    #[test]
+    fn selector_attenuates_every_mesh_but_the_selected_one() {
+        let mut visualizer = loaded_visualizer();
+        assert!(visualizer.showcase.poi_count() > 0);
+        let palette = Palette::from_theme(ThemeId::default());
+        visualizer.showcase.kick(&mut visualizer.rng);
+        assert!(visualizer.showcase.selector_active());
+
+        let selected = (0..16)
+            .find_map(|_| {
+                let selected = visualizer.showcase.selected_mesh()?;
+                let has_edges = {
+                    let model = visualizer.scene.current.as_ref().expect("a model is shown");
+                    model
+                        .wireframe
+                        .edges()
+                        .iter()
+                        .enumerate()
+                        .any(|(index, _)| model.wireframe.edge_part(index) == selected)
+                };
+                if has_edges {
+                    Some(selected)
+                } else {
+                    visualizer.showcase.hat(&mut visualizer.rng);
+                    None
+                }
+            })
+            .expect("some mesh has visible edges");
+
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        for _ in 0..24 {
+            visualizer.update(
+                frame,
+                ShutterFrames::try_from(1.0).unwrap(),
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        }
+        let model = visualizer.scene.current.as_ref().expect("a model is shown");
+        let lines = visualizer.frame().model_lines;
+        assert_eq!(lines.len(), model.wireframe.edges().len());
+        let mut selected_alpha = 0.0;
+        let mut selected_count = 0;
+        let mut other_alpha = 0.0;
+        let mut other_count = 0;
+        for (index, line) in lines.iter().enumerate() {
+            let alpha = line.start_color[3] + line.end_color[3];
+            if model.wireframe.edge_part(index) == selected {
+                selected_alpha += alpha;
+                selected_count += 1;
+            } else {
+                other_alpha += alpha;
+                other_count += 1;
+            }
+        }
+        assert!(selected_count > 0 && other_count > 0);
+        let selected_mean = selected_alpha / selected_count as f32;
+        let other_mean = other_alpha / other_count as f32;
+        assert!(
+            selected_mean > other_mean * 2.0,
+            "the selected mesh stays bright while the others fade: {selected_mean} vs {other_mean}"
+        );
+    }
+
+    #[test]
+    fn snare_enters_poi_focus_and_the_camera_reframes() {
+        let mut visualizer = loaded_visualizer();
+        assert_eq!(visualizer.showcase.poi_count(), 10);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Poi);
+        assert!(visualizer.showcase.target_name().is_some());
+
+        let palette = Palette::from_theme(ThemeId::default());
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        for _ in 0..120 {
+            visualizer.update(
+                frame,
+                ShutterFrames::try_from(2.0).unwrap(),
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        }
+        let focus = visualizer.showcase.frame().focus;
+        assert!(focus.blend > 0.9, "the camera reaches the POI framing");
+        assert!(focus.radius > 0.0);
+        let lines = visualizer.frame().model_lines;
+        assert!(!lines.is_empty());
+        for line in lines {
+            for value in line.endpoints {
+                assert!(value.is_finite());
+            }
         }
     }
 
@@ -5029,6 +5440,18 @@ mod tests {
         let sequence = Parameter::KickSequenceEvery;
         visualizer.set_parameter(sequence, 100.0);
         assert_eq!(visualizer.parameter_value(sequence), 32.0);
+        let poi_switches = Parameter::SnarePoiSwitches;
+        visualizer.set_parameter(poi_switches, 100.0);
+        assert_eq!(visualizer.parameter_value(poi_switches), 32.0);
+        let focus = Parameter::FocusStiffness;
+        visualizer.set_parameter(focus, 1000.0);
+        assert_eq!(visualizer.parameter_value(focus), SPRING_STIFFNESS_MAX);
+        let fade = Parameter::SelectorFadeIn;
+        visualizer.set_parameter(fade, 100.0);
+        assert_eq!(
+            visualizer.parameter_value(fade),
+            showcase::SELECTOR_FADE_IN_MAX
+        );
         let abl_gain = Parameter::BandAblGain(0);
         visualizer.set_parameter(abl_gain, 2.0);
         assert!((visualizer.parameter_value(abl_gain) - 2.0).abs() < 1e-6);
@@ -5062,6 +5485,9 @@ mod tests {
     fn inspector_tuning_survives_a_config_round_trip() {
         let mut visualizer = Visualizer::new();
         visualizer.set_parameter(Parameter::KickDecay, 7.5);
+        visualizer.set_parameter(Parameter::FocusDamping, 22.0);
+        visualizer.set_parameter(Parameter::MotionDamping, 9.5);
+        visualizer.set_parameter(Parameter::SelectorColorChance, 0.5);
         visualizer.set_parameter(Parameter::Gain(Gain::SpinBand), 3.25);
         visualizer.set_parameter(Parameter::BandSource(BandComponent::Spin), 9.0);
         visualizer.set_parameter(Parameter::Attack(EnvelopeTarget::Power), 22.0);
@@ -5090,6 +5516,9 @@ mod tests {
         restored.set_tuning(decoded.clone());
         assert_eq!(restored.tuning(), decoded);
         assert_eq!(restored.parameter_value(Parameter::KickDecay), 7.5);
+        assert_eq!(restored.parameter_value(Parameter::FocusDamping), 22.0);
+        assert_eq!(restored.parameter_value(Parameter::MotionDamping), 9.5);
+        assert!((restored.parameter_value(Parameter::SelectorColorChance) - 0.5).abs() < 1e-6);
         assert_eq!(
             restored.parameter_value(Parameter::Gain(Gain::SpinBand)),
             3.25
@@ -5141,7 +5570,7 @@ mod tests {
         if visualizer.model_position().expect("models loaded").1 < 2 {
             return;
         }
-        visualizer.handle_action(Action::Drop(1.0), 0.5);
+        visualizer.handle_action(Action::Drop(1.0), 0.5, 0.75);
         assert!(
             (visualizer
                 .scene
@@ -5356,7 +5785,7 @@ mod tests {
             return;
         }
         let first = visualizer.scene_name().to_owned();
-        visualizer.handle_action(Action::Drop(1.0), 0.0);
+        visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
         assert_ne!(visualizer.scene_name(), first);
         assert!(visualizer.scene.outgoing.is_some());
         visualizer.next_model();
@@ -5514,6 +5943,7 @@ mod tests {
             end,
             start_depth_opacity: 1.0,
             end_depth_opacity: 1.0,
+            visible: true,
         }
     }
 

@@ -62,6 +62,32 @@ centers the mesh, scales it to unit radius, and projects the wireframe in
 perspective. Each model is drawn as vector lines with uniform weight; model
 edges use flat square caps.
 
+### Showcase modes
+
+The model runs in either normal mode or POI focus mode. Normal mode keeps the
+usual spin and flips. In POI focus mode, the camera frames a semantic point of
+interest, the normal model motion fades out over its own spring, and each kick
+adds a random yaw and pitch step while choosing a random FOV. The FOV and camera
+distance move together, so the POI keeps its size while the surrounding model
+undergoes a dolly zoom.
+Empty POIs use their scaled cube as the framing volume; mesh POIs are framed
+and drawn in a contrasting color. The `ejection_port` empty also pulls the
+`slide` mesh and its children backward by the port length.
+
+Snares drive the mode cycle. The `NORMAL FLIPS` setting counts the flips before
+POI mode starts, and `POI SWITCHES` counts the POI changes before normal mode
+returns. A gap-confidence entry always returns to normal mode and resets the
+cycle. All cycle and spring settings live in the analyzer panel: `SNARE` holds
+the two counters, and the `SCENE` panel holds separate motion, focus, orbit,
+and dolly springs plus the selector timing and attenuation controls.
+
+The selector effect is available only in normal mode. A kick enables it; any
+other non-hat trigger, including a later kick, disables it. While active it
+keeps one mesh at full opacity, fades the other meshes to the configured
+attenuation, and has a 25% chance to color the selected mesh differently. The
+`HAT` detector selects the next mesh and has its own pattern editor; it is
+independent of the snare and drop detectors.
+
 Edge opacity follows vertex depth: nearest vertices use the adjustable
 near-opacity floor (60% by default, brightened by line energy), farther vertices
 fade by the adjustable depth-fade strength (50% by default), and every edge
@@ -287,7 +313,7 @@ The inspector follows the selection:
   line-shaped thumbs are tall enough for comfortable dragging.
 - clicking a detector row or its `DETECTOR` leaf shows that detector's
   parameters in the same bottom parameter section of the tree pane used by
-  ordinary components. The `FLUX ENV` button in the analyzer header opens the
+  ordinary components. The `FLUX` button in the analyzer header opens the
   per-band onset analyzer: 16 bars show every band's continuous onset flow and
   a raw excess tick, and clicking a bar selects that band. The analyzer pane
   exposes the selected band's scaling controls (`LOW REF`, `HIGH REF`,

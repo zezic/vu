@@ -221,6 +221,8 @@ mod tests {
             "(motion_fade_power: 0.09)",
             "(motion_fade_power: 4.1)",
             "(tuning: (kick_decay: -1.0))",
+            "(tuning: (showcase: (focus_stiffness: 0.0)))",
+            "(tuning: (showcase: (selector_attenuation: 2.0)))",
             "(tuning: (kick_decay: 21.0))",
             "(tuning: (inputs: (power: (attack: 0.0, release: 4.5, \
              shape: (low: 0.0, high: 1.0, curve: Linear, amount: 1.0, tracking: Manual))))))",
