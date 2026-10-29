@@ -67,21 +67,24 @@ edges use flat square caps.
 
 The model runs in either normal mode or POI focus mode. Normal mode keeps the
 usual spin and flips. Entering POI focus rounds an inverted flip target up to
-the next whole turn, so the model finishes upright instead of freezing
-upside-down; the flip spring keeps its full action through the motion fade. In
+the next whole turn and holds the focus blend at the normal view until the
+spring settles upright, so the POI camera never frames an upside-down model;
+the flip spring keeps its full action through the motion fade. In
 POI focus mode, the camera frames a semantic point of interest, the normal
 model motion fades out over its own spring, and each kick
 adds a signed random yaw and pitch step while changing FOV by a random step.
-Both use a signed magnitude between a minimum and a maximum (`ORBIT MIN`
-default 20 deg / `ORBIT MAX` 45 deg, and `FOV MIN` default 10 deg / `FOV MAX`
-20 deg). The same range seeds a fresh signed orbit step when entering POI
-mode and when switching to another POI. The step is applied relative to the
-current camera angle, then clamped to the switch range: `SWITCH MIN` (default
-0 deg) raises a smaller step, and `SWITCH MAX` (default 45 deg) caps a larger
-one, so every switch starts from the view currently on screen rather than from
-the view the POI started with. A `SWITCH MAX` of 180 deg leaves the drawn step
-uncapped. The FOV target stays inside 30-120 deg; the spring may briefly
-overshoot it. The FOV and camera distance move together, so the POI keeps its
+Kicks use a signed magnitude between `ORBIT MIN` (default 20 deg) and
+`ORBIT MAX` (default 45 deg). The FOV step uses `FOV MIN` (default 10 deg)
+and `FOV MAX` (default 20 deg). Entering POI mode or switching to another POI
+draws a separate signed yaw and pitch step between `SWITCH MIN` (default
+0 deg) and `SWITCH MAX` (default 45 deg), applied relative to the current
+camera angle, so every switch starts from the view currently on screen rather
+than from the view the POI started with. The camera base direction is never
+re-aimed to a POI's outward side; the POI is centered by the focus target, but
+entry and switches only move the orbit step and may view the POI from the side
+the camera already had. The focus target and distance still travel to the new
+POI. The FOV target stays inside 30-120 deg; the spring may briefly overshoot
+it. The FOV and camera distance move together, so the POI keeps its
 size while the surrounding model undergoes a dolly zoom. The entry blend
 spring is free to overshoot; the camera distance,
 near plane, and depth radius are interpolated in log space so an overshoot

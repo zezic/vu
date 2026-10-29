@@ -341,6 +341,31 @@ impl Pose {
             .rotate_z(self.roll)
             * self.scale
     }
+
+    /// The view-space y component of the model's up axis. The camera maps
+    /// positive view-space Y toward the top of the screen, so positive values
+    /// are upright on screen.
+    #[must_use]
+    pub fn up_y(self) -> f32 {
+        Vec3::new(0.0, 1.0, 0.0)
+            .rotate_y(self.yaw)
+            .rotate_x(self.pitch)
+            .rotate_z(self.roll)
+            .y
+    }
+
+    /// The model's up axis measured against screen up. The projection maps
+    /// positive view-space Y upward, so this is [`Pose::up_y`].
+    #[must_use]
+    pub fn screen_up(self) -> f32 {
+        self.up_y()
+    }
+
+    /// Whether the pose tips the model's up axis below the screen horizon.
+    #[must_use]
+    pub fn is_upside_down(self) -> bool {
+        self.screen_up() < 0.0
+    }
 }
 
 /// The physical-pixel rectangle of the render target.
@@ -426,7 +451,7 @@ impl Camera {
         let perspective = focal / depth;
         let screen = Vec2::new(
             self.center.x + vertex.x * perspective + shake.x,
-            self.center.y + vertex.y * perspective + shake.y,
+            self.center.y - vertex.y * perspective + shake.y,
         );
         Projected {
             screen,
@@ -440,18 +465,6 @@ impl Camera {
 pub fn wrap_angle(angle: f32) -> f32 {
     (angle + std::f32::consts::TAU * 0.5).rem_euclid(std::f32::consts::TAU)
         - std::f32::consts::TAU * 0.5
-}
-
-/// Angles that place the camera on the outward side of a model-space target.
-/// The returned rotation maps the target direction to view-space -Z.
-pub(super) fn focus_base_angles(target: Vec3) -> (f32, f32) {
-    let horizontal = (target.x * target.x + target.z * target.z).sqrt();
-    if target.length() <= 1e-4 {
-        return (0.0, 0.0);
-    }
-    let yaw = target.x.atan2(-target.z);
-    let pitch = -target.y.atan2(horizontal);
-    (yaw, pitch)
 }
 
 /// A partially blended POI view applied after the model pose.
@@ -625,24 +638,6 @@ mod tests {
     }
 
     #[test]
-    fn focus_base_angles_place_the_camera_on_the_outward_side() {
-        for target in [
-            Vec3::new(0.0, 0.0, 1.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            Vec3::new(0.1, 0.2, -0.3),
-        ] {
-            let (yaw, pitch) = focus_base_angles(target);
-            let rotated = (target * (1.0 / target.length()))
-                .rotate_y(yaw)
-                .rotate_x(pitch);
-            assert!(rotated.x.abs() < 1e-4);
-            assert!(rotated.y.abs() < 1e-4);
-            assert!((rotated.z + 1.0).abs() < 1e-4);
-        }
-    }
-
-    #[test]
     fn focused_projection_marks_vertices_behind_the_camera_invisible() {
         let camera = Camera::new(1280.0, 440.0, 1.0);
         let pose = Pose::default();
@@ -689,6 +684,47 @@ mod tests {
         assert_eq!(action.yaw, pose.yaw);
         assert!((action.pitch - pose.pitch - 1.2).abs() < 1e-6);
         assert_eq!(action.shake, Vec2::new(3.0, -4.0));
+    }
+
+    #[test]
+    fn upside_down_follows_the_screen_up_axis() {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        assert!(!Pose::default().is_upside_down());
+        assert!(Pose {
+            pitch: PI,
+            ..Pose::default()
+        }
+        .is_upside_down());
+        assert!(Pose {
+            roll: PI,
+            ..Pose::default()
+        }
+        .is_upside_down());
+        assert!(
+            !Pose {
+                pitch: PI,
+                roll: PI,
+                ..Pose::default()
+            }
+            .is_upside_down(),
+            "a half turn around both axes leaves the up axis up"
+        );
+        assert!(
+            !Pose {
+                pitch: FRAC_PI_2 - 0.1,
+                ..Pose::default()
+            }
+            .is_upside_down(),
+            "a tilt above the horizon is not upside-down"
+        );
+        assert!(Pose {
+            pitch: FRAC_PI_2 + 0.1,
+            ..Pose::default()
+        }
+        .is_upside_down());
+        assert!(Pose::default()
+            .with_action(PI, Vec2::new(0.0, 0.0))
+            .is_upside_down());
     }
 
     #[test]

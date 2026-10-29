@@ -52,8 +52,8 @@ use crate::{
 };
 
 use geometry::{
-    focus_base_angles, soft_saturate, wrap_angle, Camera, Deformation, DepthOpacity,
-    FocusProjection, Pose, Projected, ScreenBounds, Vec2, Vec3, Wireframe,
+    soft_saturate, wrap_angle, Camera, Deformation, DepthOpacity, FocusProjection, Pose, Projected,
+    ScreenBounds, Vec2, Vec3, Wireframe,
 };
 pub use spectrum::{RelativeExcessSettings, BAND_COUNT};
 use spectrum::{Spectrum, SpectrumAnalyzer};
@@ -2967,12 +2967,18 @@ impl Visualizer {
             self.detectors.flip_stiffness,
             self.detectors.flip_damping,
         );
-        // A selector entry armed while the model was flipping waits for the
-        // flip to finish upright before the effect turns on. Every mesh-focus
-        // effect is cleared while the model is not upright; a pending entry
-        // stays armed.
+        // A selector entry and a held POI entry both wait for the flip to
+        // finish upright before they can start. Every mesh-focus effect is
+        // cleared while the model is not upright; pending entries stay armed.
         let model_upright = self.flip_is_upright();
+        // A flip must not start while the selector is active; the snare gating
+        // in the showcase is responsible for that.
+        assert!(
+            model_upright || !self.showcase.selector_active(),
+            "the selector must not stay active while the flip is not settled upright"
+        );
         if model_upright {
+            self.showcase.release_focus_entry();
             self.showcase.activate_pending_selector(&mut self.rng);
         } else {
             self.showcase.hide_effects();
@@ -3003,11 +3009,7 @@ impl Visualizer {
         let width =
             (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * 1.4 * self.line_width.factor();
         let quake_scale = (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * QUAKE_PIXELS;
-        let flip_pitch = if self.property_gates.plays(Property::Flip) {
-            self.flip.value()
-        } else {
-            0.0
-        };
+        let flip_pitch = self.flip_pitch();
         let shake = if self.showcase.mode() == showcase::ShowcaseMode::Normal
             && self.property_gates.plays(Property::Quake)
         {
@@ -3310,9 +3312,13 @@ impl Visualizer {
         }
         // POI focus fades the normal model motion but keeps the flip spring
         // running, so an inverted model would freeze upside-down for the
-        // whole focus. Finish the flip upright as the mode changes.
+        // whole focus. Finish the flip upright as the mode changes, and hold
+        // the focus entry at the normal view until the spring gets there.
         if !was_poi && self.showcase.mode() == showcase::ShowcaseMode::Poi {
             self.settle_flip_upright();
+            if !self.flip_is_upright() {
+                self.showcase.hold_focus_entry();
+            }
         }
     }
 
@@ -3320,6 +3326,15 @@ impl Visualizer {
     /// accumulated forward so every flip continues in the same direction.
     fn flip_target(&self) -> f32 {
         self.flip_half_turns as f32 * std::f32::consts::PI
+    }
+
+    /// The pitch offset the flip contributes to the rendered pose.
+    fn flip_pitch(&self) -> f32 {
+        if self.property_gates.plays(Property::Flip) {
+            self.flip.value()
+        } else {
+            0.0
+        }
     }
 
     /// Rounds the flip count up to a whole turn so the model finishes upright
@@ -3700,9 +3715,10 @@ struct ModelRuntime {
     /// Scale captured when the POI motion fade starts.
     frozen_scale: f32,
     motion_frozen: bool,
-    /// Smoothed outward camera side for the current POI.
-    base_yaw: f32,
-    base_pitch: f32,
+    /// Whole-turn offsets applied to the POI rotation to keep entry and
+    /// exit angles continuous.
+    rotation_turns_yaw: f32,
+    rotation_turns_pitch: f32,
     /// Rotation captured when POI mode exits, so the return can take the
     /// shortest path back to identity.
     exit_rotation: bool,
@@ -3819,8 +3835,8 @@ impl ModelRuntime {
             motion_blur,
             frozen_scale: pose.scale,
             motion_frozen: false,
-            base_yaw: 0.0,
-            base_pitch: 0.0,
+            rotation_turns_yaw: 0.0,
+            rotation_turns_pitch: 0.0,
             exit_rotation: false,
             exit_total_yaw: 0.0,
             exit_total_pitch: 0.0,
@@ -3972,6 +3988,17 @@ impl ModelRuntime {
         // keeps its full spring action across the motion fade so entering POI
         // mode cannot undo or replay the last flip.
         let pose = self.pose.with_action(flip_pitch, shake);
+        // The selector is a normal-mode effect; it must never be visible on an
+        // inverted model, including an inversion from the normal pitch or roll.
+        let selector_visible = showcase.selector.selected.is_some()
+            && (showcase.selector.attenuation < 1.0 || showcase.selector.alternate_color);
+        assert!(
+            !selector_visible || !pose.is_upside_down(),
+            "the selector must not run while {} is upside-down (pitch {:.3}, roll {:.3})",
+            self.name,
+            pose.pitch,
+            pose.roll
+        );
         let in_poi = showcase.focus.freeze_motion;
         let entered_poi = !self.was_poi && in_poi;
         let mut reentered_from_exit = false;
@@ -3994,24 +4021,19 @@ impl ModelRuntime {
             // up whole turns while the model spins in normal mode. Fold the
             // entry angle into one turn: the blend should reach the POI by the
             // shortest path instead of replaying every turn stored since the
-            // last entry. Shifting the base by whole turns leaves its tracking
-            // unchanged because the deltas are wrapped.
+            // last entry.
             let total_yaw =
-                self.base_yaw + showcase.focus.orbit_yaw + showcase.focus.orbit_drift_yaw;
-            self.base_yaw += wrap_angle(total_yaw) - total_yaw;
-            let total_pitch = self.base_pitch + showcase.focus.orbit_pitch;
-            self.base_pitch += wrap_angle(total_pitch) - total_pitch;
+                self.rotation_turns_yaw + showcase.focus.orbit_yaw + showcase.focus.orbit_drift_yaw;
+            self.rotation_turns_yaw += wrap_angle(total_yaw) - total_yaw;
+            let total_pitch = self.rotation_turns_pitch + showcase.focus.orbit_pitch;
+            self.rotation_turns_pitch += wrap_angle(total_pitch) - total_pitch;
         }
 
-        let (target_base_yaw, target_base_pitch) =
-            focus_base_angles(pose.orient(showcase.focus.center));
-        let base_rate = 1.0 - (-14.0 * dt).exp();
-        self.base_yaw += wrap_angle(target_base_yaw - self.base_yaw) * base_rate;
-        self.base_pitch += wrap_angle(target_base_pitch - self.base_pitch) * base_rate;
         let blend = showcase.focus.blend;
         let normal_yaw =
-            (self.base_yaw + showcase.focus.orbit_yaw + showcase.focus.orbit_drift_yaw) * blend;
-        let normal_pitch = (self.base_pitch + showcase.focus.orbit_pitch) * blend;
+            (self.rotation_turns_yaw + showcase.focus.orbit_yaw + showcase.focus.orbit_drift_yaw)
+                * blend;
+        let normal_pitch = (self.rotation_turns_pitch + showcase.focus.orbit_pitch) * blend;
         if reentered_from_exit {
             self.rotation_offset_yaw = wrap_angle(self.last_rotation_yaw - normal_yaw);
             self.rotation_offset_pitch = wrap_angle(self.last_rotation_pitch - normal_pitch);
@@ -4666,6 +4688,28 @@ mod tests {
             "the bundled models must load"
         );
         visualizer
+    }
+
+    /// Loads a visualizer on a model whose successor has resolvable POIs, so
+    /// a drop advances into POI mode regardless of the bundled model order.
+    fn visualizer_before_a_poi_successor() -> Option<Visualizer> {
+        let mut visualizer = loaded_visualizer();
+        let (_, total) = visualizer
+            .model_position()
+            .expect("the loaded model set has a position");
+        let mut has_pois = Vec::with_capacity(total);
+        for _ in 0..total {
+            has_pois.push(visualizer.showcase_poi_count() > 0);
+            visualizer.next_model();
+        }
+        let start = has_pois
+            .iter()
+            .enumerate()
+            .position(|(index, has)| *has && has_pois[(index + 1) % total])?;
+        for _ in 0..start {
+            visualizer.next_model();
+        }
+        Some(visualizer)
     }
 
     /// A decaying five-tone bass burst repeated every 200 ms.
@@ -5639,6 +5683,21 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "the selector must not run while test is upside-down")]
+    fn selector_panics_when_the_model_is_upside_down() {
+        let mut runtime = test_runtime();
+        let mut showcase = test_showcase_frame(0.0, false, 0.0);
+        showcase.selector = showcase::SelectorView {
+            selected: Some(0),
+            attenuation: 0.5,
+            alternate_color: false,
+        };
+        runtime.pitch = Smoother::new(std::f32::consts::PI);
+        runtime.pose.pitch = std::f32::consts::PI;
+        step_runtime(&mut runtime, &showcase);
+    }
+
+    #[test]
     fn poi_exit_rotation_takes_the_shortest_path() {
         use std::f32::consts::PI;
         let mut runtime = test_runtime();
@@ -5681,37 +5740,6 @@ mod tests {
         assert!(
             runtime.last_rotation_yaw.abs() < exiting.abs(),
             "the handoff offset keeps decaying"
-        );
-    }
-
-    #[test]
-    fn poi_entry_does_not_replay_the_accumulated_base_yaw() {
-        use std::f32::consts::PI;
-        let mut runtime = test_runtime();
-        let mut showcase = test_showcase_frame(0.0, false, 0.0);
-        showcase.focus.center = Vec3::new(0.0, 0.0, 1.0);
-        for _ in 0..240 {
-            runtime.pose.yaw = (runtime.pose.yaw + 0.3).rem_euclid(TAU);
-            step_runtime(&mut runtime, &showcase);
-        }
-        assert!(
-            runtime.base_yaw.abs() > TAU,
-            "normal mode must wind the base yaw up"
-        );
-
-        showcase.focus.freeze_motion = true;
-        for frame in 1..=60 {
-            showcase.focus.blend = frame as f32 / 60.0;
-            step_runtime(&mut runtime, &showcase);
-            assert!(
-                runtime.last_rotation_yaw.abs() <= PI + 0.2,
-                "the entry replayed the accumulated yaw: {:.3} rad",
-                runtime.last_rotation_yaw
-            );
-        }
-        assert!(
-            runtime.base_yaw.abs() <= PI + 0.2,
-            "the entry must fold the base yaw into one turn"
         );
     }
 
@@ -5831,7 +5859,9 @@ mod tests {
 
     #[test]
     fn a_drop_into_poi_settles_an_inverted_model_upright() {
-        let mut visualizer = loaded_visualizer();
+        let Some(mut visualizer) = visualizer_before_a_poi_successor() else {
+            return;
+        };
         visualizer.set_detector_settings(DetectorSettings {
             snare_flip_every: 1,
             ..DetectorSettings::default()
@@ -5843,6 +5873,49 @@ mod tests {
         assert!(
             (visualizer.flip_target() - TAU).abs() < 1e-5,
             "a drop entry must also finish the flip upright"
+        );
+    }
+
+    #[test]
+    fn poi_entry_holds_the_camera_until_the_flip_is_upright() {
+        let mut visualizer = loaded_visualizer();
+        visualizer.set_detector_settings(DetectorSettings {
+            snare_flip_every: 1,
+            ..DetectorSettings::default()
+        });
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        assert!((visualizer.flip_target() - TAU * 0.5).abs() < 1e-5);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Poi);
+        assert!((visualizer.flip_target() - TAU).abs() < 1e-5);
+        assert!(!visualizer.flip_is_upright());
+        assert_eq!(
+            visualizer.showcase.frame().focus.blend,
+            0.0,
+            "the POI camera must wait for the upright pose"
+        );
+
+        let palette = Palette::from_theme(ThemeId::default());
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        for _ in 0..90 {
+            visualizer.update(
+                frame,
+                ShutterFrames::try_from(1.0).unwrap(),
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        }
+        assert!(
+            visualizer.flip_is_upright(),
+            "the flip must finish at a whole-turn orientation"
+        );
+        assert!(
+            visualizer.showcase.frame().focus.blend > 0.1,
+            "the focus starts once the model is upright"
         );
     }
 
@@ -6761,7 +6834,10 @@ mod tests {
         visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
         assert_ne!(visualizer.scene_name(), first);
         assert!(visualizer.scene.outgoing.is_some());
-        visualizer.next_model();
+        // Step through the rest of the set so the hotkey wraps to the first.
+        for _ in 1..total {
+            visualizer.next_model();
+        }
         assert_eq!(visualizer.scene_name(), first);
     }
 

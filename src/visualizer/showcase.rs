@@ -30,13 +30,13 @@ pub const SELECTOR_GAP_TIMEOUT_MAX: f32 = 60.0;
 /// Fraction of the viewport half-extent used by the focused POI. Leaves 15%
 /// padding on each side.
 const FOCUS_FILL: f32 = 0.70;
+/// Maximum random yaw or pitch kick step.
 pub const POI_ORBIT_STEP_MAX: f32 = std::f32::consts::FRAC_PI_2;
 pub const POI_ORBIT_STEP_DEFAULT: f32 = std::f32::consts::FRAC_PI_4;
 pub const POI_ORBIT_STEP_MIN_DEFAULT: f32 = std::f32::consts::PI / 9.0;
-/// Switch steps are drawn from the orbit step range, so a half-turn maximum
-/// always leaves them uncapped.
+/// Maximum signed yaw or pitch step for POI entry and switch.
 pub const POI_SWITCH_STEP_MAX: f32 = std::f32::consts::PI;
-pub const POI_SWITCH_STEP_DEFAULT: f32 = POI_ORBIT_STEP_DEFAULT;
+pub const POI_SWITCH_STEP_DEFAULT: f32 = std::f32::consts::FRAC_PI_4;
 pub const POI_SWITCH_STEP_MIN_DEFAULT: f32 = 0.0;
 pub const POI_FOV_STEP_MAX: f32 = std::f32::consts::FRAC_PI_2;
 pub const POI_FOV_STEP_DEFAULT: f32 = std::f32::consts::PI / 9.0;
@@ -391,6 +391,9 @@ pub struct Showcase {
     mode: ShowcaseMode,
     blend: Spring,
     entry_settled: bool,
+    /// A POI entry is waiting for the model to finish its flip. The blend
+    /// stays at the normal view until [`Showcase::release_focus_entry`].
+    focus_entry_held: bool,
     motion: Spring,
     center: [Spring; 3],
     radius: Spring,
@@ -422,6 +425,7 @@ impl Showcase {
             mode: ShowcaseMode::Normal,
             blend: Spring::default(),
             entry_settled: false,
+            focus_entry_held: false,
             motion: {
                 let mut spring = Spring::default();
                 spring.reset(1.0);
@@ -504,6 +508,7 @@ impl Showcase {
         self.mode = ShowcaseMode::Normal;
         self.blend.reset(0.0);
         self.entry_settled = false;
+        self.focus_entry_held = false;
         self.motion.reset(1.0);
         for spring in &mut self.center {
             spring.reset(0.0);
@@ -530,6 +535,7 @@ impl Showcase {
         self.mode = ShowcaseMode::Normal;
         self.blend.reset(0.0);
         self.entry_settled = false;
+        self.focus_entry_held = false;
         self.motion.reset(1.0);
         self.current = None;
         self.target = None;
@@ -679,6 +685,40 @@ impl Showcase {
         self.mesh_fade = 0.0;
     }
 
+    /// Keeps a POI entry at the normal view until the model finishes its flip.
+    /// The mode and target are already selected; only the camera and the
+    /// motion fade wait.
+    pub fn hold_focus_entry(&mut self) {
+        assert_eq!(
+            self.mode,
+            ShowcaseMode::Poi,
+            "a focus entry hold needs POI mode"
+        );
+        self.focus_entry_held = true;
+        self.blend.reset(0.0);
+        self.motion.set_target(1.0);
+        self.entry_settled = false;
+        self.mesh_fade = 0.0;
+        self.set_slide_target();
+    }
+
+    /// Starts a held POI entry once the model is upright.
+    pub fn release_focus_entry(&mut self) {
+        if !self.focus_entry_held {
+            return;
+        }
+        assert_eq!(
+            self.mode,
+            ShowcaseMode::Poi,
+            "a held focus entry needs POI mode"
+        );
+        self.focus_entry_held = false;
+        self.blend.set_target(1.0);
+        self.motion.set_target(0.0);
+        self.entry_settled = false;
+        self.set_slide_target();
+    }
+
     pub fn hat(&mut self, rng: &mut Rng) {
         if self.mode == ShowcaseMode::Poi {
             self.advance_poi_child();
@@ -740,6 +780,7 @@ impl Showcase {
             .advance(dt, settings.focus_stiffness, settings.focus_damping);
         if self.mode == ShowcaseMode::Poi
             && !self.entry_settled
+            && !self.focus_entry_held
             && self
                 .blend
                 .is_settled(ENTRY_SETTLED_BLEND_GAP, ENTRY_SETTLED_VELOCITY)
@@ -762,6 +803,7 @@ impl Showcase {
         }
         self.poi_switch_cooldown = (self.poi_switch_cooldown - dt).max(0.0);
         let mesh_target = if self.mode == ShowcaseMode::Poi
+            && !self.focus_entry_held
             && self
                 .target
                 .as_ref()
@@ -832,6 +874,7 @@ impl Showcase {
         self.mode = ShowcaseMode::Poi;
         self.poi_switches = 0;
         self.entry_settled = false;
+        self.focus_entry_held = false;
         self.selector.deactivate();
         self.blend.set_target(1.0);
         self.motion.set_target(0.0);
@@ -880,22 +923,25 @@ impl Showcase {
         self.poi_switch_cooldown = self.settings.poi_switch_gap;
     }
 
-    /// Re-aims the orbit for a new POI. The desired step is drawn from the
-    /// kick step range and applied relative to the current view, then capped
-    /// by the switch step range.
+    /// Re-aims the orbit for a new POI. The step is drawn from the switch range
+    /// and applied relative to the current view.
     fn reseed_orbit(&mut self, rng: &mut Rng) {
         let settings = &self.settings;
         let drift = self.orbit_drift_yaw;
         let yaw = self.orbit_yaw.value() + drift;
         let pitch = self.orbit_pitch.value();
-        let desired_yaw = signed_step(rng, settings.orbit_step_min, settings.orbit_step_max);
-        let desired_pitch = signed_step(rng, settings.orbit_step_min, settings.orbit_step_max);
-        let minimum = settings.poi_switch_step_min;
-        let maximum = settings.poi_switch_step_max;
-        let yaw_target = bounded_step(rng, yaw, desired_yaw, minimum, maximum);
-        self.orbit_yaw.set_target(yaw_target - drift);
-        self.orbit_pitch
-            .set_target(bounded_step(rng, pitch, desired_pitch, minimum, maximum));
+        let yaw_step = signed_step(
+            rng,
+            settings.poi_switch_step_min,
+            settings.poi_switch_step_max,
+        );
+        let pitch_step = signed_step(
+            rng,
+            settings.poi_switch_step_min,
+            settings.poi_switch_step_max,
+        );
+        self.orbit_yaw.set_target(yaw + yaw_step - drift);
+        self.orbit_pitch.set_target(pitch + pitch_step);
     }
 
     fn reset_poi_child(&mut self) {
@@ -995,6 +1041,7 @@ impl Showcase {
         self.mode = ShowcaseMode::Normal;
         self.blend.set_target(0.0);
         self.entry_settled = false;
+        self.focus_entry_held = false;
         self.poi_child = None;
         self.poi_switch_cooldown = 0.0;
         self.motion.set_target(1.0);
@@ -1004,6 +1051,10 @@ impl Showcase {
     }
 
     fn set_slide_target(&mut self) {
+        if self.focus_entry_held {
+            self.slide.set_target(0.0);
+            return;
+        }
         let Some(target) = &self.target else {
             self.slide.set_target(0.0);
             return;
@@ -1153,24 +1204,6 @@ fn signed_step(rng: &mut Rng, minimum: f32, maximum: f32) -> f32 {
     } else {
         magnitude
     }
-}
-
-/// Applies a desired signed rotation to `current`, keeping its magnitude
-/// inside the switch step range.
-#[must_use]
-fn bounded_step(rng: &mut Rng, current: f32, desired: f32, minimum: f32, maximum: f32) -> f32 {
-    let magnitude = desired.abs().clamp(minimum, maximum);
-    let direction = if desired < 0.0 {
-        -1.0
-    } else if desired > 0.0 {
-        1.0
-    } else if rng.unit() < 0.5 {
-        // A zero desired step still gets the minimum rotation.
-        -1.0
-    } else {
-        1.0
-    };
-    current + direction * magnitude
 }
 
 /// Keeps the FOV step inside the 30-120 degree range and, where possible,
@@ -1681,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_to_poi_entry_reseeds_orbit_within_the_step_range() {
+    fn normal_to_poi_entry_reseeds_orbit_within_the_switch_step_range() {
         let mut showcase = showcase();
         let mut rng = Rng::new(59);
         showcase.orbit_yaw.reset(std::f32::consts::TAU * 2.0 + 0.7);
@@ -1693,16 +1726,8 @@ mod tests {
         assert_eq!(showcase.orbit_yaw.value(), 0.0);
         assert_eq!(showcase.orbit_pitch.value(), 0.0);
         assert_eq!(showcase.orbit_drift_yaw, 0.0);
-        let yaw_target = showcase.orbit_yaw.target();
-        let pitch_target = showcase.orbit_pitch.target();
-        assert_switch_step(yaw_target, showcase.settings());
-        assert_switch_step(pitch_target, showcase.settings());
-        let aim_minimum = showcase.settings().orbit_step_min;
-        let aim_maximum = showcase.settings().orbit_step_max;
-        assert!(yaw_target.abs() >= aim_minimum - 1e-6);
-        assert!(yaw_target.abs() <= aim_maximum + 1e-6);
-        assert!(pitch_target.abs() >= aim_minimum - 1e-6);
-        assert!(pitch_target.abs() <= aim_maximum + 1e-6);
+        assert_switch_step(showcase.orbit_yaw.target(), showcase.settings());
+        assert_switch_step(showcase.orbit_pitch.target(), showcase.settings());
     }
 
     #[test]
@@ -1744,17 +1769,17 @@ mod tests {
             steps.iter().any(|step| *step > 0.0),
             "the switch turns both ways"
         );
+        let smallest = steps
+            .iter()
+            .map(|step| step.abs())
+            .fold(f32::INFINITY, f32::min);
+        let largest = steps
+            .iter()
+            .map(|step| step.abs())
+            .fold(f32::NEG_INFINITY, f32::max);
         assert!(
-            steps
-                .iter()
-                .any(|step| (step.abs() - step_minimum).abs() < 1e-5),
-            "a small correction is raised to the switch minimum"
-        );
-        assert!(
-            steps
-                .iter()
-                .any(|step| (step.abs() - step_maximum).abs() < 1e-5),
-            "a large correction is capped at the switch maximum"
+            largest - smallest > 1e-3,
+            "the switch step must vary across the switch range"
         );
     }
 
