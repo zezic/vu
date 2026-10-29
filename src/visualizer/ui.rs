@@ -407,9 +407,11 @@ impl Ui {
             &mut fonts,
             &format!("{:.0}ms", detectors.kick_onset_min_interval * 1000.0),
         );
-        let drop_gap_readout = Readout::new(&mut fonts, "Drop Gap", ["[J]", "[K]"]);
-        let drop_gap_value =
-            Readout::value(&mut fonts, &format!("{:.2}", detectors.drop_gap_threshold));
+        let drop_gap_readout = Readout::new(&mut fonts, "Drop Gate", ["[J]", "[K]"]);
+        let drop_gap_value = Readout::value(
+            &mut fonts,
+            &format!("{:.0} dB", detectors.drop_gap_threshold),
+        );
         let depth_fade = config.depth_fade;
         visualizer.set_depth_fade(depth_fade);
         let depth_fade_readout = Readout::new(&mut fonts, "Depth Fade", ["[O]", "[P]"]);
@@ -1181,7 +1183,7 @@ impl Ui {
         );
         self.drop_gap_value = Readout::value(
             &mut self.fonts,
-            &format!("{:.2}", settings.drop_gap_threshold),
+            &format!("{:.0} dB", settings.drop_gap_threshold),
         );
         self.face_settings = None;
     }
@@ -1698,7 +1700,7 @@ mod tests {
         assert!(ui.click_debug(&view, layout.scene_button.center()));
         assert_eq!(ui.debug_selection, Some(DebugSelection::Scene));
         let scene = debug::scene_analyzer_layout(&view, ui.text_scale);
-        assert_eq!(scene.sliders.len(), 25);
+        assert_eq!(scene.sliders.len(), 26);
         let slider = scene.sliders[0];
         let before = ui.visualizer.parameter_value(slider.parameter);
         assert!(ui.click_debug(&view, Point::new(slider.track.x0, slider.track.center().y)));

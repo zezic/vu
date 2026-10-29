@@ -9,7 +9,7 @@ use super::{
     detection::{
         Spring, SPRING_DAMPING_MAX, SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX, SPRING_STIFFNESS_MIN,
     },
-    geometry::{wrap_angle, Vec3},
+    geometry::Vec3,
     model::Anchor,
     Rng,
 };
@@ -20,6 +20,8 @@ pub const SELECTOR_FADE_IN_MIN: f32 = 0.01;
 pub const SELECTOR_FADE_IN_MAX: f32 = 2.0;
 pub const SELECTOR_FADE_OUT_MIN: f32 = 0.005;
 pub const SELECTOR_FADE_OUT_MAX: f32 = 0.5;
+pub const SELECTOR_ENTRY_KICKS_MIN: u32 = 1;
+pub const SELECTOR_ENTRY_KICKS_MAX: u32 = 100;
 pub const SELECTOR_EXIT_TRIGGERS_MIN: u32 = 1;
 pub const SELECTOR_EXIT_TRIGGERS_MAX: u32 = 100;
 pub const SELECTOR_GAP_TIMEOUT_MIN: f32 = 1.0;
@@ -31,8 +33,8 @@ const FOCUS_FILL: f32 = 0.70;
 pub const POI_ORBIT_STEP_MAX: f32 = std::f32::consts::FRAC_PI_2;
 pub const POI_ORBIT_STEP_DEFAULT: f32 = std::f32::consts::FRAC_PI_4;
 pub const POI_ORBIT_STEP_MIN_DEFAULT: f32 = std::f32::consts::PI / 9.0;
-/// The shortest path to a reseed target is at most a half turn, so a half-turn
-/// maximum leaves the switch rotation uncapped.
+/// Switch steps are drawn from the orbit step range, so a half-turn maximum
+/// always leaves them uncapped.
 pub const POI_SWITCH_STEP_MAX: f32 = std::f32::consts::PI;
 pub const POI_SWITCH_STEP_DEFAULT: f32 = POI_ORBIT_STEP_DEFAULT;
 pub const POI_SWITCH_STEP_MIN_DEFAULT: f32 = 0.0;
@@ -55,6 +57,12 @@ pub const KICK_ATTACK_DEFAULT: f32 = 4.0;
 const POI_FOV_MIN: f32 = 30.0_f32.to_radians();
 const POI_FOV_MAX: f32 = 120.0_f32.to_radians();
 const RECENT_POIS: usize = 2;
+/// Closeness exponent for POI switches. Squaring bends the closeness curve
+/// below the uniform line, so nearby catalog points win more often.
+const POI_SWITCH_CLOSENESS_POWER: f32 = 2.0;
+/// Relative weight kept by the farthest candidate so a long jump stays
+/// possible.
+const POI_SWITCH_FAR_CHANCE: f32 = 0.1;
 /// The entry blend must be both visually complete and nearly motionless
 /// before kick-driven orbit and FOV changes are accepted.
 const ENTRY_SETTLED_BLEND: f32 = 0.999;
@@ -79,12 +87,10 @@ pub struct ShowcaseSettings {
     /// Largest signed yaw or pitch target step magnitude per kick.
     pub orbit_step_max: f32,
     /// Smallest yaw or pitch rotation applied when entering POI mode or
-    /// switching to another POI. Zero turns only as far as the new target
-    /// requires.
+    /// switching to another POI.
     pub poi_switch_step_min: f32,
     /// Largest yaw or pitch rotation applied when entering POI mode or
-    /// switching to another POI. A farther target is reached over several
-    /// switches instead of one swing.
+    /// switching to another POI.
     pub poi_switch_step_max: f32,
     /// Smallest absolute FOV target change per kick.
     pub fov_step_min: f32,
@@ -115,9 +121,11 @@ pub struct ShowcaseSettings {
     pub selector_fade_out: f32,
     /// Chance that the selected mesh uses a different palette color.
     pub selector_color_chance: f32,
+    /// Kick triggers required before the selector turns on.
+    pub selector_entry_kicks: u32,
     /// Kick/snare triggers required before the selector turns off.
     pub selector_exit_triggers: u32,
-    /// Continuous seconds of armed gap confidence before the selector turns off.
+    /// Continuous seconds of armed gap gate before the selector turns off.
     pub selector_gap_timeout: f32,
 }
 
@@ -148,6 +156,7 @@ impl Default for ShowcaseSettings {
             selector_fade_in: 0.30,
             selector_fade_out: 0.045,
             selector_color_chance: 0.25,
+            selector_entry_kicks: 4,
             selector_exit_triggers: 20,
             selector_gap_timeout: 10.0,
         }
@@ -229,6 +238,11 @@ impl ShowcaseSettings {
             "selector attenuation",
         )?;
         validate_value(
+            self.poi_attenuation,
+            (SELECTOR_ATTENUATION_MIN, SELECTOR_ATTENUATION_MAX),
+            "POI attenuation",
+        )?;
+        validate_value(
             self.selector_fade_in,
             (SELECTOR_FADE_IN_MIN, SELECTOR_FADE_IN_MAX),
             "selector fade in",
@@ -243,6 +257,11 @@ impl ShowcaseSettings {
             (0.0, 1.0),
             "selector color chance",
         )?;
+        anyhow::ensure!(
+            (SELECTOR_ENTRY_KICKS_MIN..=SELECTOR_ENTRY_KICKS_MAX)
+                .contains(&self.selector_entry_kicks),
+            "selector entry kicks must be between {SELECTOR_ENTRY_KICKS_MIN} and {SELECTOR_ENTRY_KICKS_MAX}"
+        );
         anyhow::ensure!(
             (SELECTOR_EXIT_TRIGGERS_MIN..=SELECTOR_EXIT_TRIGGERS_MAX)
                 .contains(&self.selector_exit_triggers),
@@ -293,6 +312,13 @@ impl FocusPoi {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SnareOutcome {
     pub flip: bool,
+}
+
+/// Result of a kick trigger for the normal-mode selector.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KickOutcome {
+    /// The selector turned on, so the model must return to its upright pose.
+    pub selector_entered: bool,
 }
 
 /// The camera parameters produced by the showcase springs.
@@ -563,13 +589,13 @@ impl Showcase {
         self.gap_armed = armed;
     }
 
-    pub fn kick(&mut self, rng: &mut Rng) {
+    pub fn kick(&mut self, rng: &mut Rng) -> KickOutcome {
         if self.mode == ShowcaseMode::Poi {
             self.selector.deactivate();
             // The entry owns the camera until it settles. Kicks during the
             // flight are ignored instead of fighting the entry spring.
             if !self.entry_settled {
-                return;
+                return KickOutcome::default();
             }
             let yaw = signed_step(
                 rng,
@@ -596,13 +622,19 @@ impl Showcase {
             let fov_delta = fov - self.fov.value();
             self.fov.set_target(fov);
             self.fov.impulse(fov_delta * attack);
-            return;
+            return KickOutcome::default();
         }
         if self.selector.active {
             self.selector.record_trigger(&self.settings);
-        } else {
-            self.selector.activate(rng, self.part_count, &self.settings);
+            return KickOutcome::default();
         }
+        if self.selector.record_entry_kick(&self.settings) {
+            self.selector.activate(rng, self.part_count, &self.settings);
+            return KickOutcome {
+                selector_entered: true,
+            };
+        }
+        KickOutcome::default()
     }
 
     pub fn hat(&mut self, rng: &mut Rng) {
@@ -796,22 +828,22 @@ impl Showcase {
         self.poi_switch_cooldown = self.settings.poi_switch_gap;
     }
 
-    /// Re-aims the orbit for a new POI. The target is drawn from the kick step
-    /// range, but the switch only covers a step inside the switch step range,
-    /// so a distant target is reached over consecutive switches.
+    /// Re-aims the orbit for a new POI. The desired step is drawn from the
+    /// kick step range and applied relative to the current view, then capped
+    /// by the switch step range.
     fn reseed_orbit(&mut self, rng: &mut Rng) {
         let settings = &self.settings;
         let drift = self.orbit_drift_yaw;
-        let yaw = self.orbit_yaw.value();
+        let yaw = self.orbit_yaw.value() + drift;
         let pitch = self.orbit_pitch.value();
-        let yaw_aim = signed_step(rng, settings.orbit_step_min, settings.orbit_step_max);
-        let pitch_aim = signed_step(rng, settings.orbit_step_min, settings.orbit_step_max);
+        let desired_yaw = signed_step(rng, settings.orbit_step_min, settings.orbit_step_max);
+        let desired_pitch = signed_step(rng, settings.orbit_step_min, settings.orbit_step_max);
         let minimum = settings.poi_switch_step_min;
         let maximum = settings.poi_switch_step_max;
-        let yaw_target = bounded_approach(rng, yaw + drift, yaw_aim, minimum, maximum);
+        let yaw_target = bounded_step(rng, yaw, desired_yaw, minimum, maximum);
         self.orbit_yaw.set_target(yaw_target - drift);
         self.orbit_pitch
-            .set_target(bounded_approach(rng, pitch, pitch_aim, minimum, maximum));
+            .set_target(bounded_step(rng, pitch, desired_pitch, minimum, maximum));
     }
 
     fn reset_poi_child(&mut self) {
@@ -857,7 +889,10 @@ impl Showcase {
         if pool.is_empty() {
             pool = (0..self.pois.len()).collect();
         }
-        let index = pool[rng.range(pool.len())];
+        let index = match self.current {
+            Some(current) => self.weighted_poi(&pool, current, rng),
+            None => pool[rng.range(pool.len())],
+        };
         if let Some(current) = self.current {
             if self.recent.len() == RECENT_POIS {
                 self.recent.pop_front();
@@ -865,6 +900,43 @@ impl Showcase {
             self.recent.push_back(current);
         }
         Some(index)
+    }
+
+    /// Picks from the candidate pool with probability falling with distance
+    /// from the current POI. Distances are min-max normalized across the pool;
+    /// the closeness curve and its far-chance floor keep every candidate
+    /// selectable.
+    fn weighted_poi(&self, pool: &[usize], current: usize, rng: &mut Rng) -> usize {
+        let origin = self.pois[current].anchor.center;
+        let mut minimum = f32::INFINITY;
+        let mut maximum = f32::NEG_INFINITY;
+        for &index in pool {
+            let distance = (self.pois[index].anchor.center - origin).length();
+            minimum = minimum.min(distance);
+            maximum = maximum.max(distance);
+        }
+        let span = maximum - minimum;
+        if span <= f32::EPSILON {
+            return pool[rng.range(pool.len())];
+        }
+        let weights: Vec<f32> = pool
+            .iter()
+            .map(|&index| {
+                let distance = (self.pois[index].anchor.center - origin).length();
+                let closeness = (1.0 - (distance - minimum) / span).clamp(0.0, 1.0);
+                POI_SWITCH_FAR_CHANCE
+                    + (1.0 - POI_SWITCH_FAR_CHANCE) * closeness.powf(POI_SWITCH_CLOSENESS_POWER)
+            })
+            .collect();
+        let total = weights.iter().sum::<f32>();
+        let mut roll = rng.unit() * total;
+        for (slot, &weight) in weights.iter().enumerate() {
+            if roll < weight {
+                return pool[slot];
+            }
+            roll -= weight;
+        }
+        *pool.last().expect("a non-empty POI pool")
     }
 
     fn exit_poi(&mut self) {
@@ -899,6 +971,7 @@ struct SelectorState {
     progress: f32,
     selected: Option<u16>,
     alternate_color: bool,
+    entry_kicks: u32,
     exit_triggers: u32,
     gap_elapsed: f32,
 }
@@ -909,6 +982,7 @@ impl SelectorState {
             self.selected = pick_mesh(rng, None, part_count);
         }
         self.active = true;
+        self.entry_kicks = 0;
         self.exit_triggers = 0;
         self.gap_elapsed = 0.0;
         self.roll_color(rng, settings);
@@ -917,7 +991,15 @@ impl SelectorState {
     fn deactivate(&mut self) {
         self.active = false;
         self.alternate_color = false;
+        self.entry_kicks = 0;
         self.gap_elapsed = 0.0;
+    }
+
+    /// Counts an entry kick while the selector is off. Reaching the configured
+    /// count opens the selector.
+    fn record_entry_kick(&mut self, settings: &ShowcaseSettings) -> bool {
+        self.entry_kicks = self.entry_kicks.saturating_add(1);
+        self.entry_kicks >= settings.selector_entry_kicks
     }
 
     fn record_trigger(&mut self, settings: &ShowcaseSettings) {
@@ -1009,19 +1091,17 @@ fn signed_step(rng: &mut Rng, minimum: f32, maximum: f32) -> f32 {
     }
 }
 
-/// Moves `current` toward `aim` along the shortest angular path by a step
-/// inside the switch step range. When the aim is farther away than the
-/// maximum, the step only approaches it and later switches cover the rest.
+/// Applies a desired signed rotation to `current`, keeping its magnitude
+/// inside the switch step range.
 #[must_use]
-fn bounded_approach(rng: &mut Rng, current: f32, aim: f32, minimum: f32, maximum: f32) -> f32 {
-    let delta = wrap_angle(aim - current);
-    let magnitude = delta.abs().clamp(minimum, maximum);
-    let direction = if delta < 0.0 {
+fn bounded_step(rng: &mut Rng, current: f32, desired: f32, minimum: f32, maximum: f32) -> f32 {
+    let magnitude = desired.abs().clamp(minimum, maximum);
+    let direction = if desired < 0.0 {
         -1.0
-    } else if delta > 0.0 {
+    } else if desired > 0.0 {
         1.0
     } else if rng.unit() < 0.5 {
-        // Already on the aim: the minimum step picks either side.
+        // A zero desired step still gets the minimum rotation.
         -1.0
     } else {
         1.0
@@ -1058,6 +1138,7 @@ pub fn framed_distance(radius: f32, fov: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::visualizer::geometry::wrap_angle;
 
     fn anchor(x: f32, part: Option<u16>) -> Anchor {
         Anchor {
@@ -1070,6 +1151,7 @@ mod tests {
 
     fn showcase() -> Showcase {
         let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_entry_kicks: 1,
             poi_switch_gap: 0.0,
             ..ShowcaseSettings::default()
         });
@@ -1134,6 +1216,7 @@ mod tests {
     #[test]
     fn selector_exit_needs_the_configured_trigger_count() {
         let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_entry_kicks: 1,
             selector_exit_triggers: 2,
             ..ShowcaseSettings::default()
         });
@@ -1161,6 +1244,39 @@ mod tests {
         assert_eq!(showcase.mode(), ShowcaseMode::Poi);
         showcase.kick(&mut rng);
         assert!(!showcase.selector_active());
+    }
+
+    #[test]
+    fn selector_entry_needs_the_configured_kick_count() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_entry_kicks: 3,
+            selector_exit_triggers: 2,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![
+                FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("slide".to_owned(), anchor(0.0, Some(0)), false),
+            ],
+            2,
+        );
+        let mut rng = Rng::new(17);
+        for _ in 0..2 {
+            assert!(!showcase.kick(&mut rng).selector_entered);
+            assert!(!showcase.selector_active());
+        }
+        assert!(showcase.kick(&mut rng).selector_entered);
+        assert!(showcase.selector_active());
+        for _ in 0..2 {
+            assert!(!showcase.kick(&mut rng).selector_entered);
+        }
+        assert!(!showcase.selector_active());
+        for _ in 0..2 {
+            assert!(!showcase.kick(&mut rng).selector_entered);
+            assert!(!showcase.selector_active());
+        }
+        assert!(showcase.kick(&mut rng).selector_entered);
+        assert!(showcase.selector_active());
     }
 
     #[test]
@@ -1232,6 +1348,7 @@ mod tests {
     #[test]
     fn snares_count_toward_selector_exit() {
         let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_entry_kicks: 1,
             selector_exit_triggers: 2,
             ..ShowcaseSettings::default()
         });
@@ -1261,6 +1378,7 @@ mod tests {
     #[test]
     fn gap_confidence_exits_the_selector_only_after_its_timeout() {
         let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_entry_kicks: 1,
             selector_gap_timeout: 2.0,
             selector_exit_triggers: 100,
             ..ShowcaseSettings::default()
@@ -1289,6 +1407,7 @@ mod tests {
     #[test]
     fn clearing_gap_confidence_resets_the_selector_timeout() {
         let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_entry_kicks: 1,
             selector_gap_timeout: 2.0,
             selector_exit_triggers: 100,
             ..ShowcaseSettings::default()
@@ -1472,28 +1591,35 @@ mod tests {
     }
 
     #[test]
-    fn poi_switch_rotates_the_orbit_within_the_switch_step_range() {
+    fn poi_switch_rotates_from_the_current_view_within_the_switch_step_range() {
         let step_minimum = 10.0_f32.to_radians();
         let step_maximum = 15.0_f32.to_radians();
         let mut showcase = showcase();
+        showcase.settings_mut().orbit_step_min = 0.0;
+        showcase.settings_mut().orbit_step_max = 60.0_f32.to_radians();
         showcase.settings_mut().poi_switch_step_min = step_minimum;
         showcase.settings_mut().poi_switch_step_max = step_maximum;
         let mut rng = Rng::new(58);
         assert!(showcase.enter_focus(&mut rng, 0.75));
         showcase.orbit_yaw.reset(30.0_f32.to_radians());
         showcase.orbit_pitch.reset(0.0);
-        showcase.orbit_drift_yaw = 0.0;
+        showcase.orbit_drift_yaw = 0.3;
 
         let mut steps = Vec::new();
         for _ in 0..40 {
-            let yaw_before = showcase.orbit_yaw.value();
+            let yaw_before = showcase.orbit_yaw.value() + showcase.orbit_drift_yaw;
             let pitch_before = showcase.orbit_pitch.value();
             showcase.select_next_poi(&mut rng);
-            let yaw_step = showcase.orbit_yaw.target() - yaw_before;
-            let pitch_step = showcase.orbit_pitch.target() - pitch_before;
+            let yaw_target = showcase.orbit_yaw.target() + showcase.orbit_drift_yaw;
+            let yaw_step = wrap_angle(yaw_target - yaw_before);
+            let pitch_step = wrap_angle(showcase.orbit_pitch.target() - pitch_before);
             assert_switch_step(yaw_step, showcase.settings());
             assert_switch_step(pitch_step, showcase.settings());
             steps.push(yaw_step);
+            showcase
+                .orbit_yaw
+                .reset(yaw_target - showcase.orbit_drift_yaw);
+            showcase.orbit_pitch.reset(showcase.orbit_pitch.target());
         }
         assert!(
             steps.iter().any(|step| *step < 0.0),
@@ -1513,48 +1639,72 @@ mod tests {
             steps
                 .iter()
                 .any(|step| (step.abs() - step_maximum).abs() < 1e-5),
-            "a distant target is capped at the switch maximum"
+            "a large correction is capped at the switch maximum"
         );
     }
 
     #[test]
-    fn poi_switch_unwinds_a_distant_orbit_over_several_switches() {
-        let step_maximum = 30.0_f32.to_radians();
+    fn poi_switch_moves_relative_to_the_current_view() {
+        let step = 10.0_f32.to_radians();
         let mut showcase = showcase();
         showcase.settings_mut().orbit_step_min = 0.0;
         showcase.settings_mut().orbit_step_max = 0.0;
-        showcase.settings_mut().poi_switch_step_min = 10.0_f32.to_radians();
-        showcase.settings_mut().poi_switch_step_max = step_maximum;
+        showcase.settings_mut().poi_switch_step_min = step;
+        showcase.settings_mut().poi_switch_step_max = step;
         let mut rng = Rng::new(71);
         assert!(showcase.enter_focus(&mut rng, 0.75));
         showcase.orbit_yaw.reset(170.0_f32.to_radians());
+        showcase.orbit_drift_yaw = 0.0;
 
-        let mut steps = Vec::new();
-        for _ in 0..8 {
-            if showcase.orbit_yaw.value().abs() <= 1e-5 {
-                break;
-            }
+        let mut moved_away = false;
+        for _ in 0..10 {
             let yaw_before = showcase.orbit_yaw.value();
             showcase.select_next_poi(&mut rng);
             let yaw_target = showcase.orbit_yaw.target();
-            let yaw_step = yaw_target - yaw_before;
-            assert_switch_step(yaw_step, showcase.settings());
-            assert!(yaw_step <= 0.0, "the orbit turns toward the target");
-            steps.push(yaw_step);
+            let yaw_step = wrap_angle(yaw_target - yaw_before);
+            assert!(
+                (yaw_step.abs() - step).abs() < 1e-5,
+                "the switch must move by the switch step from the current view"
+            );
+            moved_away |= yaw_step > 0.0;
             showcase.orbit_yaw.reset(yaw_target);
         }
         assert!(
-            steps.len() >= 5,
-            "the accumulated rotation is spread over several switches"
+            moved_away,
+            "a switch away from the initial orbit must stay possible"
+        );
+    }
+
+    #[test]
+    fn poi_switches_prefer_nearby_candidates_but_keep_a_far_chance() {
+        let mut showcase = Showcase::new(ShowcaseSettings::default());
+        showcase.set_model(
+            vec![
+                FocusPoi::new("origin".to_owned(), anchor(0.0, None), false),
+                FocusPoi::new("near".to_owned(), anchor(0.4, None), false),
+                FocusPoi::new("middle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("far".to_owned(), anchor(1.2, None), false),
+            ],
+            1,
+        );
+        let mut rng = Rng::new(99);
+        let mut counts = [0usize; 4];
+        for _ in 0..20_000 {
+            showcase.current = Some(0);
+            showcase.recent.clear();
+            let index = showcase.choose_poi(&mut rng).expect("a POI is available");
+            counts[index] += 1;
+        }
+        assert_eq!(counts[0], 0, "the current POI stays excluded");
+        assert!(
+            counts[1] > counts[2] && counts[2] > counts[3],
+            "closer candidates must win more often: {counts:?}"
         );
         assert!(
-            (steps[0].abs() - step_maximum).abs() < 1e-5,
-            "the first switch takes only the maximum step"
+            counts[1] * 2 > counts.iter().sum::<usize>(),
+            "the closest candidate takes most of the rolls: {counts:?}"
         );
-        assert!(
-            showcase.orbit_yaw.value().abs() <= 1e-5,
-            "successive switches recenter the orbit on the target"
-        );
+        assert!(counts[3] > 0, "the farthest candidate stays reachable");
     }
 
     #[test]
@@ -1892,6 +2042,7 @@ mod tests {
     #[test]
     fn selector_fades_out_slowly_and_returns_quickly() {
         let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_entry_kicks: 1,
             selector_exit_triggers: 1,
             ..ShowcaseSettings::default()
         });
@@ -1922,6 +2073,7 @@ mod tests {
     #[test]
     fn selector_active_suppresses_the_flip_for_that_snare() {
         let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_entry_kicks: 1,
             selector_exit_triggers: 1,
             ..ShowcaseSettings::default()
         });
@@ -1949,6 +2101,7 @@ mod tests {
     #[test]
     fn the_nth_snare_disables_the_selector() {
         let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_entry_kicks: 1,
             selector_exit_triggers: 1,
             ..ShowcaseSettings::default()
         });

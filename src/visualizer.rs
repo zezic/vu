@@ -20,16 +20,15 @@ pub use computation::{
 pub use detection::{
     BandOnsetSettings, DetectorSettings, DropKernel, DropKernels, DropStatus, FluxSettings,
     OnsetFluxStatus, PatternKernel, PatternLayer, QuakeDirection, TemporalPattern, TriggerStatus,
-    ABL_AMOUNT_MIN, ABL_GAIN_MAX, ABL_GAIN_MIN, CHOKE_MAX, CHOKE_MIN, DROP_GAP_GAIN_MAX,
-    DROP_GAP_GAIN_MIN, DROP_GAP_THRESHOLD_MAX, DROP_GAP_THRESHOLD_MIN, DROP_GAP_WINDOW_MAX,
-    DROP_GAP_WINDOW_MIN, DROP_LP_MAX, DROP_LP_MIN, EXCESS_ATTACK_MAX, EXCESS_ATTACK_MIN,
-    EXCESS_CAP_MAX, EXCESS_CAP_MIN, EXCESS_FLOOR_MAX, EXCESS_FLOOR_MIN, EXCESS_RELEASE_MAX,
-    EXCESS_RELEASE_MIN, FLUX_ATTACK_MAX, FLUX_ATTACK_MIN, FLUX_AVERAGE_MAX, FLUX_AVERAGE_MIN,
-    FLUX_INTERVAL_MAX, FLUX_INTERVAL_MIN, FLUX_PRE_GAIN_MAX, FLUX_PRE_GAIN_MIN, FLUX_RELEASE_MAX,
-    FLUX_RELEASE_MIN, FLUX_SENSITIVITY_MAX, FLUX_SENSITIVITY_MIN, FLUX_SUPPRESSION_MAX,
-    FLUX_SUPPRESSION_MIN, FLUX_THRESHOLD_MIN, ONSET_THRESHOLD_MAX, QUAKE_FACTOR_MAX,
-    QUAKE_FACTOR_MIN, SEQUENCE_EVERY_MAX, SEQUENCE_EVERY_MIN, SPRING_DAMPING_MAX,
-    SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX, SPRING_STIFFNESS_MIN,
+    ABL_AMOUNT_MIN, ABL_GAIN_MAX, ABL_GAIN_MIN, CHOKE_MAX, CHOKE_MIN, DROP_GAP_THRESHOLD_MAX,
+    DROP_GAP_THRESHOLD_MIN, EXCESS_ATTACK_MAX, EXCESS_ATTACK_MIN, EXCESS_CAP_MAX, EXCESS_CAP_MIN,
+    EXCESS_FLOOR_MAX, EXCESS_FLOOR_MIN, EXCESS_RELEASE_MAX, EXCESS_RELEASE_MIN, FLUX_ATTACK_MAX,
+    FLUX_ATTACK_MIN, FLUX_AVERAGE_MAX, FLUX_AVERAGE_MIN, FLUX_INTERVAL_MAX, FLUX_INTERVAL_MIN,
+    FLUX_PRE_GAIN_MAX, FLUX_PRE_GAIN_MIN, FLUX_RELEASE_MAX, FLUX_RELEASE_MIN, FLUX_SENSITIVITY_MAX,
+    FLUX_SENSITIVITY_MIN, FLUX_SUPPRESSION_MAX, FLUX_SUPPRESSION_MIN, FLUX_THRESHOLD_MIN,
+    ONSET_THRESHOLD_MAX, QUAKE_FACTOR_MAX, QUAKE_FACTOR_MIN, SEQUENCE_EVERY_MAX,
+    SEQUENCE_EVERY_MIN, SNARE_RMS_GATE_DEFAULT_DB, SNARE_RMS_GATE_MAX_DB, SNARE_RMS_GATE_MIN_DB,
+    SPRING_DAMPING_MAX, SPRING_DAMPING_MIN, SPRING_STIFFNESS_MAX, SPRING_STIFFNESS_MIN,
 };
 use detection::{OnsetBank, QuakeSequence, Spring};
 pub use showcase::ShowcaseSettings;
@@ -54,7 +53,7 @@ use crate::{
 
 use geometry::{
     focus_base_angles, soft_saturate, wrap_angle, Camera, Deformation, DepthOpacity,
-    FocusProjection, Pose, Projected, Vec2, Vec3, Wireframe,
+    FocusProjection, Pose, Projected, ScreenBounds, Vec2, Vec3, Wireframe,
 };
 pub use spectrum::{RelativeExcessSettings, BAND_COUNT};
 use spectrum::{Spectrum, SpectrumAnalyzer};
@@ -725,6 +724,17 @@ impl LineInstance {
         line.style[1] = 1.0;
         line
     }
+
+    /// Whether the padded stroke can cover a pixel of the render target.
+    fn intersects(self, bounds: ScreenBounds) -> bool {
+        let [ax, ay, bx, by] = self.endpoints;
+        // The vertex shader expands the segment into a quad by this padding.
+        let padding = self.style[0].max(1.0) * 0.5 + 1.5;
+        bounds.intersects(
+            Vec2::new(ax.min(bx) - padding, ay.min(by) - padding),
+            Vec2::new(ax.max(bx) + padding, ay.max(by) + padding),
+        )
+    }
 }
 
 /// The selected Gogh palette split into its four neutral and twelve vivid slots.
@@ -1342,6 +1352,18 @@ impl RibbonInstance {
         self.style[1] = edges as f32;
         self
     }
+
+    /// Whether the triangle can cover a pixel of the render target.
+    fn intersects(self, bounds: ScreenBounds) -> bool {
+        let [ax, ay, bx, by] = self.start;
+        let (cx, cy) = (self.end[0], self.end[1]);
+        // Half a pixel covers the analytic edge coverage at the boundary.
+        let padding = 0.5;
+        bounds.intersects(
+            Vec2::new(ax.min(bx).min(cx) - padding, ay.min(by).min(cy) - padding),
+            Vec2::new(ax.max(bx).max(cx) + padding, ay.max(by).max(cy) + padding),
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1491,7 +1513,9 @@ pub struct Visualizer {
     kick: f32,
     kick_decay: f32,
     flip: Spring,
-    flip_target: f32,
+    /// Number of half turns the flip target has advanced through. The count
+    /// accumulates forward so a flip never rewinds to the previous turn.
+    flip_half_turns: u32,
     quake_x: Spring,
     quake_y: Spring,
     kick_sequence: QuakeSequence,
@@ -1554,7 +1578,7 @@ impl Visualizer {
             kick: 0.0,
             kick_decay: tuning.kick_decay,
             flip: Spring::default(),
-            flip_target: 0.0,
+            flip_half_turns: 0,
             quake_x: Spring::default(),
             quake_y: Spring::default(),
             kick_sequence: QuakeSequence::default(),
@@ -1783,7 +1807,7 @@ impl Visualizer {
         self.frames.clear();
         self.kick = 0.0;
         self.flip.reset(0.0);
-        self.flip_target = 0.0;
+        self.flip_half_turns = 0;
         self.showcase.reset_cycle();
         self.quake_x.reset(0.0);
         self.quake_y.reset(0.0);
@@ -2359,18 +2383,16 @@ impl Visualizer {
             Parameter::SelectorFadeIn => self.showcase.settings().selector_fade_in,
             Parameter::SelectorFadeOut => self.showcase.settings().selector_fade_out,
             Parameter::SelectorColorChance => self.showcase.settings().selector_color_chance,
+            Parameter::SelectorEntryKicks => self.showcase.settings().selector_entry_kicks as f32,
             Parameter::SelectorExitTriggers => {
                 self.showcase.settings().selector_exit_triggers as f32
             }
             Parameter::SelectorGapTimeout => self.showcase.settings().selector_gap_timeout,
             Parameter::SnareChoke => self.detectors.snare_choke,
+            Parameter::SnareRmsGate => self.detectors.snare_min_rms_db,
             Parameter::FlipStiffness => self.detectors.flip_stiffness,
             Parameter::FlipDamping => self.detectors.flip_damping,
-            Parameter::DropGapWindow => self.detectors.drop_gap_window,
-            Parameter::DropGapGain => self.detectors.drop_gap_gain,
             Parameter::DropGapThreshold => self.detectors.drop_gap_threshold,
-            Parameter::DropLowLp => self.detectors.drop_low_lp,
-            Parameter::DropHighLp => self.detectors.drop_high_lp,
             Parameter::DropQuakeFactor => self.detectors.drop_quake_factor,
             Parameter::QuakeStiffness => self.detectors.quake_stiffness,
             Parameter::QuakeDamping => self.detectors.quake_damping,
@@ -2539,6 +2561,9 @@ impl Visualizer {
             Parameter::SelectorColorChance => {
                 self.showcase.settings_mut().selector_color_chance = value;
             }
+            Parameter::SelectorEntryKicks => {
+                self.showcase.settings_mut().selector_entry_kicks = value.round() as u32;
+            }
             Parameter::SelectorExitTriggers => {
                 self.showcase.settings_mut().selector_exit_triggers = value.round() as u32;
             }
@@ -2546,13 +2571,10 @@ impl Visualizer {
                 self.showcase.settings_mut().selector_gap_timeout = value;
             }
             Parameter::SnareChoke => self.detectors.snare_choke = value,
+            Parameter::SnareRmsGate => self.detectors.snare_min_rms_db = value,
             Parameter::FlipStiffness => self.detectors.flip_stiffness = value,
             Parameter::FlipDamping => self.detectors.flip_damping = value,
-            Parameter::DropGapWindow => self.detectors.drop_gap_window = value,
-            Parameter::DropGapGain => self.detectors.drop_gap_gain = value,
             Parameter::DropGapThreshold => self.detectors.drop_gap_threshold = value,
-            Parameter::DropLowLp => self.detectors.drop_low_lp = value,
-            Parameter::DropHighLp => self.detectors.drop_high_lp = value,
             Parameter::DropQuakeFactor => self.detectors.drop_quake_factor = value,
             Parameter::QuakeStiffness => self.detectors.quake_stiffness = value,
             Parameter::QuakeDamping => self.detectors.quake_damping = value,
@@ -2932,7 +2954,7 @@ impl Visualizer {
         if !self.property_gates.plays(Property::Kick) {
             self.kick = 0.0;
         }
-        self.flip.set_target(self.flip_target);
+        self.flip.set_target(self.flip_target());
         self.flip.advance(
             dt,
             self.detectors.flip_stiffness,
@@ -3147,13 +3169,12 @@ impl Visualizer {
         let arm = size * 0.34;
         let width = 1.15 * ui_scale;
         let alpha = 0.78;
+        let screen = ScreenBounds::new(Vec2::new(viewport.0, viewport.1));
         let mut push = |a: Vec2, b: Vec2| {
-            self.lines.push(LineInstance::new(
-                a,
-                b,
-                [color[0], color[1], color[2], alpha],
-                width,
-            ));
+            let line = LineInstance::new(a, b, [color[0], color[1], color[2], alpha], width);
+            if line.intersects(screen) {
+                self.lines.push(line);
+            }
         };
         // Four sci-fi corner brackets.
         push(
@@ -3221,9 +3242,13 @@ impl Visualizer {
     }
 
     fn handle_action(&mut self, action: Action, accent: f32, normal_fov: f32) {
+        let was_poi = self.showcase.mode() == showcase::ShowcaseMode::Poi;
         match action {
             Action::Kick(power) => {
-                self.showcase.kick(&mut self.rng);
+                let outcome = self.showcase.kick(&mut self.rng);
+                if outcome.selector_entered {
+                    self.settle_flip_upright();
+                }
                 self.kick = self.kick.max(power.clamp(0.0, 1.5));
                 if self.showcase.mode() == showcase::ShowcaseMode::Normal
                     && self.property_gates.plays(Property::Quake)
@@ -3241,11 +3266,10 @@ impl Visualizer {
                     normal_fov,
                 );
                 if outcome.flip && self.property_gates.plays(Property::Flip) {
-                    self.flip_target += TAU * 0.5;
+                    self.flip_half_turns += 1;
                 }
             }
             Action::Drop(power) => {
-                let was_poi = self.showcase.mode() == showcase::ShowcaseMode::Poi;
                 self.showcase.drop();
                 self.advance_model(accent);
                 if was_poi {
@@ -3263,6 +3287,25 @@ impl Visualizer {
             Action::GapEntry => self.showcase.gap_entry(),
             Action::Hat => self.showcase.hat(&mut self.rng),
         }
+        // POI focus fades the normal model motion but keeps the flip spring
+        // running, so an inverted model would freeze upside-down for the
+        // whole focus. Finish the flip upright as the mode changes.
+        if !was_poi && self.showcase.mode() == showcase::ShowcaseMode::Poi {
+            self.settle_flip_upright();
+        }
+    }
+
+    /// Total angle the flip spring is heading to. The half-turn count is
+    /// accumulated forward so every flip continues in the same direction.
+    fn flip_target(&self) -> f32 {
+        self.flip_half_turns as f32 * std::f32::consts::PI
+    }
+
+    /// Rounds the flip count up to a whole turn so the model finishes upright
+    /// when the selector enters or POI focus takes over. An odd count is
+    /// completed forward instead of reversed.
+    fn settle_flip_upright(&mut self) {
+        self.flip_half_turns = self.flip_half_turns.next_multiple_of(2);
     }
 
     fn quake_impulse(&mut self, direction: QuakeDirection, velocity: f32) {
@@ -3865,6 +3908,7 @@ impl ModelRuntime {
         // mode cannot undo or replay the last flip.
         let pose = self.pose.with_action(flip_pitch, shake);
         let in_poi = showcase.focus.freeze_motion;
+        let entered_poi = !self.was_poi && in_poi;
         let mut reentered_from_exit = false;
         if self.was_poi && !in_poi {
             let blend = showcase.focus.blend.max(1e-4);
@@ -3873,13 +3917,26 @@ impl ModelRuntime {
             self.exit_rotation = true;
             self.rotation_offset_yaw = 0.0;
             self.rotation_offset_pitch = 0.0;
-        } else if !self.was_poi && in_poi && self.exit_rotation {
+        } else if entered_poi && self.exit_rotation {
             self.exit_rotation = false;
             reentered_from_exit = true;
         } else if self.exit_rotation && !in_poi && showcase.focus.blend <= 1e-4 {
             self.exit_rotation = false;
         }
         self.was_poi = in_poi;
+        if entered_poi {
+            // The focus angles are tracked as continuous values, so they pick
+            // up whole turns while the model spins in normal mode. Fold the
+            // entry angle into one turn: the blend should reach the POI by the
+            // shortest path instead of replaying every turn stored since the
+            // last entry. Shifting the base by whole turns leaves its tracking
+            // unchanged because the deltas are wrapped.
+            let total_yaw =
+                self.base_yaw + showcase.focus.orbit_yaw + showcase.focus.orbit_drift_yaw;
+            self.base_yaw += wrap_angle(total_yaw) - total_yaw;
+            let total_pitch = self.base_pitch + showcase.focus.orbit_pitch;
+            self.base_pitch += wrap_angle(total_pitch) - total_pitch;
+        }
 
         let (target_base_yaw, target_base_pitch) =
             focus_base_angles(pose.orient(showcase.focus.center));
@@ -3991,6 +4048,9 @@ impl ModelRuntime {
         };
         let alpha = (self.opacity * base_opacity).clamp(0.0, 1.0);
         let width = base_width * (1.0 + music.kick * 0.25);
+        // Cull only the emitted instances; the temporal history keeps every
+        // edge so a sweep stays correct when the edge re-enters the viewport.
+        let screen = ScreenBounds::new(camera.viewport);
         for (index, current) in self.current.iter().enumerate() {
             if !current.visible {
                 continue;
@@ -4030,13 +4090,11 @@ impl ModelRuntime {
                     rgb[2],
                     edge_alpha * current.end_depth_opacity,
                 ];
-                out.push(LineInstance::flat(
-                    current.start,
-                    current.end,
-                    start_color,
-                    end_color,
-                    width,
-                ));
+                let line =
+                    LineInstance::flat(current.start, current.end, start_color, end_color, width);
+                if line.intersects(screen) {
+                    out.push(line);
+                }
                 continue;
             };
 
@@ -4049,6 +4107,7 @@ impl ModelRuntime {
                     width,
                 },
                 motion_fade,
+                screen,
                 out_ribbons,
             );
         }
@@ -4190,6 +4249,7 @@ fn push_sweep(
     last: LineGeometry,
     ink: SweepInk,
     motion_fade: MotionFade,
+    screen: ScreenBounds,
     out: &mut Vec<RibbonInstance>,
 ) {
     let middle = lerp_line(first, last, 0.5);
@@ -4251,31 +4311,49 @@ fn push_sweep(
         // The body is two flat-capped quads; the shared long-edge
         // gradients are the same U -> X -> V ramps as the wings. Only
         // the body caps and the wing outer edges are free boundaries.
-        out.push(RibbonInstance::triangle([l_top, l_bottom, x2], [am, am, peak_x]).coverage(1));
-        out.push(RibbonInstance::triangle(
-            [l_top, x2, x1],
-            [am, peak_x, peak_x],
-        ));
-        out.push(RibbonInstance::triangle(
-            [x1, x2, r_bottom],
-            [peak_x, peak_x, bm],
-        ));
-        out.push(RibbonInstance::triangle([x1, r_bottom, r_top], [peak_x, bm, bm]).coverage(2));
+        push_ribbon(
+            out,
+            screen,
+            RibbonInstance::triangle([l_top, l_bottom, x2], [am, am, peak_x]).coverage(1),
+        );
+        push_ribbon(
+            out,
+            screen,
+            RibbonInstance::triangle([l_top, x2, x1], [am, peak_x, peak_x]),
+        );
+        push_ribbon(
+            out,
+            screen,
+            RibbonInstance::triangle([x1, x2, r_bottom], [peak_x, peak_x, bm]),
+        );
+        push_ribbon(
+            out,
+            screen,
+            RibbonInstance::triangle([x1, r_bottom, r_top], [peak_x, bm, bm]).coverage(2),
+        );
         // Top wings attach to the top long edge and meet at X1. Their
         // outer-to-X edges are masked to zero by the wing shader.
-        out.push(
+        push_ribbon(
+            out,
+            screen,
             RibbonInstance::wing_triangle([first.start, l_top, x1], [clear, am, peak_x])
                 .coverage(1),
         );
-        out.push(
+        push_ribbon(
+            out,
+            screen,
             RibbonInstance::wing_triangle([last.end, r_top, x1], [clear, bm, peak_x]).coverage(1),
         );
         // Bottom wings attach to the bottom long edge and meet at X2.
-        out.push(
+        push_ribbon(
+            out,
+            screen,
             RibbonInstance::wing_triangle([last.start, l_bottom, x2], [clear, am, peak_x])
                 .coverage(1),
         );
-        out.push(
+        push_ribbon(
+            out,
+            screen,
             RibbonInstance::wing_triangle([first.end, r_bottom, x2], [clear, bm, peak_x])
                 .coverage(1),
         );
@@ -4303,14 +4381,18 @@ fn push_sweep(
     let shared_bc = if wings_clear { 0 } else { 2 };
     let shared_ab = if wings_clear { 0 } else { 1 };
     if wings_clear {
-        out.push(
+        push_ribbon(
+            out,
+            screen,
             RibbonInstance::triangle(
                 [first.start, first.end, back_end],
                 [clear, clear, opaque_end],
             )
             .coverage(2),
         );
-        out.push(
+        push_ribbon(
+            out,
+            screen,
             RibbonInstance::triangle(
                 [first.start, back_end, back_start],
                 [clear, opaque_end, opaque_start],
@@ -4318,14 +4400,18 @@ fn push_sweep(
             .coverage(4),
         );
     }
-    out.push(
+    push_ribbon(
+        out,
+        screen,
         RibbonInstance::triangle(
             [back_start, back_end, front_end],
             [opaque_start, opaque_end, opaque_end],
         )
         .coverage(2 | shared_ab),
     );
-    out.push(
+    push_ribbon(
+        out,
+        screen,
         RibbonInstance::triangle(
             [back_start, front_end, front_start],
             [opaque_start, opaque_end, opaque_start],
@@ -4333,20 +4419,31 @@ fn push_sweep(
         .coverage(4 | shared_bc),
     );
     if wings_clear {
-        out.push(
+        push_ribbon(
+            out,
+            screen,
             RibbonInstance::triangle(
                 [front_start, front_end, last.end],
                 [opaque_start, opaque_end, clear],
             )
             .coverage(2),
         );
-        out.push(
+        push_ribbon(
+            out,
+            screen,
             RibbonInstance::triangle(
                 [front_start, last.end, last.start],
                 [opaque_start, clear, clear],
             )
             .coverage(4),
         );
+    }
+}
+
+/// Appends a ribbon only when it can cover the render target.
+fn push_ribbon(out: &mut Vec<RibbonInstance>, screen: ScreenBounds, ribbon: RibbonInstance) {
+    if ribbon.intersects(screen) {
+        out.push(ribbon);
     }
 }
 
@@ -4539,8 +4636,10 @@ mod tests {
                 suppression_outer: vec![[0.0, 0.999], [1.0, 0.999], [1.0, 1.0], [0.0, 1.0]],
                 effective: 1.0,
             },
-            // Unreachable gap confidence keeps the drop from choking the kick.
-            drop_gap_threshold: 1.0,
+            // An empty drop kernel keeps the drop from choking the kick.
+            drop_kernels: DropKernels {
+                onset: [0.0; BAND_COUNT],
+            },
             ..DetectorSettings::default()
         }
     }
@@ -4571,19 +4670,15 @@ mod tests {
         assert_eq!(detectors.snare_onset_attack, 0.001);
         assert_eq!(detectors.snare_onset_pre_gain, 1.0054638);
         assert_eq!(detectors.snare_onset_suppression, 0.32999998);
+        assert_eq!(detectors.snare_min_rms_db, SNARE_RMS_GATE_DEFAULT_DB);
         assert_eq!(detectors.hat_onset_min_interval, 0.06);
         assert_eq!(detectors.hat_onset_pre_gain, 1.0054638);
         assert_eq!(detectors.snare_poi_switches, 3);
-        assert_eq!(detectors.drop_gap_window, 1.0);
-        assert_eq!(detectors.drop_gap_threshold, -0.3);
-        assert_eq!(detectors.drop_gap_gain, 1.0);
+        assert_eq!(detectors.drop_gap_threshold, -18.0);
         assert_eq!(detectors.drop_onset_pre_gain, 1.0054638);
         assert_eq!(detectors.drop_onset_attack, 0.024582442);
         assert_eq!(detectors.drop_onset_min_threshold, 0.125);
         assert_eq!(detectors.drop_onset_suppression, 0.5);
-        assert_eq!(detectors.drop_kernels.low[0], 0.9628592);
-        assert_eq!(detectors.drop_kernels.low[4], 0.80759937);
-        assert_eq!(detectors.drop_kernels.high[4], 0.2293353);
         assert_eq!(detectors.drop_kernels.onset[0], 0.44955054);
         assert!(detectors.clone().validate().is_ok());
 
@@ -4709,9 +4804,7 @@ mod tests {
         let settings = DetectorSettings {
             kick_onset_min_interval: 0.05,
             snare_onset_attack: 0.01,
-            drop_gap_window: 0.6,
-            drop_gap_gain: 2.0,
-            drop_gap_threshold: -0.1,
+            drop_gap_threshold: -24.0,
             drop_onset_attack: 0.015,
             ..DetectorSettings::default()
         };
@@ -4732,9 +4825,7 @@ mod tests {
                 .abs()
                 < 1e-6
         );
-        assert!((visualizer.parameter_value(Parameter::DropGapWindow) - 0.6).abs() < 1e-6);
-        assert!((visualizer.parameter_value(Parameter::DropGapGain) - 2.0).abs() < 1e-6);
-        assert!((visualizer.parameter_value(Parameter::DropGapThreshold) + 0.1).abs() < 1e-6);
+        assert!((visualizer.parameter_value(Parameter::DropGapThreshold) + 24.0).abs() < 1e-6);
         assert!(
             (visualizer.parameter_value(Parameter::OnsetFlux(Detector::Drop, FluxSetting::Attack))
                 - 0.015)
@@ -4821,16 +4912,16 @@ mod tests {
     }
 
     #[test]
-    fn drop_lp_sliders_control_the_kernel_outputs() {
+    fn drop_gap_slider_is_a_configurable_dbfs_gate() {
         let mut visualizer = Visualizer::new();
-        let low = Parameter::DropLowLp;
-        let high = Parameter::DropHighLp;
-        assert_eq!(low.range(), (DROP_LP_MIN, DROP_LP_MAX));
-        assert_eq!(low.format(0.05), "50ms");
-        visualizer.set_parameter(low, 0.05);
-        visualizer.set_parameter(high, 0.2);
-        assert!((visualizer.parameter_value(low) - 0.05).abs() < 1e-6);
-        assert!((visualizer.parameter_value(high) - 0.2).abs() < 1e-6);
+        let gate = Parameter::DropGapThreshold;
+        assert_eq!(
+            gate.range(),
+            (DROP_GAP_THRESHOLD_MIN, DROP_GAP_THRESHOLD_MAX)
+        );
+        assert_eq!(gate.format(-18.0), "-18 dB");
+        visualizer.set_parameter(gate, -24.0);
+        assert_eq!(visualizer.parameter_value(gate), -24.0);
     }
 
     #[test]
@@ -4957,6 +5048,7 @@ mod tests {
         visualizer
             .showcase
             .set_settings(showcase::ShowcaseSettings {
+                selector_entry_kicks: 1,
                 selector_exit_triggers: 1,
                 ..showcase::ShowcaseSettings::default()
             });
@@ -4972,13 +5064,13 @@ mod tests {
         );
 
         visualizer.handle_action(Action::Snare, 0.0, 0.75);
-        assert_eq!(visualizer.flip_target, 0.0);
+        assert_eq!(visualizer.flip_target(), 0.0);
         assert!(
             !visualizer.showcase.selector_active(),
             "the snare disables the selector without flipping"
         );
         visualizer.handle_action(Action::Snare, 0.0, 0.75);
-        assert!((visualizer.flip_target - TAU * 0.5).abs() < 1e-5);
+        assert!((visualizer.flip_target() - TAU * 0.5).abs() < 1e-5);
         visualizer.handle_action(Action::Snare, 0.0, 0.75);
         assert_eq!(
             visualizer.showcase.mode(),
@@ -5067,54 +5159,44 @@ mod tests {
     }
 
     #[test]
-    fn a_confident_gap_and_composite_onset_confirm_a_drop() {
+    fn a_quiet_rms_envelope_and_composite_onset_confirm_a_drop() {
         let mut visualizer = Visualizer::new();
         let settings = DetectorSettings {
             drop_kernels: DropKernels {
-                low: std::array::from_fn(|band| if band < 4 { 1.0 } else { 0.0 }),
-                high: std::array::from_fn(|band| if band >= 4 { 1.0 } else { 0.0 }),
-                onset: std::array::from_fn(|band| if band < 4 { 1.0 } else { 0.0 }),
+                onset: [1.0; BAND_COUNT],
             },
-            drop_gap_window: 0.1,
-            drop_gap_threshold: 0.1,
-            drop_low_lp: 0.0,
-            drop_high_lp: 0.0,
+            drop_gap_threshold: -18.0,
             ..DetectorSettings::default()
         };
         visualizer.set_detector_settings(settings.clone());
         let hop = 1.0 / 86.0;
-        let quiet_bands = std::array::from_fn(|band| if band < 4 { 0.0 } else { 0.8 });
         let quiet = Spectrum {
-            bands: quiet_bands,
-            raw_bands: quiet_bands,
+            rms: 0.01,
             ..Spectrum::default()
         };
         for _ in 0..12 {
             visualizer.observe(quiet, hop);
         }
         let armed = visualizer.debug_snapshot();
-        assert!(armed.drop_onset.armed, "the missing bass arms the drop");
-        assert!(armed.drop_status.high > armed.drop_status.low);
-        assert!((armed.drop_status.diff - 0.8).abs() < 1e-5);
-        assert!(armed.drop_status.confidence >= settings.drop_gap_threshold);
+        assert!(armed.drop_onset.armed, "the quiet RMS arms the drop gate");
+        assert!(armed.drop_status.rms_db < settings.drop_gap_threshold);
+        assert!(armed.drop_status.envelope_db < settings.drop_gap_threshold);
 
         let mut burst = quiet;
+        burst.rms = 0.2;
+        burst.bands = [1.0; BAND_COUNT];
         burst.band_excess = [1.0; BAND_COUNT];
-        for band in 0..4 {
-            burst.bands[band] = 1.0;
-            burst.raw_bands[band] = 1.0;
-        }
         visualizer.observe(burst, hop);
         assert_eq!(visualizer.debug_snapshot().drop_hits, 0);
         visualizer.observe(quiet, hop);
         let confirmed = visualizer.debug_snapshot();
         assert_eq!(
             confirmed.drop_hits, 1,
-            "the composite onset confirms the confident gap"
+            "the composite onset confirms the quiet gap"
         );
-        assert_eq!(
-            confirmed.drop_status.confidence, 0.0,
-            "confirmation restarts the gap window"
+        assert!(
+            !confirmed.drop_onset.armed,
+            "confirmation clears the latched gate"
         );
     }
 
@@ -5314,6 +5396,14 @@ mod tests {
     }
 
     fn step_runtime(runtime: &mut ModelRuntime, showcase: &ShowcaseFrame) -> Vec<LineInstance> {
+        step_runtime_with_shake(runtime, showcase, Vec2::new(0.0, 0.0))
+    }
+
+    fn step_runtime_with_shake(
+        runtime: &mut ModelRuntime,
+        showcase: &ShowcaseFrame,
+        shake: Vec2,
+    ) -> Vec<LineInstance> {
         let mut muted = [true; Property::COUNT];
         muted[Property::Line.index()] = false;
         let gates = PropertyGates {
@@ -5354,7 +5444,7 @@ mod tests {
             1.0,
             showcase,
             1.0,
-            Vec2::new(0.0, 0.0),
+            shake,
             0.0,
             &mut lines,
             &mut ribbons,
@@ -5426,9 +5516,9 @@ mod tests {
     fn poi_exit_rotation_takes_the_shortest_path() {
         use std::f32::consts::PI;
         let mut runtime = test_runtime();
-        let poi = test_showcase_frame(1.0, true, 1.5 * PI);
-        step_runtime(&mut runtime, &poi);
-        assert!((runtime.last_rotation_yaw - 1.5 * PI).abs() < 1e-5);
+        // Start from the frame the POI view left at 270 degrees.
+        runtime.was_poi = true;
+        runtime.last_rotation_yaw = 1.5 * PI;
 
         let exit = test_showcase_frame(1.0, false, 1.5 * PI);
         step_runtime(&mut runtime, &exit);
@@ -5469,6 +5559,51 @@ mod tests {
     }
 
     #[test]
+    fn poi_entry_does_not_replay_the_accumulated_base_yaw() {
+        use std::f32::consts::PI;
+        let mut runtime = test_runtime();
+        let mut showcase = test_showcase_frame(0.0, false, 0.0);
+        showcase.focus.center = Vec3::new(0.0, 0.0, 1.0);
+        for _ in 0..240 {
+            runtime.pose.yaw = (runtime.pose.yaw + 0.3).rem_euclid(TAU);
+            step_runtime(&mut runtime, &showcase);
+        }
+        assert!(
+            runtime.base_yaw.abs() > TAU,
+            "normal mode must wind the base yaw up"
+        );
+
+        showcase.focus.freeze_motion = true;
+        for frame in 1..=60 {
+            showcase.focus.blend = frame as f32 / 60.0;
+            step_runtime(&mut runtime, &showcase);
+            assert!(
+                runtime.last_rotation_yaw.abs() <= PI + 0.2,
+                "the entry replayed the accumulated yaw: {:.3} rad",
+                runtime.last_rotation_yaw
+            );
+        }
+        assert!(
+            runtime.base_yaw.abs() <= PI + 0.2,
+            "the entry must fold the base yaw into one turn"
+        );
+    }
+
+    #[test]
+    fn poi_entry_folds_accumulated_orbit_into_one_turn() {
+        use std::f32::consts::PI;
+        let mut runtime = test_runtime();
+        let mut showcase = test_showcase_frame(1.0, true, 8.0 * TAU);
+        showcase.focus.orbit_drift_yaw = 3.0 * TAU;
+        step_runtime(&mut runtime, &showcase);
+        assert!(
+            runtime.last_rotation_yaw.abs() <= PI,
+            "the entry replayed the accumulated orbit: {:.3} rad",
+            runtime.last_rotation_yaw
+        );
+    }
+
+    #[test]
     fn kick_quake_is_suppressed_in_poi_mode() {
         let mut visualizer = loaded_visualizer();
         assert!(visualizer.showcase.enter_focus(&mut visualizer.rng, 0.75));
@@ -5498,13 +5633,17 @@ mod tests {
             ..DetectorSettings::default()
         });
         visualizer.handle_action(Action::Snare, 0.0, 0.75);
-        assert!((visualizer.flip_target - TAU * 0.5).abs() < 1e-5);
+        assert!((visualizer.flip_target() - TAU * 0.5).abs() < 1e-5);
         visualizer.handle_action(Action::Snare, 0.0, 0.75);
         assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Poi);
+        assert!(
+            (visualizer.flip_target() - TAU).abs() < 1e-5,
+            "POI entry rounds the inverted flip target to a whole turn"
+        );
 
         let palette = Palette::from_theme(ThemeId::default());
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
-        for _ in 0..60 {
+        for _ in 0..90 {
             visualizer.update(
                 frame,
                 ShutterFrames::try_from(1.0).unwrap(),
@@ -5516,12 +5655,115 @@ mod tests {
             );
             frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
         }
-        assert!((visualizer.flip_target - TAU * 0.5).abs() < 1e-5);
+        assert!((visualizer.flip_target() - TAU).abs() < 1e-5);
         assert!(
-            wrap_angle(visualizer.flip.value() - TAU * 0.5).abs() < 1e-3,
-            "the flip spring finishes even while the model motion fades"
+            wrap_angle(visualizer.flip.value()).abs() < 1e-3,
+            "the flip spring finishes upright even while the model motion fades"
         );
         assert!(visualizer.showcase.frame().focus.model_motion < 0.5);
+    }
+
+    #[test]
+    fn poi_entry_keeps_an_upright_flip_target() {
+        let mut visualizer = loaded_visualizer();
+        visualizer.set_detector_settings(DetectorSettings {
+            snare_flip_every: 2,
+            ..DetectorSettings::default()
+        });
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        assert!((visualizer.flip_target() - TAU).abs() < 1e-5);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Poi);
+        assert!(
+            (visualizer.flip_target() - TAU).abs() < 1e-5,
+            "an upright model must not get another half turn"
+        );
+    }
+
+    #[test]
+    fn settling_a_flip_never_steps_back() {
+        let mut visualizer = Visualizer::new();
+        for half_turns in 0..=20 {
+            visualizer.flip_half_turns = half_turns;
+            let before = visualizer.flip_target();
+            visualizer.settle_flip_upright();
+            assert_eq!(visualizer.flip_half_turns % 2, 0);
+            assert!(
+                visualizer.flip_target() >= before,
+                "{half_turns} half turns settled backwards"
+            );
+        }
+        visualizer.flip_half_turns = 7;
+        visualizer.settle_flip_upright();
+        assert_eq!(
+            visualizer.flip_target(),
+            8.0 * std::f32::consts::PI,
+            "the seventh half turn must finish forward"
+        );
+    }
+
+    #[test]
+    fn a_drop_into_poi_settles_an_inverted_model_upright() {
+        let mut visualizer = loaded_visualizer();
+        visualizer.set_detector_settings(DetectorSettings {
+            snare_flip_every: 1,
+            ..DetectorSettings::default()
+        });
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        assert!((visualizer.flip_target() - TAU * 0.5).abs() < 1e-5);
+        visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
+        assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Poi);
+        assert!(
+            (visualizer.flip_target() - TAU).abs() < 1e-5,
+            "a drop entry must also finish the flip upright"
+        );
+    }
+
+    #[test]
+    fn entering_the_selector_settles_an_inverted_model_upright() {
+        let mut visualizer = loaded_visualizer();
+        visualizer.set_detector_settings(DetectorSettings {
+            snare_flip_every: 1,
+            ..DetectorSettings::default()
+        });
+        visualizer.set_parameter(Parameter::SelectorEntryKicks, 1.0);
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        assert!((visualizer.flip_target() - TAU * 0.5).abs() < 1e-5);
+
+        let palette = Palette::from_theme(ThemeId::default());
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        let mut advance = |visualizer: &mut Visualizer, frames: usize| {
+            for _ in 0..frames {
+                visualizer.update(
+                    frame,
+                    ShutterFrames::try_from(1.0).unwrap(),
+                    1.0 / 60.0,
+                    &palette,
+                    (1280.0, 440.0),
+                    1.0,
+                    1.0,
+                );
+                frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+            }
+        };
+        advance(&mut visualizer, 90);
+        assert!(
+            wrap_angle(visualizer.flip.value()).abs() > 0.5,
+            "the model is inverted before the selector enters"
+        );
+
+        visualizer.handle_action(Action::Kick(0.5), 0.0, 0.75);
+        assert!(visualizer.showcase.selector_active());
+        assert!(
+            (visualizer.flip_target() - TAU).abs() < 1e-5,
+            "the entry adds a half turn to the inverted target"
+        );
+        advance(&mut visualizer, 180);
+        assert!(
+            wrap_angle(visualizer.flip.value()).abs() < 1e-2,
+            "the flip finishes at a whole-turn orientation"
+        );
     }
 
     #[test]
@@ -5529,6 +5771,7 @@ mod tests {
         let mut visualizer = loaded_visualizer();
         assert!(visualizer.showcase.poi_count() > 0);
         let palette = Palette::from_theme(ThemeId::default());
+        visualizer.set_parameter(Parameter::SelectorEntryKicks, 1.0);
         visualizer.showcase.kick(&mut visualizer.rng);
         assert!(visualizer.showcase.selector_active());
 
@@ -5826,10 +6069,8 @@ mod tests {
         assert!(snapshot.kick_onset.flash.is_finite());
         assert!(snapshot.snare_onset.flash.is_finite());
         assert!(snapshot.drop_onset.power.is_finite());
-        assert!(snapshot.drop_status.low.is_finite());
-        assert!(snapshot.drop_status.high.is_finite());
-        assert!(snapshot.drop_status.diff.is_finite());
-        assert!(snapshot.drop_status.confidence.is_finite());
+        assert!(snapshot.drop_status.rms_db.is_finite());
+        assert!(snapshot.drop_status.envelope_db.is_finite());
         assert!(snapshot.drop_status.onset.flux.is_finite());
         assert!(snapshot.drop_status.onset.smoothed.is_finite());
         assert!(snapshot.drop_status.onset.threshold.is_finite());
@@ -5928,21 +6169,32 @@ mod tests {
             visualizer.parameter_value(kick_gap),
             crate::visualizer::FLUX_INTERVAL_MAX
         );
-        let gap_window = Parameter::DropGapWindow;
-        visualizer.set_parameter(gap_window, 100.0);
-        assert_eq!(visualizer.parameter_value(gap_window), 4.0);
-        let gap_gain = Parameter::DropGapGain;
-        visualizer.set_parameter(gap_gain, 100.0);
-        assert_eq!(visualizer.parameter_value(gap_gain), 10.0);
-        visualizer.set_parameter(gap_gain, 0.0);
-        assert_eq!(visualizer.parameter_value(gap_gain), 0.1);
+        let snare_gate = Parameter::SnareRmsGate;
+        visualizer.set_parameter(snare_gate, -36.0);
+        assert_eq!(visualizer.parameter_value(snare_gate), -36.0);
+        visualizer.set_parameter(snare_gate, -100.0);
+        assert_eq!(
+            visualizer.parameter_value(snare_gate),
+            SNARE_RMS_GATE_MIN_DB
+        );
+        visualizer.set_parameter(snare_gate, 100.0);
+        assert_eq!(
+            visualizer.parameter_value(snare_gate),
+            SNARE_RMS_GATE_MAX_DB
+        );
         let gap_threshold = Parameter::DropGapThreshold;
-        visualizer.set_parameter(gap_threshold, -0.5);
-        assert!((visualizer.parameter_value(gap_threshold) + 0.5).abs() < 1e-6);
+        visualizer.set_parameter(gap_threshold, -42.0);
+        assert_eq!(visualizer.parameter_value(gap_threshold), -42.0);
         visualizer.set_parameter(gap_threshold, -100.0);
-        assert_eq!(visualizer.parameter_value(gap_threshold), -1.0);
+        assert_eq!(
+            visualizer.parameter_value(gap_threshold),
+            DROP_GAP_THRESHOLD_MIN
+        );
         visualizer.set_parameter(gap_threshold, 100.0);
-        assert_eq!(visualizer.parameter_value(gap_threshold), 1.0);
+        assert_eq!(
+            visualizer.parameter_value(gap_threshold),
+            DROP_GAP_THRESHOLD_MAX
+        );
         let sequence = Parameter::KickSequenceEvery;
         visualizer.set_parameter(sequence, 100.0);
         assert_eq!(visualizer.parameter_value(sequence), 32.0);
@@ -6000,6 +6252,7 @@ mod tests {
         visualizer.set_parameter(Parameter::FocusDamping, 22.0);
         visualizer.set_parameter(Parameter::MotionDamping, 9.5);
         visualizer.set_parameter(Parameter::SelectorColorChance, 0.5);
+        visualizer.set_parameter(Parameter::SelectorEntryKicks, 6.0);
         visualizer.set_parameter(Parameter::SelectorExitTriggers, 7.0);
         visualizer.set_parameter(Parameter::SelectorGapTimeout, 12.0);
         visualizer.set_parameter(Parameter::OrbitStepMax, 30.0_f32.to_radians());
@@ -6039,6 +6292,7 @@ mod tests {
         assert_eq!(restored.parameter_value(Parameter::FocusDamping), 22.0);
         assert_eq!(restored.parameter_value(Parameter::MotionDamping), 9.5);
         assert!((restored.parameter_value(Parameter::SelectorColorChance) - 0.5).abs() < 1e-6);
+        assert_eq!(restored.parameter_value(Parameter::SelectorEntryKicks), 6.0);
         assert_eq!(
             restored.parameter_value(Parameter::SelectorExitTriggers),
             7.0
@@ -6287,16 +6541,16 @@ mod tests {
     fn crease_threshold_steps_and_clamps() {
         let mut threshold = CreaseThreshold::default();
         assert_eq!(threshold.whole_degrees(), 45);
-        assert_eq!(threshold.adjusted(Adjustment::Decrease).whole_degrees(), 40);
+        assert_eq!(threshold.adjusted(Adjustment::Decrease).whole_degrees(), 43);
         for _ in 0..20 {
             threshold = threshold.adjusted(Adjustment::Increase);
         }
         assert_eq!(threshold, CreaseThreshold::MAX);
-        for _ in 0..20 {
+        for _ in 0..40 {
             threshold = threshold.adjusted(Adjustment::Decrease);
         }
         assert_eq!(threshold, CreaseThreshold::MIN);
-        assert!(CreaseThreshold::try_from(9.0).is_err());
+        assert!(CreaseThreshold::try_from(-1.0).is_err());
         assert!(CreaseThreshold::try_from(81.0).is_err());
         assert!(CreaseThreshold::try_from(f32::NAN).is_err());
         assert_eq!(f32::from(CreaseThreshold::default()), 45.0);
@@ -6466,9 +6720,12 @@ mod tests {
     }
 
     fn sweep_line(start: Vec2, end: Vec2) -> LineGeometry {
+        // The synthetic sweep geometry is built around the origin; move it
+        // inside the test viewport so the emitted triangles stay visible.
+        let offset = Vec2::new(400.0, 200.0);
         LineGeometry {
-            start,
-            end,
+            start: start + offset,
+            end: end + offset,
             start_depth_opacity: 1.0,
             end_depth_opacity: 1.0,
             visible: true,
@@ -6489,6 +6746,7 @@ mod tests {
                 opacity: MotionOpacity::default(),
                 power: MotionFadePower::default(),
             },
+            ScreenBounds::new(Vec2::new(1280.0, 440.0)),
             &mut ribbons,
         );
         ribbons
@@ -6570,6 +6828,56 @@ mod tests {
             4,
             "the crossing body keeps four masked wings"
         );
+    }
+
+    #[test]
+    fn offscreen_sweeps_are_not_emitted() {
+        let first = sweep_line(Vec2::new(-600.0, -600.0), Vec2::new(-580.0, -600.0));
+        let last = sweep_line(Vec2::new(-600.0, -599.0), Vec2::new(-580.0, -599.0));
+        assert!(sweep_ribbons(first, last).is_empty());
+    }
+
+    #[test]
+    fn offscreen_model_edges_are_culled_at_emission() {
+        let mut runtime = test_runtime();
+        let showcase = test_showcase_frame(0.0, true, 0.0);
+        let shake = Vec2::new(10_000.0, 0.0);
+        let lines = step_runtime_with_shake(&mut runtime, &showcase, shake);
+        assert!(
+            lines.is_empty(),
+            "an edge shifted outside the viewport is not submitted"
+        );
+    }
+
+    #[test]
+    fn culling_keeps_primitives_that_cross_the_viewport_edge() {
+        let screen = ScreenBounds::new(Vec2::new(1280.0, 440.0));
+        let color = [0.0; 4];
+        let crossing_line =
+            LineInstance::new(Vec2::new(-20.0, 220.0), Vec2::new(40.0, 220.0), color, 1.0);
+        assert!(crossing_line.intersects(screen));
+        let outside_line =
+            LineInstance::new(Vec2::new(-60.0, 220.0), Vec2::new(-20.0, 220.0), color, 1.0);
+        assert!(!outside_line.intersects(screen));
+
+        let crossing_ribbon = RibbonInstance::triangle(
+            [
+                Vec2::new(-10.0, 200.0),
+                Vec2::new(30.0, 240.0),
+                Vec2::new(50.0, 210.0),
+            ],
+            [color; 3],
+        );
+        assert!(crossing_ribbon.intersects(screen));
+        let outside_ribbon = RibbonInstance::triangle(
+            [
+                Vec2::new(-50.0, 200.0),
+                Vec2::new(-30.0, 240.0),
+                Vec2::new(-10.0, 210.0),
+            ],
+            [color; 3],
+        );
+        assert!(!outside_ribbon.intersects(screen));
     }
 
     #[test]

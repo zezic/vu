@@ -89,6 +89,7 @@ impl Detector {
                 Parameter::OnsetFlux(Detector::Snare, FluxSetting::MinThreshold),
                 Parameter::OnsetFlux(Detector::Snare, FluxSetting::MinInterval),
                 Parameter::OnsetSuppression(Detector::Snare),
+                Parameter::SnareRmsGate,
                 Parameter::SnareFlipEvery,
                 Parameter::SnarePoiSwitches,
                 Parameter::PoiSwitchGap,
@@ -108,11 +109,7 @@ impl Detector {
                 Parameter::OnsetSuppression(Detector::Hat),
             ],
             Self::Drop => vec![
-                Parameter::DropGapWindow,
-                Parameter::DropGapGain,
                 Parameter::DropGapThreshold,
-                Parameter::DropLowLp,
-                Parameter::DropHighLp,
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::PreGain),
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::Attack),
                 Parameter::OnsetFlux(Detector::Drop, FluxSetting::Release),
@@ -811,13 +808,10 @@ pub enum Parameter {
     SnarePoiSwitches,
     PoiSwitchGap,
     SnareChoke,
+    SnareRmsGate,
     FlipStiffness,
     FlipDamping,
-    DropGapWindow,
-    DropGapGain,
     DropGapThreshold,
-    DropLowLp,
-    DropHighLp,
     DropQuakeFactor,
     QuakeStiffness,
     QuakeDamping,
@@ -844,6 +838,7 @@ pub enum Parameter {
     SelectorFadeIn,
     SelectorFadeOut,
     SelectorColorChance,
+    SelectorEntryKicks,
     SelectorExitTriggers,
     SelectorGapTimeout,
     Attack(EnvelopeTarget),
@@ -883,13 +878,10 @@ impl Parameter {
             Self::SnarePoiSwitches => "POI SWITCHES",
             Self::PoiSwitchGap => "POI GAP",
             Self::SnareChoke => "CHOKE s",
+            Self::SnareRmsGate => "RMS GATE",
             Self::FlipStiffness => "FLIP K",
             Self::FlipDamping => "FLIP D",
-            Self::DropGapWindow => "GAP WIN s",
-            Self::DropGapGain => "GAP GAIN",
-            Self::DropGapThreshold => "GAP CONF",
-            Self::DropLowLp => "LF LP",
-            Self::DropHighLp => "HF LP",
+            Self::DropGapThreshold => "GAP dB",
             Self::DropQuakeFactor => "QUAKE x",
             Self::QuakeStiffness => "QUAKE K",
             Self::QuakeDamping => "QUAKE D",
@@ -916,6 +908,7 @@ impl Parameter {
             Self::SelectorFadeIn => "SEL FADE IN",
             Self::SelectorFadeOut => "SEL FADE OUT",
             Self::SelectorColorChance => "SEL COLOR %",
+            Self::SelectorEntryKicks => "SEL ENTRY N",
             Self::SelectorExitTriggers => "SEL EXIT N",
             Self::SelectorGapTimeout => "SEL GAP s",
             Self::Attack(_) => "ATTACK",
@@ -968,6 +961,7 @@ impl Parameter {
                 super::showcase::POI_SWITCH_GAP_MIN,
                 super::showcase::POI_SWITCH_GAP_MAX,
             ),
+            Self::SnareRmsGate => (super::SNARE_RMS_GATE_MIN_DB, super::SNARE_RMS_GATE_MAX_DB),
             Self::SnareChoke => (super::CHOKE_MIN, super::CHOKE_MAX),
             Self::FlipStiffness
             | Self::QuakeStiffness
@@ -1007,6 +1001,10 @@ impl Parameter {
                 super::showcase::SELECTOR_FADE_OUT_MIN,
                 super::showcase::SELECTOR_FADE_OUT_MAX,
             ),
+            Self::SelectorEntryKicks => (
+                super::showcase::SELECTOR_ENTRY_KICKS_MIN as f32,
+                super::showcase::SELECTOR_ENTRY_KICKS_MAX as f32,
+            ),
             Self::SelectorExitTriggers => (
                 super::showcase::SELECTOR_EXIT_TRIGGERS_MIN as f32,
                 super::showcase::SELECTOR_EXIT_TRIGGERS_MAX as f32,
@@ -1015,12 +1013,9 @@ impl Parameter {
                 super::showcase::SELECTOR_GAP_TIMEOUT_MIN,
                 super::showcase::SELECTOR_GAP_TIMEOUT_MAX,
             ),
-            Self::DropGapWindow => (super::DROP_GAP_WINDOW_MIN, super::DROP_GAP_WINDOW_MAX),
-            Self::DropGapGain => (super::DROP_GAP_GAIN_MIN, super::DROP_GAP_GAIN_MAX),
             Self::DropGapThreshold => {
                 (super::DROP_GAP_THRESHOLD_MIN, super::DROP_GAP_THRESHOLD_MAX)
             }
-            Self::DropLowLp | Self::DropHighLp => (super::DROP_LP_MIN, super::DROP_LP_MAX),
             Self::DropQuakeFactor => (super::QUAKE_FACTOR_MIN, super::QUAKE_FACTOR_MAX),
             Self::Attack(_) => (0.1, 50.0),
             Self::Release(_) => (0.1, 20.0),
@@ -1053,17 +1048,14 @@ impl Parameter {
             Self::OnsetFlux(_, setting) => setting.step(),
             Self::OnsetSuppression(_) => 0.01,
             Self::KickSequenceEvery | Self::SnareFlipEvery | Self::SnarePoiSwitches => 1.0,
+            Self::SnareRmsGate => 1.0,
             Self::PoiSwitchGap => 0.05,
-            Self::DropGapWindow
-            | Self::DropGapGain
-            | Self::DropGapThreshold
-            | Self::DropLowLp
-            | Self::DropHighLp
-            | Self::KickSnareChoke
+            Self::KickSnareChoke
             | Self::KickDropChoke
             | Self::SnareChoke
             | Self::KickQuakeFactor
             | Self::DropQuakeFactor => 0.01,
+            Self::DropGapThreshold => 1.0,
             Self::FlipStiffness
             | Self::FlipDamping
             | Self::QuakeStiffness
@@ -1077,7 +1069,7 @@ impl Parameter {
             | Self::DollyStiffness
             | Self::DollyDamping => 0.5,
             Self::SelectorFadeIn | Self::SelectorFadeOut | Self::SelectorGapTimeout => 0.005,
-            Self::SelectorExitTriggers => 1.0,
+            Self::SelectorEntryKicks | Self::SelectorExitTriggers => 1.0,
             Self::KickAttack => 0.5,
             Self::OrbitStepMin
             | Self::OrbitStepMax
@@ -1107,9 +1099,10 @@ impl Parameter {
                 format!("{value:.2}")
             }
             Self::BandAblCurve(_) => Curve::from_index(value.round() as usize).name().to_owned(),
-            Self::ExcessAttack | Self::ExcessRelease | Self::DropLowLp | Self::DropHighLp => {
+            Self::ExcessAttack | Self::ExcessRelease => {
                 format!("{:.0}ms", value * 1000.0)
             }
+            Self::SnareRmsGate | Self::DropGapThreshold => format!("{value:.0} dB"),
             Self::ExcessFloor => format!("{value:.3}"),
             Self::OnsetFlux(_, setting) => setting.format(value),
             Self::FlipStiffness
@@ -1126,7 +1119,7 @@ impl Parameter {
             Self::SelectorAttenuation | Self::PoiAttenuation | Self::SelectorColorChance => {
                 format!("{:.0}%", value * 100.0)
             }
-            Self::SelectorExitTriggers => format!("{value:.0}"),
+            Self::SelectorEntryKicks | Self::SelectorExitTriggers => format!("{value:.0}"),
             Self::KickAttack => format!("{value:.1}/s"),
             Self::OrbitStepMin
             | Self::OrbitStepMax
@@ -1158,8 +1151,7 @@ impl Parameter {
         let (minimum, maximum) = self.range();
         let value = value.clamp(minimum, maximum);
         match self {
-            Self::DropGapGain
-            | Self::Attack(_)
+            Self::Attack(_)
             | Self::Release(_)
             | Self::BandAblGain(_)
             | Self::ExcessAttack
@@ -1178,8 +1170,7 @@ impl Parameter {
         let (minimum, maximum) = self.range();
         let fraction = fraction.clamp(0.0, 1.0);
         match self {
-            Self::DropGapGain
-            | Self::Attack(_)
+            Self::Attack(_)
             | Self::Release(_)
             | Self::BandAblGain(_)
             | Self::ExcessAttack

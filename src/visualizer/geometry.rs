@@ -343,12 +343,32 @@ impl Pose {
     }
 }
 
+/// The physical-pixel rectangle of the render target.
+#[derive(Clone, Copy, Debug)]
+pub struct ScreenBounds {
+    extent: Vec2,
+}
+
+impl ScreenBounds {
+    pub fn new(extent: Vec2) -> Self {
+        Self { extent }
+    }
+
+    /// Whether the axis-aligned box spanning `min` to `max` can cover a target
+    /// pixel.
+    pub fn intersects(self, min: Vec2, max: Vec2) -> bool {
+        max.x >= 0.0 && max.y >= 0.0 && min.x <= self.extent.x && min.y <= self.extent.y
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
     pub center: Vec2,
     pub focal: f32,
     /// Smaller viewport extent, used to convert between focal length and FOV.
     pub minimum: f32,
+    /// Render target extent in physical pixels.
+    pub viewport: Vec2,
 }
 
 impl Camera {
@@ -358,6 +378,7 @@ impl Camera {
             center: Vec2::new(width / 2.0, height / 2.0),
             focal: minimum * 1.28 * zoom.clamp(0.35, 3.0),
             minimum,
+            viewport: Vec2::new(width, height),
         }
     }
 

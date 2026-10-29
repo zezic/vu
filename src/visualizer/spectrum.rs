@@ -38,13 +38,12 @@ impl Default for RelativeExcessSettings {
     }
 }
 
-/// One analysis hop. `bands` is normalized for the visible scene parameters;
-/// `raw_bands` keeps the unfitted linear band magnitude for the drop detector.
+/// One analysis hop. `bands` is normalized for the visible scene parameters.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Spectrum {
     pub bands: [f32; BAND_COUNT],
-    /// Unfitted band magnitude before the dB normalization.
-    pub raw_bands: [f32; BAND_COUNT],
+    /// Linear RMS of the analysis window; a full-scale signal is 1.0.
+    pub rms: f32,
     /// Broadband level of the analysis window.
     pub power: f32,
     pub bass: f32,
@@ -191,7 +190,6 @@ impl SpectrumAnalyzer {
         let attack_alpha = (-hop / self.excess.background_attack).exp();
         let release_alpha = (-hop / self.excess.background_release).exp();
         let mut bands = [0.0; BAND_COUNT];
-        let mut raw_bands = [0.0; BAND_COUNT];
         let mut band_excess = [0.0; BAND_COUNT];
         for (band, &(start, end)) in self.band_bins.iter().enumerate() {
             let mut power = 0.0;
@@ -211,8 +209,7 @@ impl SpectrumAnalyzer {
                 };
                 self.bin_background[bin] = alpha * background + (1.0 - alpha) * magnitude;
             }
-            raw_bands[band] = power.sqrt();
-            bands[band] = normalize_db(raw_bands[band], -72.0, 24.0);
+            bands[band] = normalize_db(power.sqrt(), -72.0, 24.0);
             band_excess[band] = excess / (end - start) as f32;
         }
         let rms = (energy / FFT_SIZE as f32).sqrt();
@@ -221,7 +218,7 @@ impl SpectrumAnalyzer {
         let treble = bands[BAND_COUNT - TREBLE_BANDS..].iter().sum::<f32>() / TREBLE_BANDS as f32;
         Spectrum {
             bands,
-            raw_bands,
+            rms,
             power,
             bass,
             treble,
@@ -294,6 +291,7 @@ mod tests {
                 "{frequency} Hz landed in band {strongest} instead of {expected}"
             );
             assert!(spectrum.bands[expected] > 0.6);
+            assert!(spectrum.rms > 0.6);
             assert!(spectrum.power > 0.7);
         }
     }
@@ -357,6 +355,7 @@ mod tests {
             }
         }
         assert!(silence.bands.iter().all(|&band| band < 0.01));
+        assert!(silence.rms < 0.01);
         assert!(silence.power < 0.01);
         assert_eq!(silence.bass, 0.0);
     }

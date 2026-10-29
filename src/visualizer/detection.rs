@@ -7,9 +7,8 @@
 //! detectors multiply it by their kernels.
 //!
 //! Only the kick, snare, hi-hat, and drop detectors produce boolean onsets, from the
-//! kernel-projected continuous flow. The drop also projects the band levels onto
-//! a low and a high kernel, accumulates their difference in a rolling window,
-//! and gates its onset detector with that window's confidence.
+//! kernel-projected continuous flow. The drop gates its onset detector with a
+//! smoothed RMS envelope below a configurable dBFS threshold.
 
 use std::collections::VecDeque;
 
@@ -56,14 +55,13 @@ pub const QUAKE_FACTOR_MIN: f32 = 0.0;
 pub const QUAKE_FACTOR_MAX: f32 = 50.0;
 pub const SEQUENCE_EVERY_MIN: u32 = 1;
 pub const SEQUENCE_EVERY_MAX: u32 = 32;
-pub const DROP_GAP_WINDOW_MIN: f32 = 0.1;
-pub const DROP_GAP_WINDOW_MAX: f32 = 4.0;
-pub const DROP_GAP_THRESHOLD_MIN: f32 = -1.0;
-pub const DROP_GAP_THRESHOLD_MAX: f32 = 1.0;
-pub const DROP_GAP_GAIN_MIN: f32 = 0.1;
-pub const DROP_GAP_GAIN_MAX: f32 = 10.0;
-pub const DROP_LP_MIN: f32 = 0.0;
-pub const DROP_LP_MAX: f32 = 0.5;
+/// Allowed snare output RMS gate in dBFS.
+pub const SNARE_RMS_GATE_MIN_DB: f32 = -60.0;
+pub const SNARE_RMS_GATE_MAX_DB: f32 = 0.0;
+pub const SNARE_RMS_GATE_DEFAULT_DB: f32 = -45.0;
+/// Allowed gap gate level in dBFS.
+pub const DROP_GAP_THRESHOLD_MIN: f32 = -60.0;
+pub const DROP_GAP_THRESHOLD_MAX: f32 = 0.0;
 pub const DROP_KERNEL_MIN: f32 = 0.0;
 pub const DROP_KERNEL_MAX: f32 = 1.0;
 pub const SPRING_STIFFNESS_MIN: f32 = 1.0;
@@ -73,64 +71,39 @@ pub const SPRING_DAMPING_MAX: f32 = 60.0;
 
 const FLASH_DECAY: f32 = 8.0;
 const SPRING_STEP: f32 = 1.0 / 240.0;
-/// Worst-case gap window samples: four seconds at a 2.7 ms hop.
-const GAP_WINDOW_CAPACITY: usize = 2048;
+/// RMS envelope follower time constants. The release outlives the 85 ms
+/// analysis window so a short dip between beats cannot arm the gap gate.
+const GAP_ENVELOPE_ATTACK: f32 = 0.02;
+const GAP_ENVELOPE_RELEASE: f32 = 0.35;
+/// Silence floor for every level reported in dBFS.
+const GAP_DB_FLOOR: f32 = -80.0;
 const KERNEL_EPSILON: f32 = 1e-6;
 
-/// One of the three drawable drop projections.
+/// The drop detector's onset kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropKernel {
-    Low,
-    High,
     Onset,
 }
 
 impl DropKernel {
-    pub const ALL: [Self; 3] = [Self::Low, Self::High, Self::Onset];
+    pub const ALL: [Self; 1] = [Self::Onset];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Low => "LOW",
-            Self::High => "HIGH",
             Self::Onset => "ONSET",
         }
     }
 }
 
-/// Per-band weights for the drop detector's low, high, and onset projections.
+/// Per-band weights for the drop detector's onset projection.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DropKernels {
-    pub low: [f32; BAND_COUNT],
-    pub high: [f32; BAND_COUNT],
     pub onset: [f32; BAND_COUNT],
 }
 
 impl Default for DropKernels {
     fn default() -> Self {
         Self {
-            low: [
-                0.9628592, 0.9961292, 0.9961292, 0.90740925, 0.80759937, 0.6745195, 0.5303496,
-                0.37508973, 0.24200983, 0.15328991, 0.08674996, 0.05347999, 0.02021002, 0.0, 0.0,
-                0.5303496,
-            ],
-            high: [
-                0.018625464,
-                0.018625464,
-                0.06298543,
-                0.10734539,
-                0.2293353,
-                0.39568514,
-                0.584215,
-                0.76165485,
-                0.8725547,
-                0.93909466,
-                0.9945446,
-                1.0,
-                1.0,
-                1.0,
-                1.0,
-                0.49549505,
-            ],
             onset: [
                 0.44955054, 0.6159004, 0.7489803, 0.8598802, 0.89315015, 0.8709702, 0.77116024,
                 0.6269904, 0.5050005, 0.4051906, 0.31647065, 0.28320068, 0.2721107, 0.28320068,
@@ -143,15 +116,8 @@ impl Default for DropKernels {
 impl DropKernels {
     pub fn weights(self, kernel: DropKernel) -> [f32; BAND_COUNT] {
         match kernel {
-            DropKernel::Low => self.low,
-            DropKernel::High => self.high,
             DropKernel::Onset => self.onset,
         }
-    }
-
-    /// Weighted mean of the values. A zero-area kernel projects to zero.
-    pub fn projection(self, kernel: DropKernel, values: &[f32; BAND_COUNT]) -> f32 {
-        kernel_projection(&self.weights(kernel), values)
     }
 
     pub fn set(&mut self, kernel: DropKernel, band: usize, value: f32) {
@@ -161,8 +127,6 @@ impl DropKernels {
         );
         let value = value.clamp(DROP_KERNEL_MIN, DROP_KERNEL_MAX);
         match kernel {
-            DropKernel::Low => self.low[band] = value,
-            DropKernel::High => self.high[band] = value,
             DropKernel::Onset => self.onset[band] = value,
         }
     }
@@ -670,6 +634,8 @@ pub struct DetectorSettings {
     pub snare_onset_min_interval: f32,
     /// Weight of the snare suppression-kernel flow subtracted from its onset flow.
     pub snare_onset_suppression: f32,
+    /// Minimum broadband RMS in dBFS required to emit a confirmed snare.
+    pub snare_min_rms_db: f32,
     pub snare_flip_every: u32,
     pub snare_poi_switches: u32,
     pub snare_choke: f32,
@@ -687,19 +653,10 @@ pub struct DetectorSettings {
     pub hat_onset_min_interval: f32,
     /// Weight of the hi-hat suppression-kernel flow subtracted from its onset flow.
     pub hat_onset_suppression: f32,
-    /// Per-band weights for the low, high, and onset projections.
+    /// Per-band weights for the onset projection.
     pub drop_kernels: DropKernels,
-    /// Length of the rolling high-minus-low window in seconds.
-    pub drop_gap_window: f32,
-    /// Scaled mean high-minus-low difference required before an onset can
-    /// confirm.
+    /// RMS envelope level in dBFS below which the gap gate arms.
     pub drop_gap_threshold: f32,
-    /// Multiplies the window mean around zero before the threshold comparison.
-    pub drop_gap_gain: f32,
-    /// Low-pass time constant applied to the low-kernel output, in seconds.
-    pub drop_low_lp: f32,
-    /// Low-pass time constant applied to the high-kernel output, in seconds.
-    pub drop_high_lp: f32,
     /// Dedicated onset tracker settings for the composite onset kernel.
     pub drop_onset_pre_gain: f32,
     pub drop_onset_attack: f32,
@@ -742,6 +699,7 @@ impl Default for DetectorSettings {
             snare_onset_min_threshold: 0.01,
             snare_onset_min_interval: 0.100148335,
             snare_onset_suppression: 0.32999998,
+            snare_min_rms_db: SNARE_RMS_GATE_DEFAULT_DB,
             snare_flip_every: 1,
             snare_poi_switches: 3,
             snare_choke: 0.099999994,
@@ -757,11 +715,7 @@ impl Default for DetectorSettings {
             hat_onset_min_interval: 0.06,
             hat_onset_suppression: 0.32999998,
             drop_kernels: DropKernels::default(),
-            drop_gap_window: 1.0,
-            drop_gap_threshold: -0.3,
-            drop_gap_gain: 1.0,
-            drop_low_lp: 0.25,
-            drop_high_lp: 0.5,
+            drop_gap_threshold: -18.0,
             drop_onset_pre_gain: 1.0054638,
             drop_onset_attack: 0.024582442,
             drop_onset_release: 0.05,
@@ -976,6 +930,12 @@ impl DetectorSettings {
                 FLUX_SUPPRESSION_MAX,
             ),
             (
+                "snare_min_rms_db",
+                self.snare_min_rms_db,
+                SNARE_RMS_GATE_MIN_DB,
+                SNARE_RMS_GATE_MAX_DB,
+            ),
+            (
                 "hat_onset_pre_gain",
                 self.hat_onset_pre_gain,
                 FLUX_PRE_GAIN_MIN,
@@ -1065,33 +1025,12 @@ impl DetectorSettings {
         );
         self.drop_kernels.validate()?;
         anyhow::ensure!(
-            self.drop_gap_window.is_finite()
-                && (DROP_GAP_WINDOW_MIN..=DROP_GAP_WINDOW_MAX).contains(&self.drop_gap_window),
-            "the drop gap window must be finite and between \
-             {DROP_GAP_WINDOW_MIN} and {DROP_GAP_WINDOW_MAX}"
-        );
-        anyhow::ensure!(
             self.drop_gap_threshold.is_finite()
                 && (DROP_GAP_THRESHOLD_MIN..=DROP_GAP_THRESHOLD_MAX)
                     .contains(&self.drop_gap_threshold),
             "the drop gap threshold must be finite and between \
-             {DROP_GAP_THRESHOLD_MIN} and {DROP_GAP_THRESHOLD_MAX}"
+             {DROP_GAP_THRESHOLD_MIN} and {DROP_GAP_THRESHOLD_MAX} dBFS"
         );
-        anyhow::ensure!(
-            self.drop_gap_gain.is_finite()
-                && (DROP_GAP_GAIN_MIN..=DROP_GAP_GAIN_MAX).contains(&self.drop_gap_gain),
-            "the drop gap gain must be finite and between \
-             {DROP_GAP_GAIN_MIN} and {DROP_GAP_GAIN_MAX}"
-        );
-        for (name, value) in [
-            ("drop_low_lp", self.drop_low_lp),
-            ("drop_high_lp", self.drop_high_lp),
-        ] {
-            anyhow::ensure!(
-                value.is_finite() && (DROP_LP_MIN..=DROP_LP_MAX).contains(&value),
-                "{name} must be finite and between {DROP_LP_MIN} and {DROP_LP_MAX}"
-            );
-        }
         for (name, stiffness) in [
             ("flip_stiffness", self.flip_stiffness),
             ("quake_stiffness", self.quake_stiffness),
@@ -1221,6 +1160,13 @@ where
     })
 }
 
+fn deserialize_optional_f32<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    f32::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct TemporalPatternRaw {
@@ -1337,6 +1283,7 @@ struct DetectorSettingsRaw {
     snare_onset_min_threshold: f32,
     snare_onset_min_interval: f32,
     snare_onset_suppression: f32,
+    snare_min_rms_db: f32,
     snare_flip_every: u32,
     snare_poi_switches: u32,
     snare_choke: f32,
@@ -1351,11 +1298,7 @@ struct DetectorSettingsRaw {
     hat_onset_min_threshold: f32,
     hat_onset_min_interval: f32,
     hat_onset_suppression: f32,
-    drop_gap_window: f32,
     drop_gap_threshold: f32,
-    drop_gap_gain: f32,
-    drop_low_lp: f32,
-    drop_high_lp: f32,
     drop_onset_pre_gain: f32,
     drop_onset_attack: f32,
     drop_onset_release: f32,
@@ -1364,8 +1307,6 @@ struct DetectorSettingsRaw {
     drop_onset_min_threshold: f32,
     drop_onset_min_interval: f32,
     drop_onset_suppression: f32,
-    drop_low_kernel: [f32; BAND_COUNT],
-    drop_high_kernel: [f32; BAND_COUNT],
     drop_onset_kernel: [f32; BAND_COUNT],
     drop_quake_factor: f32,
     quake_stiffness: f32,
@@ -1376,6 +1317,23 @@ struct DetectorSettingsRaw {
     legacy_drop_onsets: usize,
     #[serde(rename = "drop_window", skip_serializing)]
     legacy_drop_window: f32,
+    #[serde(
+        rename = "drop_gap_window",
+        skip_serializing,
+        default,
+        deserialize_with = "deserialize_optional_f32"
+    )]
+    legacy_drop_gap_window: Option<f32>,
+    #[serde(rename = "drop_gap_gain", skip_serializing)]
+    legacy_drop_gap_gain: f32,
+    #[serde(rename = "drop_low_lp", skip_serializing)]
+    legacy_drop_low_lp: f32,
+    #[serde(rename = "drop_high_lp", skip_serializing)]
+    legacy_drop_high_lp: f32,
+    #[serde(rename = "drop_low_kernel", skip_serializing)]
+    legacy_drop_low_kernel: [f32; BAND_COUNT],
+    #[serde(rename = "drop_high_kernel", skip_serializing)]
+    legacy_drop_high_kernel: [f32; BAND_COUNT],
     #[serde(rename = "drop_gap_level", skip_serializing)]
     legacy_drop_gap_level: f32,
     #[serde(rename = "drop_gap_time", skip_serializing)]
@@ -1466,6 +1424,11 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
             hat_pattern.suppression_inner = initial.suppression_inner;
             hat_pattern.suppression_outer = initial.suppression_outer;
         }
+        let drop_gap_threshold = if raw.legacy_drop_gap_window.is_some() {
+            DetectorSettings::default().drop_gap_threshold
+        } else {
+            raw.drop_gap_threshold
+        };
         Self {
             band_onset,
             excess: raw.excess,
@@ -1491,6 +1454,7 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
             snare_onset_min_threshold: raw.snare_onset_min_threshold,
             snare_onset_min_interval: raw.snare_onset_min_interval,
             snare_onset_suppression: raw.snare_onset_suppression,
+            snare_min_rms_db: raw.snare_min_rms_db,
             snare_flip_every: raw.snare_flip_every,
             snare_poi_switches: raw.snare_poi_switches,
             snare_choke: raw.snare_choke,
@@ -1506,15 +1470,9 @@ impl TryFrom<DetectorSettingsRaw> for DetectorSettings {
             hat_onset_min_interval: raw.hat_onset_min_interval,
             hat_onset_suppression: raw.hat_onset_suppression,
             drop_kernels: DropKernels {
-                low: raw.drop_low_kernel,
-                high: raw.drop_high_kernel,
                 onset: raw.drop_onset_kernel,
             },
-            drop_gap_window: raw.drop_gap_window,
-            drop_gap_threshold: raw.drop_gap_threshold,
-            drop_gap_gain: raw.drop_gap_gain,
-            drop_low_lp: raw.drop_low_lp,
-            drop_high_lp: raw.drop_high_lp,
+            drop_gap_threshold,
             drop_onset_pre_gain: raw.drop_onset_pre_gain,
             drop_onset_attack: raw.drop_onset_attack,
             drop_onset_release: raw.drop_onset_release,
@@ -1573,6 +1531,7 @@ impl From<DetectorSettings> for DetectorSettingsRaw {
             snare_onset_min_threshold: settings.snare_onset_min_threshold,
             snare_onset_min_interval: settings.snare_onset_min_interval,
             snare_onset_suppression: settings.snare_onset_suppression,
+            snare_min_rms_db: settings.snare_min_rms_db,
             snare_flip_every: settings.snare_flip_every,
             snare_poi_switches: settings.snare_poi_switches,
             snare_choke: settings.snare_choke,
@@ -1587,11 +1546,7 @@ impl From<DetectorSettings> for DetectorSettingsRaw {
             hat_onset_min_threshold: settings.hat_onset_min_threshold,
             hat_onset_min_interval: settings.hat_onset_min_interval,
             hat_onset_suppression: settings.hat_onset_suppression,
-            drop_gap_window: settings.drop_gap_window,
             drop_gap_threshold: settings.drop_gap_threshold,
-            drop_gap_gain: settings.drop_gap_gain,
-            drop_low_lp: settings.drop_low_lp,
-            drop_high_lp: settings.drop_high_lp,
             drop_onset_pre_gain: settings.drop_onset_pre_gain,
             drop_onset_attack: settings.drop_onset_attack,
             drop_onset_release: settings.drop_onset_release,
@@ -1600,8 +1555,6 @@ impl From<DetectorSettings> for DetectorSettingsRaw {
             drop_onset_min_threshold: settings.drop_onset_min_threshold,
             drop_onset_min_interval: settings.drop_onset_min_interval,
             drop_onset_suppression: settings.drop_onset_suppression,
-            drop_low_kernel: settings.drop_kernels.low,
-            drop_high_kernel: settings.drop_kernels.high,
             drop_onset_kernel: settings.drop_kernels.onset,
             drop_quake_factor: settings.drop_quake_factor,
             quake_stiffness: settings.quake_stiffness,
@@ -1609,6 +1562,12 @@ impl From<DetectorSettings> for DetectorSettingsRaw {
             legacy_drop_split: 0,
             legacy_drop_onsets: 0,
             legacy_drop_window: 0.0,
+            legacy_drop_gap_window: None,
+            legacy_drop_gap_gain: 0.0,
+            legacy_drop_low_lp: 0.0,
+            legacy_drop_high_lp: 0.0,
+            legacy_drop_low_kernel: [0.0; BAND_COUNT],
+            legacy_drop_high_kernel: [0.0; BAND_COUNT],
             legacy_drop_gap_level: 0.0,
             legacy_drop_gap_time: 0.0,
             legacy_drop_quiet_level: 0.0,
@@ -1632,7 +1591,7 @@ pub struct DetectorEvents {
     pub snare: Option<f32>,
     pub hat: Option<f32>,
     pub drop: Option<f32>,
-    /// The gap-confidence latch crossed from unarmed to armed on this hop.
+    /// The gap gate crossed from unarmed to armed on this hop.
     pub gap_entry: bool,
 }
 
@@ -1985,12 +1944,17 @@ struct SnareTracker {
 }
 
 impl SnareTracker {
+    /// Runs the onset tracker without emitting a trigger; the caller decides
+    /// whether the absolute gate lets the trigger through.
     fn observe(&mut self, flux: f32, now: f32, dt: f32, settings: &FluxSettings) -> Option<f32> {
         self.flash *= (-dt * FLASH_DECAY).exp();
-        let power = self.onset.observe(flux, now, dt, settings)?;
+        self.onset.observe(flux, now, dt, settings)
+    }
+
+    /// Publishes a trigger that passed its gate.
+    fn emit(&mut self, power: f32) {
         self.flash = 1.0;
         self.last_power = power;
-        Some(power)
     }
 
     fn reset(&mut self) {
@@ -1998,82 +1962,21 @@ impl SnareTracker {
     }
 }
 
-/// Rolling time window of high-minus-low differences with a running sum.
-#[derive(Debug, Default)]
-struct GapWindow {
-    samples: VecDeque<(f32, f32)>,
-    sum: f32,
-    /// Time the window started filling after the last clear.
-    started_at: Option<f32>,
-}
-
-impl GapWindow {
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            samples: VecDeque::with_capacity(capacity),
-            sum: 0.0,
-            started_at: None,
-        }
-    }
-
-    fn push(&mut self, at: f32, value: f32, window: f32) {
-        self.started_at.get_or_insert(at);
-        self.samples.push_back((at, value));
-        self.sum += value;
-        self.prune(at, window);
-    }
-
-    fn prune(&mut self, now: f32, window: f32) {
-        while let Some(&(at, value)) = self.samples.front() {
-            if now - at <= window {
-                break;
-            }
-            self.samples.pop_front();
-            self.sum -= value;
-        }
-    }
-
-    fn mean(&self) -> f32 {
-        if self.samples.is_empty() {
-            0.0
-        } else {
-            self.sum / self.samples.len() as f32
-        }
-    }
-
-    /// A partial window cannot confirm a drop; it must cover the whole span.
-    fn is_full(&self, now: f32, window: f32) -> bool {
-        self.started_at
-            .is_some_and(|started| now - started >= window)
-    }
-
-    fn clear(&mut self) {
-        self.samples.clear();
-        self.sum = 0.0;
-        self.started_at = None;
-    }
-}
-
-fn lp_alpha(tau: f32, dt: f32) -> f32 {
-    if tau <= f32::EPSILON {
-        0.0
-    } else {
-        (-dt / tau).exp()
-    }
+/// Converts a linear RMS value to dBFS, clamped at the silence floor.
+fn rms_to_db(rms: f32) -> f32 {
+    (20.0 * rms.max(1e-9).log10()).max(GAP_DB_FLOOR)
 }
 
 #[derive(Debug)]
 struct DropTracker {
-    window: GapWindow,
     onset: FluxTracker,
-    low: f32,
-    high: f32,
-    low_lp: f32,
-    high_lp: f32,
-    lp_ready: bool,
-    diff: f32,
-    confidence: f32,
-    /// Latches high when the window is confident; an onset resets it.
+    /// Smoothed linear RMS.
+    envelope: f32,
+    envelope_ready: bool,
+    rms_db: f32,
+    envelope_db: f32,
+    /// Latches high while the envelope is below the gap gate; a composite
+    /// onset clears it.
     eligible: bool,
     /// Whether this hop crossed from unarmed to armed.
     gap_entry: bool,
@@ -2090,15 +1993,11 @@ impl Default for DropTracker {
 impl DropTracker {
     fn new() -> Self {
         Self {
-            window: GapWindow::with_capacity(GAP_WINDOW_CAPACITY),
             onset: FluxTracker::level(),
-            low: 0.0,
-            high: 0.0,
-            low_lp: 0.0,
-            high_lp: 0.0,
-            lp_ready: false,
-            diff: 0.0,
-            confidence: 0.0,
+            envelope: 0.0,
+            envelope_ready: false,
+            rms_db: GAP_DB_FLOOR,
+            envelope_db: GAP_DB_FLOOR,
             eligible: false,
             gap_entry: false,
             flash: 0.0,
@@ -2109,38 +2008,30 @@ impl DropTracker {
     fn observe(
         &mut self,
         now: f32,
-        spectrum: &Spectrum,
+        rms: f32,
         onset_flux: f32,
         settings: &DetectorSettings,
         dt: f32,
     ) -> Option<f32> {
         self.flash *= (-dt * FLASH_DECAY).exp();
-        let low = settings
-            .drop_kernels
-            .projection(DropKernel::Low, &spectrum.raw_bands);
-        let high = settings
-            .drop_kernels
-            .projection(DropKernel::High, &spectrum.raw_bands);
-        if !self.lp_ready {
-            self.low_lp = low;
-            self.high_lp = high;
-            self.lp_ready = true;
+        self.rms_db = rms_to_db(rms);
+        if self.envelope_ready {
+            let tau = if rms > self.envelope {
+                GAP_ENVELOPE_ATTACK
+            } else {
+                GAP_ENVELOPE_RELEASE
+            };
+            let alpha = (-dt / tau).exp();
+            self.envelope = alpha * self.envelope + (1.0 - alpha) * rms;
         } else {
-            let low_alpha = lp_alpha(settings.drop_low_lp, dt);
-            let high_alpha = lp_alpha(settings.drop_high_lp, dt);
-            self.low_lp = low_alpha * self.low_lp + (1.0 - low_alpha) * low;
-            self.high_lp = high_alpha * self.high_lp + (1.0 - high_alpha) * high;
+            self.envelope = rms;
+            self.envelope_ready = true;
         }
-        self.low = self.low_lp;
-        self.high = self.high_lp;
-        self.diff = self.high - self.low;
-        self.window.push(now, self.diff, settings.drop_gap_window);
-        self.confidence = self.window.mean() * settings.drop_gap_gain;
-        // A confident window latches eligibility high. Only a composite
-        // onset clears it again.
+        self.envelope_db = rms_to_db(self.envelope);
+        // The gate latches below the threshold: the confirming onset usually
+        // arrives after the level has already started to rise again.
         let was_eligible = self.eligible;
-        self.eligible |= self.window.is_full(now, settings.drop_gap_window)
-            && self.confidence >= settings.drop_gap_threshold;
+        self.eligible |= self.envelope_db < settings.drop_gap_threshold;
         self.gap_entry = !was_eligible && self.eligible;
 
         let onset_settings = settings.drop_onset_recipe().tracker;
@@ -2148,8 +2039,6 @@ impl DropTracker {
         if !self.eligible {
             return None;
         }
-        self.window.clear();
-        self.confidence = 0.0;
         self.eligible = false;
         self.flash = 1.0;
         self.last_power = power;
@@ -2157,15 +2046,11 @@ impl DropTracker {
     }
 
     fn reset(&mut self) {
-        self.window.clear();
         self.onset.reset();
-        self.low = 0.0;
-        self.high = 0.0;
-        self.low_lp = 0.0;
-        self.high_lp = 0.0;
-        self.lp_ready = false;
-        self.diff = 0.0;
-        self.confidence = 0.0;
+        self.envelope = 0.0;
+        self.envelope_ready = false;
+        self.rms_db = GAP_DB_FLOOR;
+        self.envelope_db = GAP_DB_FLOOR;
         self.eligible = false;
         self.gap_entry = false;
         self.flash = 0.0;
@@ -2264,14 +2149,18 @@ impl OnsetBank {
             pattern_steps,
         );
         self.snare_projection = snare_projection;
+        let rms_db = rms_to_db(spectrum.rms);
         if let Some(snare) = self.snare.observe(
             snare_projection.residual,
             self.time,
             dt,
             &settings.snare_onset_tracker(),
         ) {
-            events.snare = Some(snare);
-            self.kick.choke(self.time, settings.snare_choke);
+            if rms_db >= settings.snare_min_rms_db {
+                self.snare.emit(snare);
+                events.snare = Some(snare);
+                self.kick.choke(self.time, settings.snare_choke);
+            }
         }
         let hat_projection = settings.hat_pattern.project(
             &self.onset_history,
@@ -2280,18 +2169,25 @@ impl OnsetBank {
             pattern_steps,
         );
         self.hat_projection = hat_projection;
-        events.hat = self.hat.observe(
+        if let Some(hat) = self.hat.observe(
             hat_projection.residual,
             self.time,
             dt,
             &settings.hat_onset_tracker(),
-        );
+        ) {
+            self.hat.emit(hat);
+            events.hat = Some(hat);
+        }
         let drop_recipe = settings.drop_onset_recipe();
         let drop_projection = drop_recipe.project(&tracked);
         self.drop_projection = drop_projection;
-        let drop = self
-            .drop
-            .observe(self.time, spectrum, drop_projection.residual, settings, dt);
+        let drop = self.drop.observe(
+            self.time,
+            spectrum.rms,
+            drop_projection.residual,
+            settings,
+            dt,
+        );
         events.gap_entry = self.drop.gap_entry;
         if let Some(drop) = drop {
             events.drop = Some(drop);
@@ -2376,10 +2272,8 @@ impl OnsetBank {
             snare_flux: onset_flux_status(&self.snare.onset, self.snare_projection),
             hat_flux: onset_flux_status(&self.hat.onset, self.hat_projection),
             drop_status: DropStatus {
-                low: self.drop.low,
-                high: self.drop.high,
-                diff: self.drop.diff,
-                confidence: self.drop.confidence,
+                rms_db: self.drop.rms_db,
+                envelope_db: self.drop.envelope_db,
                 onset: onset_flux_status(&self.drop.onset, self.drop_projection),
             },
         }
@@ -2430,14 +2324,14 @@ impl TriggerStatus {
     };
 }
 
-/// Drop state behind the trigger: the two projections, their difference, the
-/// scaled rolling-window confidence, and the composite onset tracker.
+/// Drop state behind the trigger: the RMS level and its envelope, the gap gate,
+/// and the composite onset tracker.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DropStatus {
-    pub low: f32,
-    pub high: f32,
-    pub diff: f32,
-    pub confidence: f32,
+    /// Analysis-window RMS in dBFS.
+    pub rms_db: f32,
+    /// Smoothed RMS envelope in dBFS.
+    pub envelope_db: f32,
     pub onset: OnsetFluxStatus,
 }
 
@@ -2866,6 +2760,7 @@ mod tests {
         let mut bank = OnsetBank::new();
         let quiet = Spectrum {
             bands: [0.5; BAND_COUNT],
+            rms: 0.2,
             ..Spectrum::default()
         };
         let abdr = [1.0; BAND_COUNT];
@@ -2875,6 +2770,7 @@ mod tests {
         }
         let pulse = Spectrum {
             bands: [0.5; BAND_COUNT],
+            rms: 0.2,
             band_excess: [1.0; BAND_COUNT],
             ..Spectrum::default()
         };
@@ -2886,6 +2782,51 @@ mod tests {
         assert!(events.snare.is_some(), "snare onset");
         assert!(events.kick.is_none(), "the snare chokes the kick");
         assert!(bank.status().kick.choked);
+    }
+
+    fn snare_fires_with_rms(rms: f32, gate_db: f32) -> bool {
+        let mut settings = defaults();
+        settings.snare_min_rms_db = gate_db;
+        let dt = 1.0 / 86.0;
+        let mut bank = OnsetBank::new();
+        let quiet = Spectrum {
+            bands: [0.5; BAND_COUNT],
+            rms,
+            ..Spectrum::default()
+        };
+        let abdr = [1.0; BAND_COUNT];
+        let abl = [1.0; BAND_COUNT];
+        for _ in 0..8 {
+            bank.observe(&quiet, &abdr, &abl, &settings, dt);
+        }
+        let pulse = Spectrum {
+            bands: [0.5; BAND_COUNT],
+            rms,
+            band_excess: [1.0; BAND_COUNT],
+            ..Spectrum::default()
+        };
+        for _ in 0..4 {
+            bank.observe(&pulse, &abdr, &abl, &settings, dt);
+        }
+        bank.observe(&quiet, &abdr, &abl, &settings, dt)
+            .snare
+            .is_some()
+    }
+
+    #[test]
+    fn the_snare_output_needs_the_absolute_rms_gate() {
+        assert!(
+            snare_fires_with_rms(0.2, -20.0),
+            "a loud snare clears the gate"
+        );
+        assert!(
+            !snare_fires_with_rms(0.01, -20.0),
+            "a quiet snare must not reach the output"
+        );
+        assert!(
+            snare_fires_with_rms(0.01, -60.0),
+            "the permissive gate still accepts the quiet snare"
+        );
     }
 
     #[test]
@@ -3046,163 +2987,119 @@ mod tests {
     fn gap_settings() -> DetectorSettings {
         DetectorSettings {
             drop_kernels: DropKernels {
-                low: std::array::from_fn(|band| if band < 4 { 1.0 } else { 0.0 }),
-                high: std::array::from_fn(|band| if band >= 4 { 1.0 } else { 0.0 }),
-                onset: std::array::from_fn(|band| if band < 4 { 1.0 } else { 0.0 }),
+                onset: [1.0; BAND_COUNT],
             },
-            drop_gap_window: 0.1,
-            drop_gap_threshold: 0.1,
-            drop_low_lp: 0.0,
-            drop_high_lp: 0.0,
+            drop_gap_threshold: -18.0,
             ..DetectorSettings::default()
         }
     }
 
-    fn drop_spectrum(low: f32, high: f32) -> Spectrum {
-        let bands = std::array::from_fn(|band| if band < 4 { low } else { high });
-        Spectrum {
-            bands,
-            raw_bands: bands,
-            ..Spectrum::default()
-        }
-    }
-
     #[test]
-    fn drop_low_and_high_use_raw_band_levels() {
+    fn the_rms_envelope_arms_the_gap_below_the_threshold() {
         let settings = gap_settings();
-        let mut drop = DropTracker::default();
-        let spectrum = Spectrum {
-            bands: [0.0; BAND_COUNT],
-            raw_bands: std::array::from_fn(|band| if band < 4 { 0.2 } else { 0.8 }),
-            ..Spectrum::default()
-        };
-        drop.observe(1.0 / 86.0, &spectrum, 0.0, &settings, 1.0 / 86.0);
-        assert!((drop.low - 0.2).abs() < 1e-6);
-        assert!((drop.high - 0.8).abs() < 1e-6);
-    }
-
-    #[test]
-    fn drop_low_and_high_outputs_are_low_passed() {
-        let mut settings = gap_settings();
-        settings.drop_low_lp = 0.1;
-        settings.drop_high_lp = 0.1;
-        let mut drop = DropTracker::default();
-        let dt = 1.0 / 86.0;
-        drop.observe(dt, &drop_spectrum(0.2, 0.8), 0.0, &settings, dt);
-        assert!((drop.low - 0.2).abs() < 1e-6);
-        assert!((drop.high - 0.8).abs() < 1e-6);
-
-        drop.observe(2.0 * dt, &drop_spectrum(0.4, 0.6), 0.0, &settings, dt);
-        assert!(drop.low > 0.2 && drop.low < 0.4);
-        assert!(drop.high > 0.6 && drop.high < 0.8);
-        assert!((drop.diff - (drop.high - drop.low)).abs() < 1e-6);
-    }
-
-    #[test]
-    fn the_drop_needs_a_full_gap_window_and_a_composite_onset() {
-        let settings = gap_settings();
-        let mut drop = DropTracker::default();
         let dt = 1.0 / 86.0;
         let mut now = 0.0;
+        let mut drop = DropTracker::default();
         for _ in 0..12 {
             now += dt;
-            assert_eq!(
-                drop.observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt),
-                None
-            );
+            drop.observe(now, 0.5, 0.0, &settings, dt);
         }
-        assert!(drop.eligible, "the full window is confident");
-        assert!(drop.confidence >= settings.drop_gap_threshold);
-        assert!((drop.low - 0.0).abs() < 1e-6);
-        assert!((drop.high - 0.8).abs() < 1e-6);
-
-        now += dt;
-        assert_eq!(
-            drop.observe(now, &drop_spectrum(0.0, 0.8), 1.0, &settings, dt),
-            None,
-            "the onset is confirmed on the release hop"
-        );
-        now += dt;
-        let power = drop
-            .observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt)
-            .expect("the composite onset confirms the drop");
-        assert!(power > 0.0);
         assert!(!drop.eligible);
-        assert_eq!(drop.confidence, 0.0, "the window restarts after a drop");
+        assert!(drop.envelope_db > settings.drop_gap_threshold);
+
+        let mut entries = 0;
+        for _ in 0..60 {
+            now += dt;
+            drop.observe(now, 0.01, 0.0, &settings, dt);
+            entries += u8::from(drop.gap_entry);
+        }
+        assert!(drop.eligible, "the quiet RMS arms the gate");
+        assert!(drop.envelope_db < settings.drop_gap_threshold);
+        assert_eq!(entries, 1, "the latch reports one entry edge");
     }
 
     #[test]
-    fn eligibility_latches_until_an_onset_resets_it() {
+    fn the_gap_gate_threshold_is_configurable() {
+        let dt = 1.0 / 86.0;
+        for (threshold, expected) in [(-30.0, false), (-20.0, true)] {
+            let settings = DetectorSettings {
+                drop_gap_threshold: threshold,
+                ..gap_settings()
+            };
+            let mut drop = DropTracker::default();
+            let mut now = 0.0;
+            for _ in 0..60 {
+                now += dt;
+                drop.observe(now, 0.05, 0.0, &settings, dt);
+            }
+            assert_eq!(drop.eligible, expected, "gate {threshold} dB");
+        }
+    }
+
+    #[test]
+    fn the_gate_latches_until_an_onset_clears_it() {
         let settings = gap_settings();
-        let mut drop = DropTracker::default();
         let dt = 1.0 / 86.0;
         let mut now = 0.0;
-        let mut entries = 0;
-        for _ in 0..12 {
+        let mut drop = DropTracker::default();
+        for _ in 0..60 {
             now += dt;
-            drop.observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt);
-            if drop.gap_entry {
-                entries += 1;
-            }
+            drop.observe(now, 0.01, 0.0, &settings, dt);
         }
         assert!(drop.eligible);
-        assert_eq!(entries, 1, "eligibility reports one entry edge");
 
-        // The bass returns and confidence falls, but no onset has cleared the
-        // latched eligibility yet.
-        for _ in 0..20 {
+        for _ in 0..30 {
             now += dt;
-            drop.observe(now, &drop_spectrum(0.6, 0.6), 0.0, &settings, dt);
+            drop.observe(now, 0.8, 0.0, &settings, dt);
         }
-        assert!(drop.confidence < settings.drop_gap_threshold);
-        assert!(drop.eligible, "the high state stays latched");
+        assert!(drop.envelope_db > settings.drop_gap_threshold);
+        assert!(drop.eligible, "the gate stays latched while loud");
 
         now += dt;
-        drop.observe(now, &drop_spectrum(0.6, 0.6), 1.0, &settings, dt);
+        drop.observe(now, 0.8, 1.0, &settings, dt);
         now += dt;
-        assert!(drop
-            .observe(now, &drop_spectrum(0.6, 0.6), 0.0, &settings, dt,)
-            .is_some());
+        assert!(drop.observe(now, 0.8, 0.0, &settings, dt).is_some());
         assert!(!drop.eligible, "the confirming onset clears the latch");
-        assert_eq!(drop.confidence, 0.0);
     }
 
     #[test]
-    fn the_confidence_gain_scales_the_window_mean_around_zero() {
-        let mut settings = gap_settings();
-        settings.drop_gap_threshold = 0.15;
-        for (gain, eligible) in [(2.0, true), (0.5, false)] {
-            settings.drop_gap_gain = gain;
-            let mut drop = DropTracker::default();
-            let dt = 1.0 / 86.0;
-            let mut now = 0.0;
-            for _ in 0..12 {
-                now += dt;
-                drop.observe(now, &drop_spectrum(0.4, 0.5), 0.0, &settings, dt);
-            }
-            assert!((drop.confidence - 0.1 * gain).abs() < 1e-5);
-            assert_eq!(drop.eligible, eligible, "gain {gain}");
+    fn drop_confirmation_requires_an_armed_gate() {
+        let settings = gap_settings();
+        let dt = 1.0 / 86.0;
+        let mut now = 0.0;
+        let mut drop = DropTracker::default();
+        for _ in 0..12 {
+            now += dt;
+            drop.observe(now, 0.8, 0.0, &settings, dt);
         }
+        assert!(!drop.eligible);
+        now += dt;
+        drop.observe(now, 0.8, 1.0, &settings, dt);
+        now += dt;
+        assert_eq!(
+            drop.observe(now, 0.8, 0.0, &settings, dt),
+            None,
+            "an onset without a quiet RMS is not a drop"
+        );
     }
 
     #[test]
     fn the_composite_onset_uses_its_own_flux_settings() {
         let mut settings = gap_settings();
         settings.drop_onset_min_threshold = 2.0;
-        let mut drop = DropTracker::default();
         let dt = 1.0 / 86.0;
         let mut now = 0.0;
-        let quiet = drop_spectrum(0.0, 0.8);
-        for _ in 0..12 {
+        let mut drop = DropTracker::default();
+        for _ in 0..60 {
             now += dt;
-            drop.observe(now, &quiet, 0.0, &settings, dt);
+            drop.observe(now, 0.01, 0.0, &settings, dt);
         }
         assert!(drop.eligible);
         now += dt;
-        drop.observe(now, &drop_spectrum(0.0, 0.8), 1.0, &settings, dt);
+        drop.observe(now, 0.01, 1.0, &settings, dt);
         now += dt;
         assert_eq!(
-            drop.observe(now, &quiet, 0.0, &settings, dt),
+            drop.observe(now, 0.01, 0.0, &settings, dt),
             None,
             "the dedicated minimum threshold blocks the composite onset"
         );
@@ -3210,104 +3107,40 @@ mod tests {
         settings.drop_onset_min_threshold = 0.01;
         for _ in 0..40 {
             now += dt;
-            drop.observe(now, &quiet, 0.0, &settings, dt);
+            drop.observe(now, 0.01, 0.0, &settings, dt);
         }
         now += dt;
-        drop.observe(now, &drop_spectrum(0.0, 0.8), 1.0, &settings, dt);
+        drop.observe(now, 0.01, 1.0, &settings, dt);
         now += dt;
-        assert!(drop.observe(now, &quiet, 0.0, &settings, dt).is_some());
+        assert!(drop.observe(now, 0.01, 0.0, &settings, dt).is_some());
     }
 
     #[test]
-    fn a_partial_window_cannot_confirm_a_drop() {
-        let mut settings = gap_settings();
-        settings.drop_gap_window = 0.5;
-        let mut drop = DropTracker::default();
+    fn resetting_clears_the_rms_envelope_and_gate() {
+        let settings = gap_settings();
         let dt = 1.0 / 86.0;
         let mut now = 0.0;
-        for _ in 0..12 {
-            now += dt;
-            drop.observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt);
-        }
-        assert!(!drop.eligible, "0.14 s cannot fill a 0.5 s window");
-
-        now += dt;
-        drop.observe(now, &drop_spectrum(0.0, 0.8), 1.0, &settings, dt);
-        now += dt;
-        assert_eq!(
-            drop.observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt),
-            None,
-            "an onset inside a partial window is ignored"
-        );
-
-        for _ in 0..40 {
-            now += dt;
-            drop.observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt);
-        }
-        assert!(drop.eligible, "the window is now full");
-        now += dt;
-        drop.observe(now, &drop_spectrum(0.0, 0.8), 1.0, &settings, dt);
-        now += dt;
-        assert!(drop
-            .observe(now, &drop_spectrum(0.0, 0.8), 0.0, &settings, dt)
-            .is_some());
-    }
-
-    #[test]
-    fn a_negative_gap_threshold_accepts_a_negative_confidence() {
-        let mut settings = gap_settings();
-        settings.drop_gap_threshold = -0.2;
         let mut drop = DropTracker::default();
-        let dt = 1.0 / 86.0;
-        let mut now = 0.0;
-        for _ in 0..12 {
+        for _ in 0..60 {
             now += dt;
-            drop.observe(now, &drop_spectrum(0.6, 0.5), 0.0, &settings, dt);
+            drop.observe(now, 0.01, 0.0, &settings, dt);
         }
-        assert!((drop.confidence + 0.1).abs() < 1e-5);
-        assert!(
-            drop.eligible,
-            "a negative confidence can still clear a negative threshold"
-        );
+        assert!(drop.eligible);
+        drop.reset();
+        assert!(!drop.eligible);
+        assert!(!drop.envelope_ready);
+        assert_eq!(drop.envelope_db, GAP_DB_FLOOR);
+        assert_eq!(drop.rms_db, GAP_DB_FLOOR);
     }
 
     #[test]
-    fn kernel_projection_is_a_normalized_weighted_mean() {
-        let mut kernels = DropKernels {
-            low: [0.0; BAND_COUNT],
-            ..DropKernels::default()
-        };
-        kernels.set(DropKernel::Low, 0, 0.25);
-        kernels.set(DropKernel::Low, 1, 1.0);
-        let mut values = [0.0; BAND_COUNT];
-        values[0] = 0.2;
-        values[1] = 0.8;
-        let expected = (0.25 * 0.2 + 1.0 * 0.8) / 1.25;
-        assert!((kernels.projection(DropKernel::Low, &values) - expected).abs() < 1e-6);
-
-        let empty = DropKernels {
-            low: [0.0; BAND_COUNT],
-            ..DropKernels::default()
-        };
-        assert_eq!(empty.projection(DropKernel::Low, &values), 0.0);
-        kernels.set(DropKernel::Low, 2, 2.0);
-        assert_eq!(kernels.low[2], 1.0, "kernel weights stay inside 0..1");
-    }
-
-    #[test]
-    fn the_gap_window_mean_trades_depth_for_duration() {
-        let mut window = GapWindow::with_capacity(256);
-        for index in 0..100 {
-            let at = index as f32 * 0.01;
-            let value = if index < 25 { 0.8 } else { 0.0 };
-            window.push(at, value, 1.0);
-        }
-        assert!((window.mean() - 0.2).abs() < 1e-5);
-        window.push(1.5, 0.0, 1.0);
-        assert!(
-            window.samples.front().is_some_and(|&(at, _)| at >= 0.5),
-            "samples older than the window are pruned"
-        );
+    fn drop_kernel_weights_stay_inside_zero_to_one() {
+        let mut kernels = DropKernels::default();
+        kernels.set(DropKernel::Onset, 2, 2.0);
+        assert_eq!(kernels.onset[2], 1.0);
+        kernels.set(DropKernel::Onset, 3, -1.0);
+        assert_eq!(kernels.onset[3], 0.0);
+        assert_eq!(kernels.weights(DropKernel::Onset), kernels.onset);
     }
 
     #[test]
@@ -3368,31 +3201,35 @@ mod tests {
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();
-        settings.drop_gap_window = 0.0;
+        settings.snare_min_rms_db = 1.0;
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();
-        settings.drop_gap_window = 5.0;
+        settings.snare_min_rms_db = -61.0;
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();
-        settings.drop_gap_threshold = 1.5;
+        settings.snare_min_rms_db = f32::NAN;
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();
-        settings.drop_kernels.low[0] = -0.1;
+        settings.drop_gap_threshold = 1.0;
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();
-        settings.drop_kernels.high[0] = f32::NAN;
+        settings.drop_gap_threshold = -61.0;
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();
-        settings.drop_gap_gain = 0.0;
+        settings.drop_gap_threshold = f32::NAN;
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();
-        settings.drop_gap_gain = 20.0;
+        settings.drop_kernels.onset[0] = -0.1;
+        assert!(settings.validate().is_err());
+
+        let mut settings = defaults();
+        settings.drop_kernels.onset[0] = f32::NAN;
         assert!(settings.validate().is_err());
 
         let mut settings = defaults();

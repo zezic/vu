@@ -912,6 +912,14 @@ fn detector_extension_text(
         Detector::Hat => snapshot.hat_hits,
         _ => 0,
     };
+    let gate = if detector == Detector::Snare {
+        format!(
+            "  RMS GATE {:.0} dB",
+            visualizer.detector_settings().snare_min_rms_db
+        )
+    } else {
+        String::new()
+    };
     (
         format!("{} TRIGGER  {}", detector.name(), trigger_state(&trigger)),
         format!(
@@ -920,7 +928,7 @@ fn detector_extension_text(
             reference_text(onset.reference),
             onset.threshold
         ),
-        format!("HITS {hits}  LAST {:.2}", trigger.power),
+        format!("HITS {hits}  LAST {:.2}{gate}", trigger.power),
     )
 }
 
@@ -986,17 +994,16 @@ fn drop_extension_text(
     (
         format!("DROP TRIGGER  {}", trigger_state(&trigger)),
         format!(
-            "LF {:.2}  HF {:.2}  DIFF {:.2}  CONF {:.2}/{:.2} x{:.2}",
-            status.low,
-            status.high,
-            status.diff,
-            status.confidence,
-            settings.drop_gap_threshold,
-            settings.drop_gap_gain
+            "RMS {:.1}  ENV {:.1}  GATE {:.0} dB",
+            status.rms_db, status.envelope_db, settings.drop_gap_threshold
         ),
         format!(
-            "WINDOW {:.2}s  ONSET {:.3}/{:.3}  HITS {}  LAST {:.2}",
-            settings.drop_gap_window,
+            "{}  ONSET {:.3}/{:.3}  HITS {}  LAST {:.2}",
+            if trigger.armed {
+                "GATE ARMED"
+            } else {
+                "GATE OPEN"
+            },
             status.onset.smoothed,
             status.onset.threshold,
             snapshot.drop_hits,
@@ -2214,6 +2221,7 @@ pub(super) fn scene_analyzer_layout(view: &View, text_scale: VisualizerTextScale
         Parameter::SelectorFadeIn,
         Parameter::SelectorFadeOut,
         Parameter::SelectorColorChance,
+        Parameter::SelectorEntryKicks,
         Parameter::SelectorExitTriggers,
         Parameter::SelectorGapTimeout,
     ];
@@ -3558,11 +3566,8 @@ fn draw_kernel_banks(
 ) {
     let settings = visualizer.detector_settings();
     for bank in kernels {
-        let (label_text, color) = match bank.kernel {
-            DropKernel::Low => ("LOW", palette.vivid(6)),
-            DropKernel::High => ("HIGH", palette.vivid(10)),
-            DropKernel::Onset => ("ONSET", palette.vivid(9)),
-        };
+        let label_text = bank.kernel.label();
+        let color = palette.vivid(9);
         let label = fit(
             fonts,
             label_text,
@@ -3863,15 +3868,9 @@ enum GraphSource {
     Onset(Detector),
     Kick,
     Property(Property),
-    /// Weighted low projection of the band levels.
-    DropLow,
-    /// Weighted high projection of the band levels.
-    DropHigh,
-    /// High projection minus low projection.
-    DropDiff,
-    /// Mean high-minus-low difference over the rolling window.
-    DropConfidence,
-    /// Whether the window confidence currently permits a drop.
+    /// RMS level and its smoothed envelope, both in dBFS.
+    DropLevel,
+    /// Whether the RMS envelope currently permits a drop.
     DropEligible,
     /// Composite onset flux with its adaptive threshold.
     DetectorOnsetFlux(Detector),
@@ -3994,6 +3993,7 @@ impl GraphSource {
                 | Self::BandRole(_)
                 | Self::Power
                 | Self::Bass
+                | Self::DropLevel
                 | Self::DetectorOnsetFlux(_)
                 | Self::DetectorSuppression(_)
         )
@@ -4009,10 +4009,8 @@ impl GraphSource {
         match self {
             Self::Band(_) | Self::BandRole(_) | Self::Power | Self::Bass => (0.0, 1.0),
             Self::BandOnset(_) => (0.0, 1.0),
-            Self::Onset(_) | Self::DropLow | Self::DropHigh | Self::DropEligible => (0.0, 1.0),
-            Self::DropDiff | Self::DropConfidence => {
-                (DROP_GAP_THRESHOLD_MIN, DROP_GAP_THRESHOLD_MAX)
-            }
+            Self::Onset(_) | Self::DropEligible => (0.0, 1.0),
+            Self::DropLevel => (DROP_GAP_THRESHOLD_MIN, DROP_GAP_THRESHOLD_MAX),
             Self::DetectorOnsetFlux(_) | Self::DetectorSuppression(_) => (0.0, 0.25),
             Self::Kick => (0.0, 1.5),
             Self::Property(property) => {
@@ -4038,10 +4036,7 @@ impl GraphSource {
             Self::Onset(Detector::Drop) | Self::DropEligible => palette.vivid(8),
             Self::Kick => palette.vivid(0),
             Self::Property(property) => palette.vivid(property.index()),
-            Self::DropLow => palette.vivid(6),
-            Self::DropHigh => palette.vivid(10),
-            Self::DropDiff => palette.vivid(2),
-            Self::DropConfidence => palette.vivid(4),
+            Self::DropLevel => palette.vivid(4),
             Self::DetectorOnsetFlux(Detector::Kick) | Self::DetectorSuppression(Detector::Kick) => {
                 palette.vivid(0)
             }
@@ -4094,10 +4089,10 @@ impl GraphSource {
                 property.name(),
                 snapshot.properties[property.index()]
             ),
-            Self::DropLow => format!("LF {:.2}", snapshot.drop_status.low),
-            Self::DropHigh => format!("HF {:.2}", snapshot.drop_status.high),
-            Self::DropDiff => format!("DIFF {:.2}", snapshot.drop_status.diff),
-            Self::DropConfidence => format!("CONF {:.2}", snapshot.drop_status.confidence),
+            Self::DropLevel => format!(
+                "RMS {:.1}  ENV {:.1} dB",
+                snapshot.drop_status.rms_db, snapshot.drop_status.envelope_db
+            ),
             Self::DropEligible => format!("ELIG {}", u8::from(snapshot.drop_onset.armed)),
             Self::DetectorOnsetFlux(detector) => {
                 let onset = onset_flux_snapshot(snapshot, detector);
@@ -4117,10 +4112,7 @@ impl GraphSource {
     /// Short captions for graphs that only exist in the drop detector view.
     fn detector_usage(self) -> Option<&'static str> {
         match self {
-            Self::DropLow => Some("low projection"),
-            Self::DropHigh => Some("high projection"),
-            Self::DropDiff => Some("high - low"),
-            Self::DropConfidence => Some("window mean"),
+            Self::DropLevel => Some("rms + envelope, gate"),
             Self::DropEligible => Some("latched gap"),
             Self::DetectorOnsetFlux(_) => Some("flux, reference, threshold"),
             Self::DetectorSuppression(_) => Some("suppression"),
@@ -4153,10 +4145,11 @@ impl GraphSource {
             Self::Onset(detector) => (!raw).then(|| trigger_sample(sample, detector).flash),
             Self::Kick => (!raw).then_some(sample.kick),
             Self::Property(property) => (!raw).then(|| sample.property(property)),
-            Self::DropLow => (!raw).then_some(sample.drop_status.low),
-            Self::DropHigh => (!raw).then_some(sample.drop_status.high),
-            Self::DropDiff => (!raw).then_some(sample.drop_status.diff),
-            Self::DropConfidence => (!raw).then_some(sample.drop_status.confidence),
+            Self::DropLevel => Some(if raw {
+                sample.drop_status.rms_db
+            } else {
+                sample.drop_status.envelope_db
+            }),
             Self::DropEligible => (!raw).then_some(if sample.drop_onset.armed { 1.0 } else { 0.0 }),
             Self::DetectorOnsetFlux(detector) => {
                 let onset = onset_flux_sample(sample, detector);
@@ -4184,10 +4177,7 @@ impl GraphSource {
             Self::Kick
             | Self::Onset(_)
             | Self::Property(_)
-            | Self::DropLow
-            | Self::DropHigh
-            | Self::DropDiff
-            | Self::DropConfidence
+            | Self::DropLevel
             | Self::DropEligible
             | Self::DetectorOnsetFlux(_)
             | Self::DetectorSuppression(_) => None,
@@ -4207,10 +4197,7 @@ fn graph_rows(count: usize) -> usize {
 fn detector_graph_sources(detector: Detector, flux_band: usize) -> Vec<GraphSource> {
     match detector {
         Detector::Drop => vec![
-            GraphSource::DropLow,
-            GraphSource::DropHigh,
-            GraphSource::DropDiff,
-            GraphSource::DropConfidence,
+            GraphSource::DropLevel,
             GraphSource::DropEligible,
             GraphSource::DetectorOnsetFlux(Detector::Drop),
             GraphSource::DetectorSuppression(Detector::Drop),
@@ -4520,10 +4507,7 @@ fn graph_usage_for_focus(
             GraphSource::Onset(_) => "trigger flash",
             GraphSource::Kick
             | GraphSource::Property(_)
-            | GraphSource::DropLow
-            | GraphSource::DropHigh
-            | GraphSource::DropDiff
-            | GraphSource::DropConfidence
+            | GraphSource::DropLevel
             | GraphSource::DropEligible
             | GraphSource::DetectorOnsetFlux(_)
             | GraphSource::DetectorSuppression(_) => "",
@@ -4571,10 +4555,7 @@ fn graph_usage_for_focus(
                 Property::Crossfade => "×gain add to rate",
                 _ => "feeds the property",
             },
-            GraphSource::DropLow
-            | GraphSource::DropHigh
-            | GraphSource::DropDiff
-            | GraphSource::DropConfidence
+            GraphSource::DropLevel
             | GraphSource::DropEligible
             | GraphSource::DetectorOnsetFlux(_)
             | GraphSource::DetectorSuppression(_) => "",
@@ -4600,10 +4581,7 @@ fn graph_usage_text(
         GraphSource::Band(_)
         | GraphSource::BandOnset(_)
         | GraphSource::Onset(_)
-        | GraphSource::DropLow
-        | GraphSource::DropHigh
-        | GraphSource::DropDiff
-        | GraphSource::DropConfidence
+        | GraphSource::DropLevel
         | GraphSource::DropEligible
         | GraphSource::DetectorOnsetFlux(_)
         | GraphSource::DetectorSuppression(_) => return usage.to_owned(),
@@ -4753,7 +4731,7 @@ fn draw_graph(
         ),
     );
     let settings = visualizer.detector_settings();
-    if let GraphSource::DropConfidence = source {
+    if let GraphSource::DropLevel = source {
         draw_level_line(
             scene,
             plot,
@@ -5149,7 +5127,7 @@ impl TimelineTrack {
             Self::Kick => "KICK",
             Self::Snare => "SNARE",
             Self::Hat => "HAT",
-            Self::DropGap => "DROP ELIG+CONF",
+            Self::DropGap => "DROP LVL+ARM",
             Self::DropTrigger => "DROP TRIGGER",
         }
     }
@@ -5410,7 +5388,7 @@ fn draw_timeline_drop_gap(
     scale: f64,
 ) {
     let eligibility = palette.vivid(8);
-    let confidence = palette.vivid(4);
+    let level = palette.vivid(4);
     let range = (DROP_GAP_THRESHOLD_MIN, DROP_GAP_THRESHOLD_MAX);
 
     // The latch fills the lane while it is armed. One rectangle per continuous
@@ -5457,7 +5435,7 @@ fn draw_timeline_drop_gap(
     let mut started = false;
     for sample in history.samples() {
         let x = window.x(lane, sample.at);
-        let y = map_level(lane, range, sample.drop_status.confidence);
+        let y = map_level(lane, range, sample.drop_status.envelope_db);
         if started {
             trace.line_to(Point::new(x, y));
         } else {
@@ -5469,7 +5447,7 @@ fn draw_timeline_drop_gap(
         scene.stroke(
             &Stroke::new(1.1 * scale),
             Affine::IDENTITY,
-            confidence.with_alpha(0.95),
+            level.with_alpha(0.95),
             None,
             &trace,
         );
@@ -5812,16 +5790,12 @@ mod tests {
             Some(TreeTarget::Detector(Detector::Drop)),
             &Mixer::default(),
         );
-        assert_eq!(tree.sliders.len(), 14);
+        assert_eq!(tree.sliders.len(), 10);
         assert!(tree
             .sliders
             .iter()
-            .any(|slider| slider.parameter == Parameter::DropGapWindow));
-        assert!(tree
-            .sliders
-            .iter()
-            .any(|slider| slider.parameter == Parameter::DropLowLp));
-        assert_eq!(tree.kernels.len(), 3);
+            .any(|slider| slider.parameter == Parameter::DropGapThreshold));
+        assert_eq!(tree.kernels.len(), 1);
         let bank = tree.kernels[0];
         let band = 8;
         let point = Point::new(
@@ -5831,7 +5805,7 @@ mod tests {
         assert_eq!(
             tree.kernel_at(point)
                 .map(|(kernel, _, band)| (kernel, band)),
-            Some((DropKernel::Low, band))
+            Some((DropKernel::Onset, band))
         );
         assert_eq!(
             tree.sliders
@@ -5879,10 +5853,7 @@ mod tests {
         );
         let graphs = detector_graph_sources(Detector::Drop, 0);
         for expected in [
-            GraphSource::DropLow,
-            GraphSource::DropHigh,
-            GraphSource::DropDiff,
-            GraphSource::DropConfidence,
+            GraphSource::DropLevel,
             GraphSource::DropEligible,
             GraphSource::DetectorOnsetFlux(Detector::Drop),
             GraphSource::DetectorSuppression(Detector::Drop),
@@ -5905,8 +5876,11 @@ mod tests {
                 assert!(!graph_usage(selection, source).is_empty());
             }
         }
-        assert_eq!(GraphSource::DropDiff.range(None), (-1.0, 1.0));
-        assert_eq!(GraphSource::DropHigh.range(None), (0.0, 1.0));
+        assert_eq!(
+            GraphSource::DropLevel.range(None),
+            (DROP_GAP_THRESHOLD_MIN, DROP_GAP_THRESHOLD_MAX)
+        );
+        assert_eq!(GraphSource::DropEligible.range(None), (0.0, 1.0));
         assert_eq!(
             GraphSource::DetectorOnsetFlux(Detector::Drop).range(None),
             (0.0, 0.25)
@@ -6039,13 +6013,18 @@ mod tests {
         let visualizer = Visualizer::new();
         let snapshot = visualizer.debug_snapshot();
         for detector in [Detector::Kick, Detector::Snare, Detector::Hat] {
-            let (heading, description, _) =
+            let (heading, description, dependencies) =
                 detector_extension_text(detector, &snapshot, &visualizer);
             assert!(heading.ends_with("IDLE"));
             assert!(heading.starts_with(detector.name()));
             assert!(description.contains("ONSET FLUX"));
             assert!(description.contains("REF"));
             assert!(description.contains("THR"));
+            assert_eq!(
+                dependencies.contains("RMS GATE"),
+                detector == Detector::Snare,
+                "{detector:?} gate text"
+            );
         }
     }
 
@@ -6055,9 +6034,10 @@ mod tests {
         let snapshot = visualizer.debug_snapshot();
         let (heading, description, dependencies) = drop_extension_text(&snapshot, &visualizer);
         assert_eq!(heading, "DROP TRIGGER  IDLE");
-        assert!(description.contains("LF 0.00"));
-        assert!(description.contains("CONF 0.00/-0.30"));
-        assert!(dependencies.contains("WINDOW 1.00s"));
+        assert!(description.contains("RMS"));
+        assert!(description.contains("ENV"));
+        assert!(description.contains("GATE -18 dB"));
+        assert!(dependencies.contains("OPEN"));
         assert!(dependencies.contains("ONSET"));
     }
 

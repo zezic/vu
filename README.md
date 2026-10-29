@@ -29,8 +29,9 @@ On macOS, allow system audio recording when prompted.
 - `C` / `V` - decrease or increase shutter exposure by half a frame, from 1 to
   16 frame intervals.
 - `G` - toggle the light onset/drop timeline above the bottom hotkey line.
-- `J` / `K` - decrease or increase the drop gap confidence threshold in 0.05
-  steps, from -1.0 to +1.0. The setting persists in the config file.
+- `J` / `K` - decrease or increase the drop gap gate in 1 dB steps, from -60
+  to 0 dBFS. The factory gate is -18 dBFS and the setting persists in the
+  config file.
 - `O` / `P` - decrease or increase the depth opacity modulation in 5% steps,
   from 0% (all vertices opaque) to 100% (the farthest vertices fully
   transparent). The setting persists in the config file.
@@ -65,21 +66,21 @@ edges use flat square caps.
 ### Showcase modes
 
 The model runs in either normal mode or POI focus mode. Normal mode keeps the
-usual spin and flips. In POI focus mode, the camera frames a semantic point of
-interest, the normal model motion fades out over its own spring, and each kick
+usual spin and flips. Entering POI focus rounds an inverted flip target up to
+the next whole turn, so the model finishes upright instead of freezing
+upside-down; the flip spring keeps its full action through the motion fade. In
+POI focus mode, the camera frames a semantic point of interest, the normal
+model motion fades out over its own spring, and each kick
 adds a signed random yaw and pitch step while changing FOV by a random step.
 Both use a signed magnitude between a minimum and a maximum (`ORBIT MIN`
 default 20 deg / `ORBIT MAX` 45 deg, and `FOV MIN` default 10 deg / `FOV MAX`
-20 deg). The same range seeds a fresh signed orbit target when entering POI
-mode and when switching to another POI: the target is chosen within the range
-and lies on the shortest angular path from the current angle, so accumulated
-rotation is not carried into the next POI. The switch turns the camera toward
-that target by a rotation between `SWITCH MIN` (default 0 deg) and
-`SWITCH MAX` (default 45 deg) instead of swinging the whole way: a target
-farther away than the maximum is reached over successive switches, and a
-minimum above zero gives every switch at least that much rotation. A
-`SWITCH MAX` of 180 deg leaves the switch rotation uncapped. The FOV stays
-inside 30-120 deg. The FOV and camera distance move
+20 deg). The same range seeds a fresh signed orbit step when entering POI
+mode and when switching to another POI. The step is applied relative to the
+current camera angle, then clamped to the switch range: `SWITCH MIN` (default
+0 deg) raises a smaller step, and `SWITCH MAX` (default 45 deg) caps a larger
+one, so every switch starts from the view currently on screen rather than from
+the view the POI started with. A `SWITCH MAX` of 180 deg leaves the drawn step
+uncapped. The FOV stays inside 30-120 deg. The FOV and camera distance move
 together, so the POI keeps its size while the surrounding model undergoes a
 dolly zoom. `KICK ATTACK` (default 4/s) adds an initial velocity to the yaw,
 pitch, and FOV springs when a kick sets a new target, so the move starts
@@ -103,30 +104,36 @@ POI mode starts, and `POI SWITCHES` counts the POI changes before normal mode
 returns. `POI GAP` (default 1 s, in the `SNARE` panel) starts when POI mode
 is entered and after every switch. A snare that arrives before the gap expires
 is handled as a kick instead: it applies the normal orbit/FOV step but does not
-advance the switch or exit cycle. A confirmed drop also toggles the mode: normal switches to POI focus,
-and POI focus returns to normal. The drop still advances the model, so the
+advance the switch or exit cycle. A switch measures each eligible POI from the
+current one, min-max normalizes those distances, squares the closeness weight,
+and keeps a 0.1 relative weight for the farthest candidate, so nearby targets
+dominate while a long jump remains possible. A confirmed drop also toggles the
+mode: normal switches to POI focus, and POI focus returns to normal. The drop
+still advances the model, so the
 entry is resolved against the newly selected model; if that model has no
-resolvable POIs, normal mode remains. A gap-confidence entry always returns to
+resolvable POIs, normal mode remains. A gap-gate entry always returns to
 normal mode and resets the cycle. All cycle and spring settings live in the
 analyzer panel: `SNARE` holds the two counters, and the `SCENE` panel holds
 separate motion, focus, orbit, and dolly springs, the slow orbit/dolly controls,
 the per-kick step and POI switch ranges, the kick attack, and the selector
 timing and attenuation controls.
 
-The selector effect is available only in normal mode. A kick enables it. While
-active it keeps one mesh at full opacity, fades the other meshes to the
-configured attenuation (`SEL ATTEN`), and has a 25% chance to color the selected mesh
-differently. Kicks and snares count toward an exit threshold (`SEL EXIT N`,
-default 20); the trigger that reaches the threshold turns the selector off. A
-drop or a model change turns it off immediately. Gap-confidence entry no longer
-turns it off: the selector turns off only after the gap-confidence latch stays
-armed continuously for `SEL GAP s` (default 10 s), and clearing the gap resets
-that timer. The `HAT` detector only changes the selected mesh and never exits
-the selector; in POI mode it advances the full-opacity child of a mesh POI
-instead. Snares do not flip the model while the selector is active; the
-snare that reaches the exit threshold also does not add a flip. The `HAT`
-detector has its own pattern editor and is independent of the snare and drop
-detectors.
+The selector effect is available only in normal mode. `SEL ENTRY N` kicks
+(default 4) enable it; the entry count restarts whenever the selector turns on
+or off. While active it keeps one mesh at full opacity, fades the other meshes
+to the configured attenuation (`SEL ATTEN`), and has a 25% chance to color the
+selected mesh differently. Entering the selector always returns the model's
+flip spring to an upright pose. Kicks and snares count toward an exit threshold
+(`SEL EXIT N`, default 20); the trigger that reaches the threshold turns the
+selector off. A drop or a model change turns it off immediately. A gap-gate
+entry no longer turns it off: the selector turns off only after the gap gate
+stays armed continuously for `SEL GAP s` (default 10 s), and clearing the gap
+resets that timer. The `HAT` detector only changes the
+selected mesh and never exits the selector; in POI mode it advances the
+full-opacity child of a mesh POI instead. Snares do not flip the model while
+the selector is active; the snare that reaches the exit threshold also does not
+add a flip. The `HAT` detector has its own pattern editor and is independent of
+the snare and drop detectors.
 
 Edge opacity follows vertex depth: nearest vertices use the adjustable
 near-opacity floor (60% by default, brightened by line energy), farther vertices
@@ -182,7 +189,10 @@ is the absolute floor: a peak below it neither confirms nor enters the median.
 `ONS GAP` is the minimum spacing between confirmed onsets, with factory gaps
 of 95 ms for kick, 100 ms for snare, and 60 ms for hi-hat. A confirmed onset
 reports its strength relative to the median, so a typical hit is 1.0 and a
-half-strength hit is 0.5. The drop detector keeps the flux-level average
+half-strength hit is 0.5. The snare output also has an absolute RMS gate
+(`RMS GATE`, -45 dBFS by default): a confirmed snare below the gate updates the
+tracker but is not emitted, so it cannot flip the model, choke the kick, or
+advance the mode cycle. The drop detector keeps the flux-level average
 instead: its threshold follows a slow mean of the same residual, with
 `ONS AVERAGE` as that mean's time constant. Each detector also has an
 `ONS PRE` trim on the matched projection before tracking, so a loud projection
@@ -194,23 +204,16 @@ canvas: the kick template spans the whole band range, the snare template covers
 bands 04-15, the hi-hat template covers the top bands, and the suppression
 kernels concentrate on the low bands.
 
-The drop detector projects the 16 unfitted linear band magnitudes through two
-drawable kernels: a low kernel and a high kernel. Each projection is normalized
-by its kernel weight sum. The low and high outputs pass through independent
-configurable one-pole low-pass filters (`LF LP` and `HF LP`, in milliseconds;
-the factory preset uses 250 ms and 500 ms, and 0 ms bypasses the filter), and
-the high-minus-low difference is averaged over a rolling window (1.0 s by
-default). The mean is multiplied by a confidence gain (1.0 by default), which
-scales it around zero before the threshold comparison. When the scaled mean
-reaches the confidence threshold (-0.3 by default), eligibility latches high and
-stays high even if the confidence later falls; only a composite onset from a
-third, independent onset kernel can clear it and confirm the drop. A short deep
-gap and a long medium gap therefore contribute to the same confidence budget,
-and the threshold may be negative. Its onset kernel multiplies the continuous
-per-band onset flow, subtracts its own inverted-kernel projection (0.5 by
-default), and runs through the same attack/release envelope and local-peak
-detector as the other composite detectors, with its own flux-level average and
-dedicated onset settings. A kick emits a sequenced quake impulse and drives the
+The drop detector gates its onset with the broadband RMS of the analysis
+window. The RMS passes through a fast-attack, slow-release envelope (20 ms and
+350 ms) so a short dip between beats cannot open the gate. When the envelope
+falls below the configurable gate (`GAP dB`, -18 dBFS by default), eligibility
+latches high and stays high even if the level later rises; only a composite
+onset can clear it and confirm the drop. Its onset kernel multiplies the
+continuous per-band onset flow, subtracts its own inverted-kernel projection
+(0.5 by default), and runs through the same attack/release envelope and
+local-peak detector as the other composite detectors, with its own flux-level
+average and dedicated onset settings. A kick emits a sequenced quake impulse and drives the
 kick envelope; a snare flips the model's pitch baseline every Nth detection and
 chokes the kick; a drop always changes the model, emits a vertical quake, and
 chokes the kick. Flip and quake are damped springs, so both actions overshoot
@@ -272,8 +275,8 @@ vivid colors. Theme changes crossfade the wireframe palette along with the HUD.
 Press `G` to show the light debug timeline above the bottom-right hotkey
 readout. It spans the same four-second display-rate history as the inspector
 graphs and carries five tracks: kick, snare, and hat onset marks; the drop
-eligibility latch and gap confidence line in one drop lane, with the configured
-confidence threshold drawn across it; and confirmed drop triggers. The timeline
+eligibility latch and RMS-envelope level in one drop lane, with the configured
+dBFS gate drawn across it; and confirmed drop triggers. The timeline
 redraws every display frame and is independent of the analysis panel, so `D`
 can stay closed while it runs.
 
@@ -325,9 +328,9 @@ The inspector follows the selection:
   panes, the graph inspector gives up width first instead of hiding the tree.
   The tree shows the full algebra from inputs to the property value:
   multipliers (`×`), adders (`+`), clamps, smoothing/integration, and onset
-  switches with their kernel onset flux, gap confidence, or confirmation
-  window. Analysis leaves show their live values, and onset leaves report
-  `IDLE`, `ARMED`, `TRIGGER`, or `CHOKED`. Tree rows use the same line height as
+  switches with their kernel onset flux, gap gate, or confirmation state.
+  Analysis leaves show their live values, and onset leaves report `IDLE`,
+  `ARMED`, `TRIGGER`, or `CHOKED`. Tree rows use the same line height as
   the analyzer band list.
 - every mix point is editable at runtime. Component rows carry a mix badge at
   their right edge: `+` means the term is added to the mix point and `×` means
@@ -386,7 +389,8 @@ The inspector follows the selection:
   `DROP` detector. `KICK` exposes its seven dedicated onset settings, main and
   suppression kernels, snare and drop choke times, quake multiplier, quake
   sequence length, and quake spring. `SNARE` exposes its seven dedicated onset
-  settings, main and suppression kernels, flip count, choke, and flip spring.
+  settings, main and suppression kernels, the RMS gate, flip count, choke, and
+  flip spring.
   `HAT` exposes its seven dedicated onset settings and main and suppression
   kernels.
   The editor is one overlay canvas over the 16-band onset-input spectrogram;
@@ -404,20 +408,19 @@ The inspector follows the selection:
   highlights the nearest control point or edge, with a point hitbox three times
   its drawn size. Double-click a point to delete it and double-click an edge to
   add one. The inner polygon is the high contour and the outer polygon is the
-  zero contour, with the field interpolated between them. `DROP` exposes the gap
-  window, confidence gain, confidence threshold, its seven dedicated onset
-  settings, inverted-kernel suppression, and quake multiplier, plus three
-  kernel banks (`LOW`, `HIGH`, `ONSET`). Press and drag across a drop bank to
-  draw its shape; the brush interpolates across columns and release ends the
-  stroke. Selecting `KICK`, `SNARE`, `HAT`, or `DROP` (or its `DETECTOR` leaf)
+  zero contour, with the field interpolated between them. `DROP` exposes the
+  dBFS gate, its seven dedicated onset settings, inverted-kernel suppression,
+  and quake multiplier, plus the `ONSET` kernel bank. Press and drag across the
+  bank to draw its shape; the brush interpolates across columns and release
+  ends the stroke. Selecting `KICK`, `SNARE`, `HAT`, or `DROP` (or its `DETECTOR` leaf)
   switches the inspector extension to that detector's traces. Kick, snare, and
   hat show the composite template onset flow, its median reference, and the
   threshold derived from it, plus the trigger flash. A suppression graph sits
   directly below the onset graph and draws the suppression projection and the
   weighted part actually subtracted, both growing downward from a zero line at
-  the top. Drop shows the low and high projections, their difference, window
-  confidence, latched eligibility, composite onset flow and threshold, its
-  suppression analysis, and trigger flash. The header reports the detector
+  the top. Drop shows the raw RMS and smoothed envelope against the gate, the
+  latched eligibility, composite onset flow and threshold, its suppression
+  analysis, and trigger flash. The header reports the detector
   state, onset, reference, and threshold values, hit total, and last power.
   Temporal templates persist per detector
   as the two polygons; configs written before the polygon editor load their
@@ -426,7 +429,7 @@ The inspector follows the selection:
   relative-excess settings are global. Configs with the previous per-band flux
   recipes still load and use the new defaults.
 - every inspector edit persists in the config: detector changes (the drop gap
-  threshold is also reachable through the `J` / `K` hotkeys), envelope rates,
+  gate is also reachable through the `J` / `K` hotkeys), envelope rates,
   kick decay, style values, component gains, band routing, input shaping, mix
   modes, extra inputs, base values, property mutes, solo state, and adaptive
   reference tracking. A tuned style value is applied to the current model and to

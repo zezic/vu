@@ -108,9 +108,10 @@ impl App {
             }
             Setting::DropGapThreshold => {
                 let mut detectors = self.ui.detector_settings();
+                let step = visualizer::Parameter::DropGapThreshold.step();
                 let delta = match adjustment {
-                    Adjustment::Decrease => -0.05,
-                    Adjustment::Increase => 0.05,
+                    Adjustment::Decrease => -step,
+                    Adjustment::Increase => step,
                 };
                 detectors.drop_gap_threshold = (detectors.drop_gap_threshold + delta).clamp(
                     visualizer::DROP_GAP_THRESHOLD_MIN,

@@ -119,11 +119,10 @@ mod tests {
         config.edit().detectors.kick_pattern.inner[0] = [0.4, 0.1];
         config.edit().detectors.kick_onset_suppression = 1.2;
         config.edit().detectors.snare_onset_attack = 0.01;
-        config.edit().detectors.drop_gap_window = 0.6;
-        config.edit().detectors.drop_gap_gain = 2.0;
-        config.edit().detectors.drop_gap_threshold = -0.1;
+        config.edit().detectors.snare_min_rms_db = -36.0;
+        config.edit().detectors.drop_gap_threshold = -24.0;
         config.edit().detectors.drop_onset_attack = 0.01;
-        config.edit().detectors.drop_kernels.low[0] = 0.5;
+        config.edit().detectors.drop_kernels.onset[0] = 0.5;
         config.edit().detectors.band_onset[3].abl_gain = 2.5;
         config.edit().detectors.band_onset[3].abl_amount = 3.0;
         config.edit().detectors.excess.floor = 0.02;
@@ -189,18 +188,12 @@ mod tests {
             "(detectors: (snare_onset_sensitivity: 9.0))",
             "(detectors: (snare_onset_min_threshold: 3.0))",
             "(detectors: (snare_kernel: (2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)))",
-            "(detectors: (drop_gap_window: 0.0))",
-            "(detectors: (drop_gap_window: 5.0))",
             "(detectors: (drop_gap_threshold: 1.5))",
-            "(detectors: (drop_gap_threshold: -1.5))",
-            "(detectors: (drop_gap_gain: 0.0))",
-            "(detectors: (drop_gap_gain: 20.0))",
-            "(detectors: (drop_low_lp: 0.6))",
-            "(detectors: (drop_high_lp: NaN))",
+            "(detectors: (drop_gap_threshold: -61.0))",
             "(detectors: (drop_onset_attack: 0.0))",
             "(detectors: (drop_onset_min_threshold: 0.3))",
             "(detectors: (drop_onset_min_interval: 0.0))",
-            "(detectors: (drop_low_kernel: [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))",
+            "(detectors: (drop_onset_kernel: [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))",
             "(detectors: (flip_stiffness: 0.0))",
             "(depth_fade: -0.1)",
             "(depth_fade: 1.1)",
@@ -208,7 +201,7 @@ mod tests {
             "(near_opacity: 0.005)",
             "(near_opacity: 1.1)",
             "(near_opacity: NaN)",
-            "(crease_threshold: 9.0)",
+            "(crease_threshold: -1.0)",
             "(crease_threshold: 81.0)",
             "(crease_threshold: NaN)",
             "(line_width: 0.09)",
@@ -225,7 +218,8 @@ mod tests {
             "(tuning: (showcase: (selector_attenuation: 2.0)))",
             "(tuning: (showcase: (poi_attenuation: 2.0)))",
             "(tuning: (showcase: (poi_switch_gap: 11.0)))",
-            "(tuning: (showcase: (kick_attack: 13.0)))",
+            "(tuning: (showcase: (kick_attack: 101.0)))",
+            "(tuning: (showcase: (selector_entry_kicks: 0)))",
             "(tuning: (showcase: (selector_exit_triggers: 0)))",
             "(tuning: (showcase: (selector_gap_timeout: 0.0)))",
             "(tuning: (showcase: (orbit_step_min: 1.0)))",
@@ -298,6 +292,44 @@ mod tests {
         let config: Config =
             ron::from_str("(presentation: Gauges, mode: Ppm, peak_movement: VintageFr)")?;
         assert_eq!(config, Config::default());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_showcase_settings_get_the_default_entry_kicks() -> anyhow::Result<()> {
+        let legacy: Config = ron::from_str("(tuning: (showcase: (selector_attenuation: 0.5)))")?;
+        assert_eq!(legacy.tuning.showcase.selector_attenuation, 0.5);
+        assert_eq!(
+            legacy.tuning.showcase.selector_entry_kicks,
+            crate::visualizer::ShowcaseSettings::default().selector_entry_kicks
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_gap_window_fields_load_without_overriding_the_gate() -> anyhow::Result<()> {
+        let legacy: Config = ron::from_str(
+            "(detectors: (drop_gap_window: 2.0, drop_gap_gain: 3.0, \
+             drop_gap_threshold: -0.3, \
+             drop_low_lp: 0.1, drop_high_lp: 0.2, \
+             drop_low_kernel: (0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, \
+             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), \
+             drop_high_kernel: (0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, \
+             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)))",
+        )?;
+        let defaults = crate::visualizer::DetectorSettings::default();
+        assert_eq!(
+            legacy.detectors.drop_gap_threshold,
+            defaults.drop_gap_threshold
+        );
+        assert_eq!(legacy.detectors.drop_kernels, defaults.drop_kernels);
+        Ok(())
+    }
+
+    #[test]
+    fn the_dbfs_gate_loads_without_legacy_gap_fields() -> anyhow::Result<()> {
+        let config: Config = ron::from_str("(detectors: (drop_gap_threshold: -24.0))")?;
+        assert_eq!(config.detectors.drop_gap_threshold, -24.0);
         Ok(())
     }
 
