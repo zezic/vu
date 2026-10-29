@@ -1698,7 +1698,7 @@ mod tests {
         assert!(ui.click_debug(&view, layout.scene_button.center()));
         assert_eq!(ui.debug_selection, Some(DebugSelection::Scene));
         let scene = debug::scene_analyzer_layout(&view, ui.text_scale);
-        assert_eq!(scene.sliders.len(), 23);
+        assert_eq!(scene.sliders.len(), 25);
         let slider = scene.sliders[0];
         let before = ui.visualizer.parameter_value(slider.parameter);
         assert!(ui.click_debug(&view, Point::new(slider.track.x0, slider.track.center().y)));

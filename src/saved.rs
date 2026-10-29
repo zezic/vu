@@ -229,6 +229,8 @@ mod tests {
             "(tuning: (showcase: (selector_exit_triggers: 0)))",
             "(tuning: (showcase: (selector_gap_timeout: 0.0)))",
             "(tuning: (showcase: (orbit_step_min: 1.0)))",
+            "(tuning: (showcase: (poi_switch_step_min: 1.0, poi_switch_step_max: 0.5)))",
+            "(tuning: (showcase: (poi_switch_step_max: 4.0)))",
             "(tuning: (showcase: (fov_step_min: 1.0)))",
             "(tuning: (showcase: (orbit_speed: 1.0)))",
             "(tuning: (showcase: (dolly_depth: 1.0)))",

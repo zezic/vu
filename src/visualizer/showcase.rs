@@ -31,6 +31,11 @@ const FOCUS_FILL: f32 = 0.70;
 pub const POI_ORBIT_STEP_MAX: f32 = std::f32::consts::FRAC_PI_2;
 pub const POI_ORBIT_STEP_DEFAULT: f32 = std::f32::consts::FRAC_PI_4;
 pub const POI_ORBIT_STEP_MIN_DEFAULT: f32 = std::f32::consts::PI / 9.0;
+/// The shortest path to a reseed target is at most a half turn, so a half-turn
+/// maximum leaves the switch rotation uncapped.
+pub const POI_SWITCH_STEP_MAX: f32 = std::f32::consts::PI;
+pub const POI_SWITCH_STEP_DEFAULT: f32 = POI_ORBIT_STEP_DEFAULT;
+pub const POI_SWITCH_STEP_MIN_DEFAULT: f32 = 0.0;
 pub const POI_FOV_STEP_MAX: f32 = std::f32::consts::FRAC_PI_2;
 pub const POI_FOV_STEP_DEFAULT: f32 = std::f32::consts::PI / 9.0;
 pub const POI_FOV_STEP_MIN_DEFAULT: f32 = std::f32::consts::PI / 18.0;
@@ -58,7 +63,7 @@ const ENTRY_SETTLED_VELOCITY: f32 = 0.02;
 /// Every tunable showcase parameter. Stored with the rest of the inspector
 /// tuning so the settings survive a restart.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct ShowcaseSettings {
     /// Spring for the normal-to-POI camera blend and the focus target.
     pub focus_stiffness: f32,
@@ -73,6 +78,14 @@ pub struct ShowcaseSettings {
     pub orbit_step_min: f32,
     /// Largest signed yaw or pitch target step magnitude per kick.
     pub orbit_step_max: f32,
+    /// Smallest yaw or pitch rotation applied when entering POI mode or
+    /// switching to another POI. Zero turns only as far as the new target
+    /// requires.
+    pub poi_switch_step_min: f32,
+    /// Largest yaw or pitch rotation applied when entering POI mode or
+    /// switching to another POI. A farther target is reached over several
+    /// switches instead of one swing.
+    pub poi_switch_step_max: f32,
     /// Smallest absolute FOV target change per kick.
     pub fov_step_min: f32,
     /// Largest absolute FOV target change per kick.
@@ -118,6 +131,8 @@ impl Default for ShowcaseSettings {
             kick_attack: KICK_ATTACK_DEFAULT,
             orbit_step_min: POI_ORBIT_STEP_MIN_DEFAULT,
             orbit_step_max: POI_ORBIT_STEP_DEFAULT,
+            poi_switch_step_min: POI_SWITCH_STEP_MIN_DEFAULT,
+            poi_switch_step_max: POI_SWITCH_STEP_DEFAULT,
             fov_step_min: POI_FOV_STEP_MIN_DEFAULT,
             fov_step_max: POI_FOV_STEP_DEFAULT,
             orbit_speed: POI_ORBIT_SPEED_DEFAULT,
@@ -174,6 +189,16 @@ impl ShowcaseSettings {
         )?;
         validate_value(self.fov_step_min, (0.0, POI_FOV_STEP_MAX), "FOV step min")?;
         validate_value(self.fov_step_max, (0.0, POI_FOV_STEP_MAX), "FOV step max")?;
+        validate_value(
+            self.poi_switch_step_min,
+            (0.0, POI_SWITCH_STEP_MAX),
+            "POI switch step min",
+        )?;
+        validate_value(
+            self.poi_switch_step_max,
+            (0.0, POI_SWITCH_STEP_MAX),
+            "POI switch step max",
+        )?;
         anyhow::ensure!(
             self.orbit_step_min <= self.orbit_step_max,
             "orbit step min must not exceed orbit step max"
@@ -181,6 +206,10 @@ impl ShowcaseSettings {
         anyhow::ensure!(
             self.fov_step_min <= self.fov_step_max,
             "FOV step min must not exceed FOV step max"
+        );
+        anyhow::ensure!(
+            self.poi_switch_step_min <= self.poi_switch_step_max,
+            "POI switch step min must not exceed POI switch step max"
         );
         validate_value(self.orbit_speed, (0.0, POI_ORBIT_SPEED_MAX), "orbit speed")?;
         validate_value(self.dolly_depth, (0.0, POI_DOLLY_DEPTH_MAX), "dolly depth")?;
@@ -767,24 +796,22 @@ impl Showcase {
         self.poi_switch_cooldown = self.settings.poi_switch_gap;
     }
 
+    /// Re-aims the orbit for a new POI. The target is drawn from the kick step
+    /// range, but the switch only covers a step inside the switch step range,
+    /// so a distant target is reached over consecutive switches.
     fn reseed_orbit(&mut self, rng: &mut Rng) {
-        let desired_yaw = signed_step(
-            rng,
-            self.settings.orbit_step_min,
-            self.settings.orbit_step_max,
-        );
-        let desired_pitch = signed_step(
-            rng,
-            self.settings.orbit_step_min,
-            self.settings.orbit_step_max,
-        );
-        let yaw_target = desired_yaw - self.orbit_drift_yaw;
+        let settings = &self.settings;
+        let drift = self.orbit_drift_yaw;
         let yaw = self.orbit_yaw.value();
         let pitch = self.orbit_pitch.value();
-        self.orbit_yaw
-            .set_target(yaw + wrap_angle(yaw_target - yaw));
+        let yaw_aim = signed_step(rng, settings.orbit_step_min, settings.orbit_step_max);
+        let pitch_aim = signed_step(rng, settings.orbit_step_min, settings.orbit_step_max);
+        let minimum = settings.poi_switch_step_min;
+        let maximum = settings.poi_switch_step_max;
+        let yaw_target = bounded_approach(rng, yaw + drift, yaw_aim, minimum, maximum);
+        self.orbit_yaw.set_target(yaw_target - drift);
         self.orbit_pitch
-            .set_target(pitch + wrap_angle(desired_pitch - pitch));
+            .set_target(bounded_approach(rng, pitch, pitch_aim, minimum, maximum));
     }
 
     fn reset_poi_child(&mut self) {
@@ -982,6 +1009,26 @@ fn signed_step(rng: &mut Rng, minimum: f32, maximum: f32) -> f32 {
     }
 }
 
+/// Moves `current` toward `aim` along the shortest angular path by a step
+/// inside the switch step range. When the aim is farther away than the
+/// maximum, the step only approaches it and later switches cover the rest.
+#[must_use]
+fn bounded_approach(rng: &mut Rng, current: f32, aim: f32, minimum: f32, maximum: f32) -> f32 {
+    let delta = wrap_angle(aim - current);
+    let magnitude = delta.abs().clamp(minimum, maximum);
+    let direction = if delta < 0.0 {
+        -1.0
+    } else if delta > 0.0 {
+        1.0
+    } else if rng.unit() < 0.5 {
+        // Already on the aim: the minimum step picks either side.
+        -1.0
+    } else {
+        1.0
+    };
+    current + direction * magnitude
+}
+
 /// Keeps the FOV step inside the 30-120 degree range and, where possible,
 /// chooses a direction with enough room for the minimum step.
 fn signed_fov_step(rng: &mut Rng, current: f32, minimum: f32, maximum: f32) -> f32 {
@@ -1036,6 +1083,20 @@ mod tests {
             2,
         );
         showcase
+    }
+
+    /// The rotation a reseed applies must stay inside the switch step range.
+    fn assert_switch_step(step: f32, settings: &ShowcaseSettings) {
+        let minimum = settings.poi_switch_step_min;
+        let maximum = settings.poi_switch_step_max;
+        assert!(
+            step.abs() >= minimum - 1e-5,
+            "{step} rad turns less than the switch minimum"
+        );
+        assert!(
+            step.abs() <= maximum + 1e-5,
+            "{step} rad turns more than the switch maximum"
+        );
     }
 
     #[test]
@@ -1398,40 +1459,102 @@ mod tests {
         assert_eq!(showcase.orbit_yaw.value(), 0.0);
         assert_eq!(showcase.orbit_pitch.value(), 0.0);
         assert_eq!(showcase.orbit_drift_yaw, 0.0);
-        let minimum = showcase.settings.orbit_step_min;
-        let maximum = showcase.settings.orbit_step_max;
-        assert!(showcase.orbit_yaw.target().abs() >= minimum - 1e-6);
-        assert!(showcase.orbit_yaw.target().abs() <= maximum + 1e-6);
-        assert!(showcase.orbit_pitch.target().abs() >= minimum - 1e-6);
-        assert!(showcase.orbit_pitch.target().abs() <= maximum + 1e-6);
+        let yaw_target = showcase.orbit_yaw.target();
+        let pitch_target = showcase.orbit_pitch.target();
+        assert_switch_step(yaw_target, showcase.settings());
+        assert_switch_step(pitch_target, showcase.settings());
+        let aim_minimum = showcase.settings().orbit_step_min;
+        let aim_maximum = showcase.settings().orbit_step_max;
+        assert!(yaw_target.abs() >= aim_minimum - 1e-6);
+        assert!(yaw_target.abs() <= aim_maximum + 1e-6);
+        assert!(pitch_target.abs() >= aim_minimum - 1e-6);
+        assert!(pitch_target.abs() <= aim_maximum + 1e-6);
     }
 
     #[test]
-    fn poi_switch_reseeds_orbit_within_the_step_range() {
+    fn poi_switch_rotates_the_orbit_within_the_switch_step_range() {
+        let step_minimum = 10.0_f32.to_radians();
+        let step_maximum = 15.0_f32.to_radians();
         let mut showcase = showcase();
+        showcase.settings_mut().poi_switch_step_min = step_minimum;
+        showcase.settings_mut().poi_switch_step_max = step_maximum;
         let mut rng = Rng::new(58);
         assert!(showcase.enter_focus(&mut rng, 0.75));
-        showcase.orbit_yaw.reset(std::f32::consts::TAU * 3.0 + 0.4);
-        showcase
-            .orbit_pitch
-            .reset(std::f32::consts::TAU * 2.0 + 0.8);
-        showcase.orbit_drift_yaw = 1.7;
-        let yaw_before = showcase.orbit_yaw.value();
-        let pitch_before = showcase.orbit_pitch.value();
+        showcase.orbit_yaw.reset(30.0_f32.to_radians());
+        showcase.orbit_pitch.reset(0.0);
+        showcase.orbit_drift_yaw = 0.0;
 
-        showcase.select_next_poi(&mut rng);
-        let yaw_target = showcase.orbit_yaw.target();
-        let pitch_target = showcase.orbit_pitch.target();
-        let yaw_total = wrap_angle(yaw_target + showcase.orbit_drift_yaw);
-        let pitch_total = wrap_angle(pitch_target);
-        let minimum = showcase.settings.orbit_step_min;
-        let maximum = showcase.settings.orbit_step_max;
-        assert!(yaw_total.abs() >= minimum - 1e-6);
-        assert!(yaw_total.abs() <= maximum + 1e-6);
-        assert!(pitch_total.abs() >= minimum - 1e-6);
-        assert!(pitch_total.abs() <= maximum + 1e-6);
-        assert!((yaw_target - yaw_before).abs() <= std::f32::consts::PI + 1e-6);
-        assert!((pitch_target - pitch_before).abs() <= std::f32::consts::PI + 1e-6);
+        let mut steps = Vec::new();
+        for _ in 0..40 {
+            let yaw_before = showcase.orbit_yaw.value();
+            let pitch_before = showcase.orbit_pitch.value();
+            showcase.select_next_poi(&mut rng);
+            let yaw_step = showcase.orbit_yaw.target() - yaw_before;
+            let pitch_step = showcase.orbit_pitch.target() - pitch_before;
+            assert_switch_step(yaw_step, showcase.settings());
+            assert_switch_step(pitch_step, showcase.settings());
+            steps.push(yaw_step);
+        }
+        assert!(
+            steps.iter().any(|step| *step < 0.0),
+            "the switch turns both ways"
+        );
+        assert!(
+            steps.iter().any(|step| *step > 0.0),
+            "the switch turns both ways"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|step| (step.abs() - step_minimum).abs() < 1e-5),
+            "a small correction is raised to the switch minimum"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|step| (step.abs() - step_maximum).abs() < 1e-5),
+            "a distant target is capped at the switch maximum"
+        );
+    }
+
+    #[test]
+    fn poi_switch_unwinds_a_distant_orbit_over_several_switches() {
+        let step_maximum = 30.0_f32.to_radians();
+        let mut showcase = showcase();
+        showcase.settings_mut().orbit_step_min = 0.0;
+        showcase.settings_mut().orbit_step_max = 0.0;
+        showcase.settings_mut().poi_switch_step_min = 10.0_f32.to_radians();
+        showcase.settings_mut().poi_switch_step_max = step_maximum;
+        let mut rng = Rng::new(71);
+        assert!(showcase.enter_focus(&mut rng, 0.75));
+        showcase.orbit_yaw.reset(170.0_f32.to_radians());
+
+        let mut steps = Vec::new();
+        for _ in 0..8 {
+            if showcase.orbit_yaw.value().abs() <= 1e-5 {
+                break;
+            }
+            let yaw_before = showcase.orbit_yaw.value();
+            showcase.select_next_poi(&mut rng);
+            let yaw_target = showcase.orbit_yaw.target();
+            let yaw_step = yaw_target - yaw_before;
+            assert_switch_step(yaw_step, showcase.settings());
+            assert!(yaw_step <= 0.0, "the orbit turns toward the target");
+            steps.push(yaw_step);
+            showcase.orbit_yaw.reset(yaw_target);
+        }
+        assert!(
+            steps.len() >= 5,
+            "the accumulated rotation is spread over several switches"
+        );
+        assert!(
+            (steps[0].abs() - step_maximum).abs() < 1e-5,
+            "the first switch takes only the maximum step"
+        );
+        assert!(
+            showcase.orbit_yaw.value().abs() <= 1e-5,
+            "successive switches recenter the orbit on the target"
+        );
     }
 
     #[test]
@@ -1675,6 +1798,11 @@ mod tests {
             ..ShowcaseSettings::default()
         };
         assert!(fov.validate().is_err());
+        let switch = ShowcaseSettings {
+            poi_switch_step_min: std::f32::consts::PI,
+            ..ShowcaseSettings::default()
+        };
+        assert!(switch.validate().is_err());
     }
 
     #[test]

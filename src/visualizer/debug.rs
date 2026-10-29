@@ -2198,6 +2198,8 @@ pub(super) fn scene_analyzer_layout(view: &View, text_scale: VisualizerTextScale
         Parameter::KickAttack,
         Parameter::OrbitStepMin,
         Parameter::OrbitStepMax,
+        Parameter::PoiSwitchStepMin,
+        Parameter::PoiSwitchStepMax,
         Parameter::FovStepMin,
         Parameter::FovStepMax,
         Parameter::OrbitSpeed,

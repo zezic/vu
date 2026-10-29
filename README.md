@@ -70,10 +70,16 @@ interest, the normal model motion fades out over its own spring, and each kick
 adds a signed random yaw and pitch step while changing FOV by a random step.
 Both use a signed magnitude between a minimum and a maximum (`ORBIT MIN`
 default 20 deg / `ORBIT MAX` 45 deg, and `FOV MIN` default 10 deg / `FOV MAX`
-20 deg). The same range seeds a fresh signed orbit when entering POI mode and when
-switching to another POI: the new target is chosen within the range and placed on the shortest
-angular path from the current angle, so accumulated rotation is not carried
-into the next POI. The FOV stays inside 30-120 deg. The FOV and camera distance move
+20 deg). The same range seeds a fresh signed orbit target when entering POI
+mode and when switching to another POI: the target is chosen within the range
+and lies on the shortest angular path from the current angle, so accumulated
+rotation is not carried into the next POI. The switch turns the camera toward
+that target by a rotation between `SWITCH MIN` (default 0 deg) and
+`SWITCH MAX` (default 45 deg) instead of swinging the whole way: a target
+farther away than the maximum is reached over successive switches, and a
+minimum above zero gives every switch at least that much rotation. A
+`SWITCH MAX` of 180 deg leaves the switch rotation uncapped. The FOV stays
+inside 30-120 deg. The FOV and camera distance move
 together, so the POI keeps its size while the surrounding model undergoes a
 dolly zoom. `KICK ATTACK` (default 4/s) adds an initial velocity to the yaw,
 pitch, and FOV springs when a kick sets a new target, so the move starts
@@ -104,8 +110,8 @@ resolvable POIs, normal mode remains. A gap-confidence entry always returns to
 normal mode and resets the cycle. All cycle and spring settings live in the
 analyzer panel: `SNARE` holds the two counters, and the `SCENE` panel holds
 separate motion, focus, orbit, and dolly springs, the slow orbit/dolly controls,
-the per-kick step ranges, the kick attack, and the selector timing and
-attenuation controls.
+the per-kick step and POI switch ranges, the kick attack, and the selector
+timing and attenuation controls.
 
 The selector effect is available only in normal mode. A kick enables it. While
 active it keeps one mesh at full opacity, fades the other meshes to the

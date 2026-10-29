@@ -2343,6 +2343,8 @@ impl Visualizer {
             Parameter::KickAttack => self.showcase.settings().kick_attack,
             Parameter::OrbitStepMin => self.showcase.settings().orbit_step_min,
             Parameter::OrbitStepMax => self.showcase.settings().orbit_step_max,
+            Parameter::PoiSwitchStepMin => self.showcase.settings().poi_switch_step_min,
+            Parameter::PoiSwitchStepMax => self.showcase.settings().poi_switch_step_max,
             Parameter::FovStepMin => self.showcase.settings().fov_step_min,
             Parameter::FovStepMax => self.showcase.settings().fov_step_max,
             Parameter::OrbitSpeed => self.showcase.settings().orbit_speed,
@@ -2484,6 +2486,14 @@ impl Visualizer {
             Parameter::OrbitStepMax => {
                 let minimum = self.showcase.settings().orbit_step_min;
                 self.showcase.settings_mut().orbit_step_max = value.max(minimum);
+            }
+            Parameter::PoiSwitchStepMin => {
+                let maximum = self.showcase.settings().poi_switch_step_max;
+                self.showcase.settings_mut().poi_switch_step_min = value.min(maximum);
+            }
+            Parameter::PoiSwitchStepMax => {
+                let minimum = self.showcase.settings().poi_switch_step_min;
+                self.showcase.settings_mut().poi_switch_step_max = value.max(minimum);
             }
             Parameter::FovStepMin => {
                 let maximum = self.showcase.settings().fov_step_max;
@@ -5942,6 +5952,12 @@ mod tests {
         let focus = Parameter::FocusStiffness;
         visualizer.set_parameter(focus, 1000.0);
         assert_eq!(visualizer.parameter_value(focus), SPRING_STIFFNESS_MAX);
+        let switch_step = Parameter::PoiSwitchStepMax;
+        visualizer.set_parameter(switch_step, 10.0);
+        assert_eq!(
+            visualizer.parameter_value(switch_step),
+            showcase::POI_SWITCH_STEP_MAX
+        );
         let fade = Parameter::SelectorFadeIn;
         visualizer.set_parameter(fade, 100.0);
         assert_eq!(
@@ -5987,6 +6003,7 @@ mod tests {
         visualizer.set_parameter(Parameter::SelectorExitTriggers, 7.0);
         visualizer.set_parameter(Parameter::SelectorGapTimeout, 12.0);
         visualizer.set_parameter(Parameter::OrbitStepMax, 30.0_f32.to_radians());
+        visualizer.set_parameter(Parameter::PoiSwitchStepMax, 20.0_f32.to_radians());
         visualizer.set_parameter(Parameter::FovStepMax, 12.0_f32.to_radians());
         visualizer.set_parameter(Parameter::OrbitSpeed, 8.0_f32.to_radians());
         visualizer.set_parameter(Parameter::DollyDepth, 0.2);

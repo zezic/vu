@@ -828,6 +828,8 @@ pub enum Parameter {
     KickAttack,
     OrbitStepMin,
     OrbitStepMax,
+    PoiSwitchStepMin,
+    PoiSwitchStepMax,
     FovStepMin,
     FovStepMax,
     OrbitSpeed,
@@ -898,6 +900,8 @@ impl Parameter {
             Self::KickAttack => "KICK ATTACK",
             Self::OrbitStepMin => "ORBIT MIN",
             Self::OrbitStepMax => "ORBIT MAX",
+            Self::PoiSwitchStepMin => "SWITCH MIN",
+            Self::PoiSwitchStepMax => "SWITCH MAX",
             Self::FovStepMin => "FOV MIN",
             Self::FovStepMax => "FOV MAX",
             Self::OrbitSpeed => "ORBIT SPEED",
@@ -982,6 +986,9 @@ impl Parameter {
                 super::showcase::KICK_ATTACK_MAX,
             ),
             Self::OrbitStepMin | Self::OrbitStepMax => (0.0, super::showcase::POI_ORBIT_STEP_MAX),
+            Self::PoiSwitchStepMin | Self::PoiSwitchStepMax => {
+                (0.0, super::showcase::POI_SWITCH_STEP_MAX)
+            }
             Self::FovStepMin | Self::FovStepMax => (0.0, super::showcase::POI_FOV_STEP_MAX),
             Self::OrbitSpeed => (0.0, super::showcase::POI_ORBIT_SPEED_MAX),
             Self::DollyDepth => (0.0, super::showcase::POI_DOLLY_DEPTH_MAX),
@@ -1072,9 +1079,12 @@ impl Parameter {
             Self::SelectorFadeIn | Self::SelectorFadeOut | Self::SelectorGapTimeout => 0.005,
             Self::SelectorExitTriggers => 1.0,
             Self::KickAttack => 0.5,
-            Self::OrbitStepMin | Self::OrbitStepMax | Self::FovStepMin | Self::FovStepMax => {
-                std::f32::consts::PI / 180.0
-            }
+            Self::OrbitStepMin
+            | Self::OrbitStepMax
+            | Self::PoiSwitchStepMin
+            | Self::PoiSwitchStepMax
+            | Self::FovStepMin
+            | Self::FovStepMax => std::f32::consts::PI / 180.0,
             Self::OrbitSpeed => std::f32::consts::PI / 360.0,
             Self::DollyDepth => 0.01,
             Self::DollyPeriod => 0.5,
@@ -1118,9 +1128,12 @@ impl Parameter {
             }
             Self::SelectorExitTriggers => format!("{value:.0}"),
             Self::KickAttack => format!("{value:.1}/s"),
-            Self::OrbitStepMin | Self::OrbitStepMax | Self::FovStepMin | Self::FovStepMax => {
-                format!("{:.0}deg", value.to_degrees())
-            }
+            Self::OrbitStepMin
+            | Self::OrbitStepMax
+            | Self::PoiSwitchStepMin
+            | Self::PoiSwitchStepMax
+            | Self::FovStepMin
+            | Self::FovStepMax => format!("{:.0}deg", value.to_degrees()),
             Self::OrbitSpeed => format!("{:.1}deg/s", value.to_degrees()),
             Self::DollyDepth => format!("{:.0}%", value * 100.0),
             Self::DollyPeriod => format!("{:.1}s", value),
