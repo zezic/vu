@@ -198,7 +198,7 @@ mod tests {
     fn bundled_catalog_deserializes() -> anyhow::Result<()> {
         let catalog = Catalog::load()?;
         assert!(!catalog.schema_version.is_empty());
-        assert_eq!(catalog.weapons.len(), 32);
+        assert_eq!(catalog.weapons.len(), 31);
         assert!(!catalog.comedy_spec.styles.is_empty());
 
         let weapon = &catalog.weapons["smg_p90"];

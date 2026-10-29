@@ -107,9 +107,13 @@ def label_parts(geometry, profile):
     for part, identifiers in profile['components'].items():
         assert all(np.any(components == identifier) for identifier in identifiers), part
         labels[np.isin(components, identifiers)] = part
-    centers = geometry.vertices[geometry.faces].mean(axis=1)
+    triangles = geometry.vertices[geometry.faces]
+    centers = triangles.mean(axis=1)
     for selection in profile.get('regions', []):
-        mask = inside(centers, selection['bounds'])
+        if selection.get('contained_faces', False):
+            mask = inside(triangles.reshape(-1, 3), selection['bounds']).reshape(-1, 3).all(axis=1)
+        else:
+            mask = inside(centers, selection['bounds'])
         if 'components' in selection:
             mask &= np.isin(components, selection['components'])
         assert np.any(mask), selection
@@ -152,6 +156,52 @@ def create_marker(name, points):
     return obj
 
 
+def marker_points(selection_geometry, export_geometry, components, selection):
+    triangles = selection_geometry.vertices[selection_geometry.faces]
+    mask = np.ones(len(triangles), dtype=bool)
+    if 'components' in selection:
+        mask &= np.isin(components, selection['components'])
+    bounds = selection['bounds']
+    if not selection.get('clip_to_bounds', False):
+        mask &= inside(triangles.mean(axis=1), bounds)
+        assert np.any(mask), selection
+        return export_geometry.vertices[np.unique(selection_geometry.faces[mask])]
+
+    planes = []
+    for axis_name, (low, high) in bounds.items():
+        axis = 'xyz'.index(axis_name)
+        if low is not None:
+            mask &= triangles[:, :, axis].max(axis=1) >= low
+            planes.append((axis, low, 1))
+        if high is not None:
+            mask &= triangles[:, :, axis].min(axis=1) <= high
+            planes.append((axis, high, -1))
+    points = []
+    exported_triangles = export_geometry.vertices[export_geometry.faces[mask]]
+    for triangle, exported in zip(triangles[mask], exported_triangles):
+        polygon = list(zip(triangle.astype(np.float64), exported.astype(np.float64)))
+        for axis, boundary, sign in planes:
+            if not polygon:
+                break
+            clipped = []
+            previous, previous_exported = polygon[-1]
+            previous_inside = sign * (previous[axis] - boundary) >= 0
+            for vertex, exported_vertex in polygon:
+                vertex_inside = sign * (vertex[axis] - boundary) >= 0
+                if previous_inside != vertex_inside:
+                    fraction = (boundary - previous[axis]) / (vertex[axis] - previous[axis])
+                    clipped.append((previous + fraction * (vertex - previous),
+                                    previous_exported + fraction * (exported_vertex - previous_exported)))
+                if vertex_inside:
+                    clipped.append((vertex, exported_vertex))
+                previous, previous_inside = vertex, vertex_inside
+                previous_exported = exported_vertex
+            polygon = clipped
+        points.extend(exported_vertex for _, exported_vertex in polygon)
+    assert points, selection
+    return np.array(points)
+
+
 def build_scene(geometry, selection_geometry, labels, components, profile):
     clear_scene()
     objects = {}
@@ -173,14 +223,9 @@ def build_scene(geometry, selection_geometry, labels, components, profile):
         else:
             objects[part] = create_mesh(part, geometry, mask)
 
-    centers = selection_geometry.vertices[selection_geometry.faces].mean(axis=1)
     for name, selection in profile.get('anchors', {}).items():
         assert name not in objects, name
-        mask = inside(centers, selection['bounds'])
-        if 'components' in selection:
-            mask &= np.isin(components, selection['components'])
-        assert np.any(mask), (name, selection)
-        points = geometry.vertices[np.unique(geometry.faces[mask])]
+        points = marker_points(selection_geometry, geometry, components, selection)
         objects[name] = create_marker(name, points)
 
     if profile.get('muzzle', True):
@@ -260,6 +305,7 @@ def main():
     parser.add_argument('--glb-dir', type=Path, required=True)
     parser.add_argument('--reference-dir', type=Path, required=True)
     parser.add_argument('--sourceio-dir', type=Path)
+    parser.add_argument('--models', nargs='+', help='Rebuild only these model IDs; keep other assets and report entries')
     args = parser.parse_args(sys.argv[sys.argv.index('--') + 1:])
     assert args.blend_dir.resolve() != args.reference_dir.resolve(), 'Keep the authored references in their own directory'
     args.blend_dir.mkdir(parents=True, exist_ok=True)
@@ -271,13 +317,20 @@ def main():
                  if path.is_dir() and path.name.lower().replace('-', '').startswith('sourceio'))
     sys.path.insert(0, str(addon.parent))
     addon_utils.enable(addon.name, default_set=False, persistent=False)
-    sources = {path.stem.removeprefix('w_'): path.resolve() for path in sorted(args.source_dir.glob('w_*.mdl'))}
+    excluded = {'eq_eholster_elite'}
+    sources = {path.stem.removeprefix('w_'): path.resolve() for path in sorted(args.source_dir.glob('w_*.mdl'))
+               if path.stem.removeprefix('w_') not in excluded}
     references = {'pist_deagle', 'rif_ak47'}
     assert set(sources) == set(profiles) | references
+    selected = set(args.models) if args.models else set(sources)
+    assert selected <= set(sources), selected - set(sources)
+    needed = selected - references
+    needed |= {profiles[name]['selection_reference'] for name in selected - references
+               if 'selection_reference' in profiles[name]}
     geometries = {}
     hashes = {}
     for name, path in sources.items():
-        if name in references:
+        if name not in needed:
             continue
         hashes[name] = source_hash(path)
         assert hashes[name] == profiles[name]['source_sha256'], f'{name}: part recipe belongs to another source model'
@@ -290,8 +343,15 @@ def main():
         if logger._bpy_logger is not None:
             logger._bpy_logger.setStream(sys.stdout)
 
-    report = {}
+    report_path = args.blend_dir / 'preparation_report.json'
+    report = json.loads(report_path.read_text()) if args.models and report_path.exists() else {}
+    for name in excluded:
+        (args.blend_dir / f'{name}.blend').unlink(missing_ok=True)
+        (args.glb_dir / f'{name}.glb').unlink(missing_ok=True)
+        report.pop(name, None)
     for name, profile in profiles.items():
+        if name not in selected:
+            continue
         geometry = geometries[name]
         selection_geometry = geometries[profile.get('selection_reference', name)]
         assert np.array_equal(geometry.faces, selection_geometry.faces), name
@@ -303,15 +363,20 @@ def main():
         save_blend(blend_path)
         export_glb(glb_path)
         expected = {poi['anchor']['name'] for poi in catalog['weapons'].get(name, {}).get('poi', [])}
+        missing = expected - set(objects)
         report[name] = {
             'source_sha256': hashes[name], 'triangles': len(geometry.faces),
             'mesh_objects': sum(obj.type == 'MESH' for obj in bpy.context.scene.objects),
-            'named_parts': sorted(objects), 'missing_catalog_anchors': sorted(expected - set(objects)),
+            'named_parts': sorted(objects), 'missing_catalog_anchors': sorted(missing),
+            'poi_bindings': {name: {'type': 'mesh' if objects[name].type == 'MESH' else 'region',
+                                    'note': profile.get('binding_notes', {}).get(name)}
+                             for name in sorted(expected & set(objects))},
+            'catalog_adjustments': profile.get('catalog_adjustments', {}),
             'blend_bytes': blend_path.stat().st_size, 'glb_bytes': glb_path.stat().st_size,
         }
         print('PREPARED', name, report[name]['mesh_objects'], 'meshes', flush=True)
 
-    for name in sorted(references):
+    for name in sorted(references & selected):
         bpy.ops.wm.open_mainfile(filepath=str((args.reference_dir / f'{name}.blend').resolve()))
         strip_non_geometry()
         path = args.blend_dir / f'{name}.blend'
@@ -320,7 +385,7 @@ def main():
                         'original_blend_bytes': (args.reference_dir / f'{name}.blend').stat().st_size,
                         'mesh_objects': sum(obj.type == 'MESH' for obj in bpy.context.scene.objects)}
         print('COMPACTED', name, path.stat().st_size, 'bytes', flush=True)
-    (args.blend_dir / 'preparation_report.json').write_text(json.dumps(report, indent=2) + '\n')
+    report_path.write_text(json.dumps(report, indent=2) + '\n')
 
 
 if __name__ == '__main__':

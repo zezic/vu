@@ -122,8 +122,9 @@ The selector effect is available only in normal mode. `SEL ENTRY N` kicks
 (default 4) enable it; the entry count restarts whenever the selector turns on
 or off. While active it keeps one mesh at full opacity, fades the other meshes
 to the configured attenuation (`SEL ATTEN`), and has a 25% chance to color the
-selected mesh differently. Entering the selector always returns the model's
-flip spring to an upright pose. Kicks and snares count toward an exit threshold
+selected mesh differently. Entering the selector returns the model's flip
+spring to an upright pose and holds the effect off until the model has
+finished turning upright. Kicks and snares count toward an exit threshold
 (`SEL EXIT N`, default 20); the trigger that reaches the threshold turns the
 selector off. A drop or a model change turns it off immediately. A gap-gate
 entry no longer turns it off: the selector turns off only after the gap gate
@@ -131,14 +132,16 @@ stays armed continuously for `SEL GAP s` (default 10 s), and clearing the gap
 resets that timer. The `HAT` detector only changes the
 selected mesh and never exits the selector; in POI mode it advances the
 full-opacity child of a mesh POI instead. Snares do not flip the model while
-the selector is active; the snare that reaches the exit threshold also does not
-add a flip. The `HAT` detector has its own pattern editor and is independent of
-the snare and drop detectors.
+the selector is entering or active; the snare that reaches the exit threshold
+also does not add a flip. The `HAT` detector has its own pattern editor and is
+independent of the snare and drop detectors.
 
 Edge opacity follows vertex depth: nearest vertices use the adjustable
 near-opacity floor (60% by default, brightened by line energy), farther vertices
 fade by the adjustable depth-fade strength (50% by default), and every edge
-interpolates its opacity between those endpoints. The model composites
+interpolates its opacity between those endpoints. While a POI is focused the
+fade volume widens around it to three POI diameters, capped at the model
+diameter. The model composites
 additively on dark themes and multiplicatively on light themes; zero or full
 color components are nudged by one 8-bit step so every channel contributes.
 

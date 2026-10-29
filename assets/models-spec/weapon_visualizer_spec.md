@@ -4,7 +4,7 @@
 
 Drive a 3D inspection app with real-world-inspired numeric weapon attributes, semantic points of interest (POIs), and deliberately ridiculous micro-scenes drawn from three treatments: **MLG montage parodies**, **Surreal Memes**, and **Troll Facts** (a short deadpan alternative to Troll Physics). Each joke may use one style or combine styles. The joke can be in the edit; a caption need not itself contain a punchline.
 
-The companion data file is `weapon_visualizer_meme_spec.json`. It contains all **32 original IDs**, **10 POIs per asset**, and **320 authored caption beats**, plus presentation cues. The third style uses deliberately stupid statements, not faux-scientific instructions. These are jokes, not real engineering claims.
+The companion data file is `weapon_visualizer_meme_spec.json`. It contains **31 included IDs**, **10 POIs per asset**, and **310 authored caption beats**, plus presentation cues. The third style uses deliberately stupid statements, not faux-scientific instructions. These are jokes, not real engineering claims.
 
 ## Creative rulebook
 
@@ -119,7 +119,7 @@ Use richer structs for the other fields and a style enum if the schema is frozen
 
 ## QA acceptance checks
 
-1. Exactly 32 expected IDs, 10 POIs for each, 320 or more joke beats total.
+1. Exactly 31 expected IDs, 10 POIs for each, 310 or more joke beats total.
 2. Every joke has nonempty `styles`, `text`, and a stable unique `id`.
 3. Every `styles[]` entry belongs to the three allowed IDs.
 4. No joke field is treated as numeric specification data.

@@ -317,8 +317,9 @@ pub struct SnareOutcome {
 /// Result of a kick trigger for the normal-mode selector.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct KickOutcome {
-    /// The selector turned on, so the model must return to its upright pose.
-    pub selector_entered: bool,
+    /// A selector entry is due, so the model must return to its upright pose.
+    /// The effect turns on once the model is upright.
+    pub selector_entry: bool,
 }
 
 /// The camera parameters produced by the showcase springs.
@@ -544,17 +545,20 @@ impl Showcase {
         normal_fov: f32,
     ) -> SnareOutcome {
         // A snare counts toward the selector exit threshold, and while the
-        // selector is still active it must not also start a flip.
+        // selector is active or entering it must not also start a flip.
         let selector_active = self.selector.active;
         if self.mode == ShowcaseMode::Normal && selector_active {
             self.selector.record_trigger(&self.settings);
         }
+        // A pending entry also suppresses the flip so the model can settle
+        // upright and the selector can turn on.
+        let selector_engaged = selector_active || self.selector.entry_pending;
         let flips_before_poi = flips_before_poi.max(1);
         let switches_before_normal = switches_before_normal.max(1);
         match self.mode {
             ShowcaseMode::Poi => {
                 if self.poi_switch_cooldown > 0.0 {
-                    self.kick(rng);
+                    self.kick(rng, true);
                     return SnareOutcome { flip: false };
                 }
                 if self.poi_switches < switches_before_normal {
@@ -569,12 +573,12 @@ impl Showcase {
                 if self.normal_flips < flips_before_poi {
                     self.normal_flips += 1;
                     SnareOutcome {
-                        flip: !selector_active,
+                        flip: !selector_engaged,
                     }
                 } else if self.pois.is_empty() {
                     self.normal_flips = 0;
                     SnareOutcome {
-                        flip: !selector_active,
+                        flip: !selector_engaged,
                     }
                 } else {
                     self.normal_flips = 0;
@@ -589,7 +593,10 @@ impl Showcase {
         self.gap_armed = armed;
     }
 
-    pub fn kick(&mut self, rng: &mut Rng) -> KickOutcome {
+    /// Handles a kick trigger. `model_upright` tells the selector whether it
+    /// can turn on now; when false the entry stays armed until the model
+    /// finishes its flip.
+    pub fn kick(&mut self, rng: &mut Rng, model_upright: bool) -> KickOutcome {
         if self.mode == ShowcaseMode::Poi {
             self.selector.deactivate();
             // The entry owns the camera until it settles. Kicks during the
@@ -628,13 +635,28 @@ impl Showcase {
             self.selector.record_trigger(&self.settings);
             return KickOutcome::default();
         }
+        if self.selector.entry_pending {
+            return KickOutcome::default();
+        }
         if self.selector.record_entry_kick(&self.settings) {
-            self.selector.activate(rng, self.part_count, &self.settings);
+            if model_upright {
+                self.selector.activate(rng, self.part_count, &self.settings);
+            } else {
+                self.selector.entry_pending = true;
+            }
             return KickOutcome {
-                selector_entered: true,
+                selector_entry: true,
             };
         }
         KickOutcome::default()
+    }
+
+    /// Turns on the selector entry armed by the kick threshold once the model
+    /// is upright. Does nothing when no entry is pending.
+    pub fn activate_pending_selector(&mut self, rng: &mut Rng) {
+        if self.selector.entry_pending {
+            self.selector.activate(rng, self.part_count, &self.settings);
+        }
     }
 
     pub fn hat(&mut self, rng: &mut Rng) {
@@ -968,6 +990,9 @@ impl Showcase {
 #[derive(Default)]
 struct SelectorState {
     active: bool,
+    /// The kick threshold was reached while the model was flipping. The
+    /// effect waits here until the model finishes upright.
+    entry_pending: bool,
     progress: f32,
     selected: Option<u16>,
     alternate_color: bool,
@@ -982,6 +1007,7 @@ impl SelectorState {
             self.selected = pick_mesh(rng, None, part_count);
         }
         self.active = true;
+        self.entry_pending = false;
         self.entry_kicks = 0;
         self.exit_triggers = 0;
         self.gap_elapsed = 0.0;
@@ -990,6 +1016,7 @@ impl SelectorState {
 
     fn deactivate(&mut self) {
         self.active = false;
+        self.entry_pending = false;
         self.alternate_color = false;
         self.entry_kicks = 0;
         self.gap_elapsed = 0.0;
@@ -1228,21 +1255,21 @@ mod tests {
             2,
         );
         let mut rng = Rng::new(11);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(showcase.selector_active());
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(
             showcase.selector_active(),
             "one trigger is not enough with N=2"
         );
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(!showcase.selector_active());
 
         for _ in 0..3 {
             showcase.snare(&mut rng, 1, 2, 0.75);
         }
         assert_eq!(showcase.mode(), ShowcaseMode::Poi);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(!showcase.selector_active());
     }
 
@@ -1262,28 +1289,72 @@ mod tests {
         );
         let mut rng = Rng::new(17);
         for _ in 0..2 {
-            assert!(!showcase.kick(&mut rng).selector_entered);
+            assert!(!showcase.kick(&mut rng, true).selector_entry);
             assert!(!showcase.selector_active());
         }
-        assert!(showcase.kick(&mut rng).selector_entered);
+        assert!(showcase.kick(&mut rng, true).selector_entry);
         assert!(showcase.selector_active());
         for _ in 0..2 {
-            assert!(!showcase.kick(&mut rng).selector_entered);
+            assert!(!showcase.kick(&mut rng, true).selector_entry);
         }
         assert!(!showcase.selector_active());
         for _ in 0..2 {
-            assert!(!showcase.kick(&mut rng).selector_entered);
+            assert!(!showcase.kick(&mut rng, true).selector_entry);
             assert!(!showcase.selector_active());
         }
-        assert!(showcase.kick(&mut rng).selector_entered);
+        assert!(showcase.kick(&mut rng, true).selector_entry);
         assert!(showcase.selector_active());
+    }
+
+    #[test]
+    fn selector_entry_waits_for_an_upright_model() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_entry_kicks: 2,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![
+                FocusPoi::new("muzzle".to_owned(), anchor(0.8, None), false),
+                FocusPoi::new("slide".to_owned(), anchor(0.0, Some(0)), false),
+            ],
+            2,
+        );
+        let mut rng = Rng::new(23);
+        assert!(!showcase.kick(&mut rng, false).selector_entry);
+        assert!(showcase.kick(&mut rng, false).selector_entry);
+        assert!(
+            !showcase.selector_active(),
+            "the entry waits for the model to become upright"
+        );
+        assert!(
+            !showcase.kick(&mut rng, false).selector_entry,
+            "extra kicks do not re-arm the pending entry"
+        );
+        assert!(!showcase.selector_active());
+        showcase.activate_pending_selector(&mut rng);
+        assert!(showcase.selector_active());
+    }
+
+    #[test]
+    fn pending_selector_entry_suppresses_the_flip() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_entry_kicks: 1,
+            ..ShowcaseSettings::default()
+        });
+        let mut rng = Rng::new(29);
+        assert!(showcase.kick(&mut rng, false).selector_entry);
+        assert!(!showcase.selector_active());
+        assert!(
+            !showcase.snare(&mut rng, 1, 2, 0.75).flip,
+            "a pending entry must not flip the model"
+        );
     }
 
     #[test]
     fn hat_changes_the_selected_mesh() {
         let mut showcase = showcase();
         let mut rng = Rng::new(5);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         let first = showcase.selected_mesh();
         assert!(first.is_some());
         showcase.hat(&mut rng);
@@ -1360,7 +1431,7 @@ mod tests {
             2,
         );
         let mut rng = Rng::new(32);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(showcase.selector_active());
 
         let first = showcase.snare(&mut rng, 5, 2, 0.75);
@@ -1391,7 +1462,7 @@ mod tests {
             2,
         );
         let mut rng = Rng::new(8);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(showcase.selector_active());
         showcase.set_gap_armed(true);
         for _ in 0..119 {
@@ -1420,7 +1491,7 @@ mod tests {
             2,
         );
         let mut rng = Rng::new(9);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         showcase.set_gap_armed(true);
         for _ in 0..90 {
             showcase.advance(1.0 / 60.0);
@@ -1441,7 +1512,7 @@ mod tests {
     fn gap_entry_does_not_exit_the_selector_and_drop_does() {
         let mut showcase = showcase();
         let mut rng = Rng::new(10);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         showcase.gap_entry();
         assert!(
             showcase.selector_active(),
@@ -1459,7 +1530,7 @@ mod tests {
         for _ in 0..180 {
             showcase.advance(1.0 / 60.0);
         }
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         for _ in 0..60 {
             showcase.advance(1.0 / 60.0);
         }
@@ -1843,7 +1914,7 @@ mod tests {
             let yaw_before = showcase.orbit_yaw.value();
             let pitch_before = showcase.orbit_pitch.value();
             let fov_before = showcase.fov.value();
-            showcase.kick(&mut rng);
+            showcase.kick(&mut rng, true);
             let yaw_step = showcase.orbit_yaw.target() - yaw_before;
             let pitch_step = showcase.orbit_pitch.target() - pitch_before;
             let fov_step = showcase.fov.target() - fov_before;
@@ -1883,7 +1954,7 @@ mod tests {
         let yaw_before = showcase.orbit_yaw.value();
         let pitch_before = showcase.orbit_pitch.value();
         let fov_before = showcase.fov.value();
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(
             (showcase.orbit_yaw.velocity() - (showcase.orbit_yaw.target() - yaw_before) * 4.0)
                 .abs()
@@ -1925,13 +1996,13 @@ mod tests {
 
         let high = 120.0_f32.to_radians() - 1.0_f32.to_radians();
         showcase.fov.reset(high);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(showcase.fov.target() < high);
         assert!(high - showcase.fov.target() >= fov_min - 1e-6);
 
         let low = 30.0_f32.to_radians() + 1.0_f32.to_radians();
         showcase.fov.reset(low);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(showcase.fov.target() > low);
         assert!(showcase.fov.target() - low >= fov_min - 1e-6);
     }
@@ -1967,7 +2038,7 @@ mod tests {
         let orbit_target = showcase.orbit_yaw.target();
         let fov_target = showcase.fov.target();
 
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert_eq!(showcase.orbit_yaw.target(), orbit_target);
         assert_eq!(showcase.fov.target(), fov_target);
 
@@ -1975,7 +2046,7 @@ mod tests {
             showcase.advance(1.0 / 60.0);
         }
         assert!(showcase.entry_settled);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!((showcase.orbit_yaw.target() - orbit_target).abs() > 1e-6);
         assert!((showcase.fov.target() - fov_target).abs() > 1e-6);
     }
@@ -1988,7 +2059,7 @@ mod tests {
         for _ in 0..180 {
             showcase.advance(1.0 / 60.0);
         }
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         for _ in 0..60 {
             showcase.advance(1.0 / 60.0);
         }
@@ -2054,7 +2125,7 @@ mod tests {
             2,
         );
         let mut rng = Rng::new(2);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(showcase.selector_active());
         for _ in 0..18 {
             showcase.advance(1.0 / 60.0);
@@ -2062,7 +2133,7 @@ mod tests {
         let active = showcase.frame().selector;
         assert_eq!(active.selected, showcase.selected_mesh());
         assert!(active.attenuation < 0.2);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(!showcase.selector_active());
         for _ in 0..3 {
             showcase.advance(1.0 / 60.0);
@@ -2085,7 +2156,7 @@ mod tests {
             2,
         );
         let mut rng = Rng::new(31);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(showcase.selector_active());
 
         let outcome = showcase.snare(&mut rng, 5, 2, 0.75);
@@ -2113,7 +2184,7 @@ mod tests {
             2,
         );
         let mut rng = Rng::new(4);
-        showcase.kick(&mut rng);
+        showcase.kick(&mut rng, true);
         assert!(showcase.selector_active());
         showcase.snare(&mut rng, 4, 2, 0.75);
         assert!(!showcase.selector_active());

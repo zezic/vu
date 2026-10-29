@@ -785,6 +785,26 @@ mod tests {
     }
 
     #[test]
+    fn every_catalog_poi_resolves_to_a_bundled_model_anchor() -> anyhow::Result<()> {
+        let catalog = crate::weapon::Catalog::load()?;
+        let models = ModelSet::load()?;
+        for (id, weapon) in &catalog.weapons {
+            let model = models
+                .models
+                .iter()
+                .find(|model| &model.id == id)
+                .with_context(|| format!("catalog model {id} is bundled"))?;
+            for poi in &weapon.poi {
+                let anchor = model
+                    .anchor(&poi.anchor.name)
+                    .with_context(|| format!("{id}/{} resolves to {}", poi.id, poi.anchor.name))?;
+                assert!(anchor.radius.is_finite() && anchor.radius > 0.0);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn deagle_exposes_named_anchors_and_mesh_parts() -> anyhow::Result<()> {
         let path = model_paths()?
             .into_iter()

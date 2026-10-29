@@ -74,6 +74,13 @@ const QUAKE_PIXELS: f32 = 24.0;
 /// sine/cosine frequencies derived from it. All current multipliers are
 /// hundredths, so one hundred turns is a whole period for every one of them.
 const PHASE_PERIOD: f32 = TAU * 100.0;
+/// Depth-fade radius around a focused POI, as a multiple of the POI radius.
+/// Three POI diameters across, but never more than the model diameter.
+const POI_DEPTH_SCALE: f32 = 3.0;
+/// Flip angle and speed below which the model counts as upright for the
+/// selector entry.
+const SELECTOR_UPRIGHT_ANGLE: f32 = 0.05;
+const SELECTOR_UPRIGHT_SPEED: f32 = 0.2;
 
 /// How the model wireframe composites over the theme background.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2960,6 +2967,11 @@ impl Visualizer {
             self.detectors.flip_stiffness,
             self.detectors.flip_damping,
         );
+        // A selector entry armed while the model was flipping waits for the
+        // flip to finish upright before the effect turns on.
+        if self.flip_is_upright() {
+            self.showcase.activate_pending_selector(&mut self.rng);
+        }
         self.quake_x.advance(
             dt,
             self.detectors.quake_stiffness,
@@ -3245,8 +3257,9 @@ impl Visualizer {
         let was_poi = self.showcase.mode() == showcase::ShowcaseMode::Poi;
         match action {
             Action::Kick(power) => {
-                let outcome = self.showcase.kick(&mut self.rng);
-                if outcome.selector_entered {
+                let model_upright = self.flip_is_upright();
+                let outcome = self.showcase.kick(&mut self.rng, model_upright);
+                if outcome.selector_entry {
                     self.settle_flip_upright();
                 }
                 self.kick = self.kick.max(power.clamp(0.0, 1.5));
@@ -3306,6 +3319,15 @@ impl Visualizer {
     /// completed forward instead of reversed.
     fn settle_flip_upright(&mut self) {
         self.flip_half_turns = self.flip_half_turns.next_multiple_of(2);
+    }
+
+    /// Whether the flip has settled on an upright whole turn, so the selector
+    /// can turn on with the model in its normal orientation.
+    fn flip_is_upright(&self) -> bool {
+        !self.property_gates.plays(Property::Flip)
+            || (wrap_angle(self.flip_target()).abs() <= SELECTOR_UPRIGHT_ANGLE
+                && wrap_angle(self.flip.value()).abs() <= SELECTOR_UPRIGHT_ANGLE
+                && self.flip.velocity().abs() <= SELECTOR_UPRIGHT_SPEED)
     }
 
     fn quake_impulse(&mut self, direction: QuakeDirection, velocity: f32) {
@@ -3722,6 +3744,13 @@ struct VertexDiagnosis {
     acceleration: Vec2,
 }
 
+/// Depth-fade radius for the focus blend. The focused volume spans three POI
+/// diameters, capped by the model diameter; normal mode keeps the model radius.
+fn focus_depth_radius(model_radius: f32, poi_radius: f32, blend: f32) -> f32 {
+    let focused = (poi_radius * POI_DEPTH_SCALE).min(model_radius);
+    model_radius + (focused - model_radius) * blend
+}
+
 impl ModelRuntime {
     fn new(
         name: String,
@@ -3997,8 +4026,7 @@ impl ModelRuntime {
         // instead of following the silhouette of the current pose.
         let depth_center =
             self.pose.distance + (focus_distance - self.pose.distance) * showcase.focus.blend;
-        let depth_radius =
-            self.pose.scale + (focus_radius - self.pose.scale) * showcase.focus.blend;
+        let depth_radius = focus_depth_radius(self.pose.scale, focus_radius, showcase.focus.blend);
         let depth_opacity = DepthOpacity::centered(depth_center, depth_radius.max(0.0), depth_fade);
         self.current.clear();
         self.current
@@ -4766,6 +4794,22 @@ mod tests {
         assert!(DepthFade::try_from(-0.01).is_err());
         assert!(DepthFade::try_from(1.01).is_err());
         assert!(DepthFade::try_from(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn focused_depth_spans_three_poi_diameters_but_not_more_than_the_model() {
+        let model_radius = 1.0;
+        // Three POI diameters across: a POI radius of 0.2 becomes 0.6.
+        assert!((focus_depth_radius(model_radius, 0.2, 1.0) - 0.6).abs() < 1e-6);
+        // Never wider than the model diameter: a radius of 0.5 wants 1.5 and
+        // stops at the model radius.
+        assert!((focus_depth_radius(model_radius, 0.5, 1.0) - model_radius).abs() < 1e-6);
+        // Normal mode keeps the model radius.
+        assert!((focus_depth_radius(model_radius, 0.2, 0.0) - model_radius).abs() < 1e-6);
+        // The entry blend interpolates between the two.
+        assert!((focus_depth_radius(model_radius, 0.2, 0.5) - 0.8).abs() < 1e-6);
+        // The cap follows a larger model radius.
+        assert!((focus_depth_radius(2.0, 0.9, 1.0) - 2.0).abs() < 1e-6);
     }
 
     #[test]
@@ -5721,7 +5765,7 @@ mod tests {
     }
 
     #[test]
-    fn entering_the_selector_settles_an_inverted_model_upright() {
+    fn selector_entry_waits_for_the_model_to_turn_upright() {
         let mut visualizer = loaded_visualizer();
         visualizer.set_detector_settings(DetectorSettings {
             snare_flip_every: 1,
@@ -5754,7 +5798,10 @@ mod tests {
         );
 
         visualizer.handle_action(Action::Kick(0.5), 0.0, 0.75);
-        assert!(visualizer.showcase.selector_active());
+        assert!(
+            !visualizer.showcase.selector_active(),
+            "the entry waits for the model to turn upright"
+        );
         assert!(
             (visualizer.flip_target() - TAU).abs() < 1e-5,
             "the entry adds a half turn to the inverted target"
@@ -5764,6 +5811,10 @@ mod tests {
             wrap_angle(visualizer.flip.value()).abs() < 1e-2,
             "the flip finishes at a whole-turn orientation"
         );
+        assert!(
+            visualizer.showcase.selector_active(),
+            "the selector turns on once the model is upright"
+        );
     }
 
     #[test]
@@ -5772,7 +5823,7 @@ mod tests {
         assert!(visualizer.showcase.poi_count() > 0);
         let palette = Palette::from_theme(ThemeId::default());
         visualizer.set_parameter(Parameter::SelectorEntryKicks, 1.0);
-        visualizer.showcase.kick(&mut visualizer.rng);
+        visualizer.showcase.kick(&mut visualizer.rng, true);
         assert!(visualizer.showcase.selector_active());
 
         let selected = (0..16)

@@ -3,3 +3,4 @@
 assets/visualizer*.png
 assets/blur*.png
 assets/blur*.svg
+__pycache__

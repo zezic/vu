@@ -2,15 +2,12 @@
   "c4": {
     "components": {
       "casing": [
-        0,
-        1
+        0
       ],
       "wires": [
         3,
         4,
-        5,
-        8,
-        9
+        5
       ],
       "keypad": [
         7
@@ -22,34 +19,61 @@
         17,
         18
       ],
-      "switch": [
-        2,
+      "adhesive": [
+        1
+      ],
+      "battery": [
+        2
+      ],
+      "battery_contacts": [
+        8,
+        9,
         14,
         19
       ]
     },
     "magazines": {},
     "regions": [],
-    "anchors": {},
+    "anchors": {
+      "timer": {
+        "components": [
+          6
+        ],
+        "bounds": {}
+      },
+      "switch": {
+        "components": [
+          40
+        ],
+        "bounds": {}
+      }
+    },
     "parents": {},
     "muzzle": false,
     "selection_reference": "c4_planted",
     "face_count": 17937,
     "component_count": 69,
-    "source_sha256": "de550714b57767e1746dfc44ba11bb4693d6537e9b7048a5883b26337e48e61c"
+    "source_sha256": "de550714b57767e1746dfc44ba11bb4693d6537e9b7048a5883b26337e48e61c",
+    "binding_notes": {
+      "battery": "Visible rectangular battery housing beside the electronics assembly.",
+      "battery_contacts": "Visible terminal geometry on the battery prop; replaces the absent antenna POI.",
+      "adhesive": "The modeled tape bands around the prop casing.",
+      "timer": "The countdown interface shares the existing display surface; bound as a region marker.",
+      "switch": "Region on a visible keypad push-button; the prop has no separate toggle switch."
+    },
+    "catalog_adjustments": {
+      "antenna": "Replaced by battery_contacts because the source prop has no antenna; the existing caption ID and text are preserved."
+    }
   },
   "c4_planted": {
     "components": {
       "casing": [
-        0,
-        1
+        0
       ],
       "wires": [
         3,
         4,
-        5,
-        8,
-        9
+        5
       ],
       "keypad": [
         7
@@ -61,52 +85,50 @@
         17,
         18
       ],
-      "switch": [
-        2,
+      "adhesive": [
+        1
+      ],
+      "battery": [
+        2
+      ],
+      "battery_contacts": [
+        8,
+        9,
         14,
         19
       ]
     },
     "magazines": {},
     "regions": [],
-    "anchors": {},
+    "anchors": {
+      "timer": {
+        "components": [
+          6
+        ],
+        "bounds": {}
+      },
+      "switch": {
+        "components": [
+          40
+        ],
+        "bounds": {}
+      }
+    },
     "parents": {},
     "muzzle": false,
     "face_count": 17937,
     "component_count": 69,
-    "source_sha256": "9415177a6a46f342f271d62a1f0dcf3d25e07e69968d4d14afd3f96731b3d772"
-  },
-  "eq_eholster_elite": {
-    "components": {
-      "frame": [
-        0
-      ],
-      "slide": [
-        1
-      ],
-      "hammer": [
-        6
-      ],
-      "trigger": [
-        8
-      ],
-      "recoil_spring": [
-        17
-      ],
-      "holster_body": [
-        20
-      ]
+    "source_sha256": "9415177a6a46f342f271d62a1f0dcf3d25e07e69968d4d14afd3f96731b3d772",
+    "binding_notes": {
+      "battery": "Visible rectangular battery housing beside the electronics assembly.",
+      "battery_contacts": "Visible terminal geometry on the battery prop; replaces the absent antenna POI.",
+      "adhesive": "The modeled tape bands around the prop casing.",
+      "timer": "The countdown interface shares the existing display surface; bound as a region marker.",
+      "switch": "Region on a visible keypad push-button; the prop has no separate toggle switch."
     },
-    "magazines": {
-      "magazine": 2
-    },
-    "regions": [],
-    "anchors": {},
-    "parents": {},
-    "muzzle": false,
-    "face_count": 21083,
-    "component_count": 21,
-    "source_sha256": "022f1b6a43b4e04d7e34c7897c378b48e3458fa6df966254dcdc7299d009b993"
+    "catalog_adjustments": {
+      "antenna": "Replaced by battery_contacts because the source prop has no antenna; the existing caption ID and text are preserved."
+    }
   },
   "eq_flashbang": {
     "components": {
@@ -154,12 +176,62 @@
         }
       }
     ],
-    "anchors": {},
+    "anchors": {
+      "paint_marking": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "x": [
+            -0.019,
+            -0.006
+          ],
+          "z": [
+            -0.023,
+            -0.007
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "seam": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "z": [
+            0.014,
+            0.017
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "surface_finish": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "x": [
+            0.009,
+            null
+          ],
+          "z": [
+            -0.041,
+            -0.029
+          ]
+        },
+        "clip_to_bounds": true
+      }
+    },
     "parents": {},
     "muzzle": false,
     "face_count": 11469,
     "component_count": 6,
-    "source_sha256": "0a64e8ebb796ad7d3d01511b66e873ca1067142f4fddaad2c1abfffdfbbc1765"
+    "source_sha256": "0a64e8ebb796ad7d3d01511b66e873ca1067142f4fddaad2c1abfffdfbbc1765",
+    "binding_notes": {
+      "paint_marking": "Surface region traced from the original painted band or label. The output intentionally contains no paint texture.",
+      "seam": "Geometric body-to-collar joining rim; a region marker rather than a separate movable mesh.",
+      "surface_finish": "A patch of the original outer body surface. No material or texture is exported."
+    }
   },
   "eq_flashbang_thrown": {
     "components": {
@@ -207,13 +279,63 @@
         }
       }
     ],
-    "anchors": {},
+    "anchors": {
+      "paint_marking": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "x": [
+            -0.019,
+            -0.006
+          ],
+          "z": [
+            -0.023,
+            -0.007
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "seam": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "z": [
+            0.014,
+            0.017
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "surface_finish": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "x": [
+            0.009,
+            null
+          ],
+          "z": [
+            -0.041,
+            -0.029
+          ]
+        },
+        "clip_to_bounds": true
+      }
+    },
     "parents": {},
     "muzzle": false,
     "selection_reference": "eq_flashbang",
     "face_count": 11469,
     "component_count": 6,
-    "source_sha256": "6604a230e163c64170a64f5caa9b94c17221f1c34bc63c3a104bb555aea49e19"
+    "source_sha256": "6604a230e163c64170a64f5caa9b94c17221f1c34bc63c3a104bb555aea49e19",
+    "binding_notes": {
+      "paint_marking": "Surface region traced from the original painted band or label. The output intentionally contains no paint texture.",
+      "seam": "Geometric body-to-collar joining rim; a region marker rather than a separate movable mesh.",
+      "surface_finish": "A patch of the original outer body surface. No material or texture is exported."
+    }
   },
   "eq_fraggrenade": {
     "components": {
@@ -239,12 +361,75 @@
     },
     "magazines": {},
     "regions": [],
-    "anchors": {},
+    "anchors": {
+      "paint_marking": {
+        "components": [
+          1
+        ],
+        "bounds": {
+          "x": [
+            -0.029,
+            -0.014
+          ],
+          "z": [
+            -0.02,
+            -0.0125
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "seam": {
+        "components": [
+          1
+        ],
+        "bounds": {
+          "z": [
+            0.011,
+            0.0146
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "base": {
+        "components": [
+          1
+        ],
+        "bounds": {
+          "z": [
+            null,
+            -0.037
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "surface_finish": {
+        "components": [
+          1
+        ],
+        "bounds": {
+          "x": [
+            0.016,
+            null
+          ],
+          "z": [
+            -0.03,
+            -0.022
+          ]
+        },
+        "clip_to_bounds": true
+      }
+    },
     "parents": {},
     "muzzle": false,
     "face_count": 10398,
     "component_count": 7,
-    "source_sha256": "7369869923a11048152d693f1cee30d72c8919a1eec6daf78e10206cd577f2f9"
+    "source_sha256": "7369869923a11048152d693f1cee30d72c8919a1eec6daf78e10206cd577f2f9",
+    "binding_notes": {
+      "paint_marking": "Surface region traced from the original painted band or label. The output intentionally contains no paint texture.",
+      "seam": "Geometric body-to-collar joining rim; a region marker rather than a separate movable mesh.",
+      "surface_finish": "A patch of the original outer body surface. No material or texture is exported.",
+      "base": "Bottom cap region clipped directly from the original spherical body surface."
+    }
   },
   "eq_fraggrenade_thrown": {
     "components": {
@@ -270,13 +455,76 @@
     },
     "magazines": {},
     "regions": [],
-    "anchors": {},
+    "anchors": {
+      "paint_marking": {
+        "components": [
+          1
+        ],
+        "bounds": {
+          "x": [
+            -0.029,
+            -0.014
+          ],
+          "z": [
+            -0.02,
+            -0.0125
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "seam": {
+        "components": [
+          1
+        ],
+        "bounds": {
+          "z": [
+            0.011,
+            0.0146
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "base": {
+        "components": [
+          1
+        ],
+        "bounds": {
+          "z": [
+            null,
+            -0.037
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "surface_finish": {
+        "components": [
+          1
+        ],
+        "bounds": {
+          "x": [
+            0.016,
+            null
+          ],
+          "z": [
+            -0.03,
+            -0.022
+          ]
+        },
+        "clip_to_bounds": true
+      }
+    },
     "parents": {},
     "muzzle": false,
     "selection_reference": "eq_fraggrenade",
     "face_count": 10398,
     "component_count": 7,
-    "source_sha256": "065dea43b0b4314e19f025ef79c28fa5b532453dfffe17fad2ac89c2b1c0f541"
+    "source_sha256": "065dea43b0b4314e19f025ef79c28fa5b532453dfffe17fad2ac89c2b1c0f541",
+    "binding_notes": {
+      "paint_marking": "Surface region traced from the original painted band or label. The output intentionally contains no paint texture.",
+      "seam": "Geometric body-to-collar joining rim; a region marker rather than a separate movable mesh.",
+      "surface_finish": "A patch of the original outer body surface. No material or texture is exported.",
+      "base": "Bottom cap region clipped directly from the original spherical body surface."
+    }
   },
   "eq_smokegrenade": {
     "components": {
@@ -315,12 +563,62 @@
         }
       }
     ],
-    "anchors": {},
+    "anchors": {
+      "paint_marking": {
+        "components": [
+          2
+        ],
+        "bounds": {
+          "x": [
+            null,
+            -0.006
+          ],
+          "z": [
+            -0.004,
+            0.009
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "seam": {
+        "components": [
+          2
+        ],
+        "bounds": {
+          "z": [
+            0.026,
+            0.0292
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "surface_finish": {
+        "components": [
+          2
+        ],
+        "bounds": {
+          "x": [
+            0.007,
+            null
+          ],
+          "z": [
+            -0.024,
+            -0.014
+          ]
+        },
+        "clip_to_bounds": true
+      }
+    },
     "parents": {},
     "muzzle": false,
     "face_count": 11121,
     "component_count": 7,
-    "source_sha256": "acb4b2e2f5e42ede0c9fed284e5a6acd2ae63eccb18d59a2d4388cc37ff845f5"
+    "source_sha256": "acb4b2e2f5e42ede0c9fed284e5a6acd2ae63eccb18d59a2d4388cc37ff845f5",
+    "binding_notes": {
+      "paint_marking": "Surface region traced from the original painted band or label. The output intentionally contains no paint texture.",
+      "seam": "Geometric body-to-collar joining rim; a region marker rather than a separate movable mesh.",
+      "surface_finish": "A patch of the original outer body surface. No material or texture is exported."
+    }
   },
   "eq_smokegrenade_thrown": {
     "components": {
@@ -359,13 +657,63 @@
         }
       }
     ],
-    "anchors": {},
+    "anchors": {
+      "paint_marking": {
+        "components": [
+          2
+        ],
+        "bounds": {
+          "x": [
+            null,
+            -0.006
+          ],
+          "z": [
+            -0.004,
+            0.009
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "seam": {
+        "components": [
+          2
+        ],
+        "bounds": {
+          "z": [
+            0.026,
+            0.0292
+          ]
+        },
+        "clip_to_bounds": true
+      },
+      "surface_finish": {
+        "components": [
+          2
+        ],
+        "bounds": {
+          "x": [
+            0.007,
+            null
+          ],
+          "z": [
+            -0.024,
+            -0.014
+          ]
+        },
+        "clip_to_bounds": true
+      }
+    },
     "parents": {},
     "muzzle": false,
     "selection_reference": "eq_smokegrenade",
     "face_count": 11121,
     "component_count": 7,
-    "source_sha256": "e7a47fea2d5f7776fc3966addac1894e31f79a675e2522834f1ed008de3876d4"
+    "source_sha256": "e7a47fea2d5f7776fc3966addac1894e31f79a675e2522834f1ed008de3876d4",
+    "binding_notes": {
+      "paint_marking": "Surface region traced from the original painted band or label. The output intentionally contains no paint texture.",
+      "seam": "Geometric body-to-collar joining rim; a region marker rather than a separate movable mesh.",
+      "surface_finish": "A patch of the original outer body surface. No material or texture is exported."
+    }
   },
   "mach_m249para": {
     "components": {
@@ -1344,6 +1692,9 @@
         42
       ],
       "trigger": [
+        28
+      ],
+      "magazine_release": [
         41
       ]
     },
@@ -1406,13 +1757,33 @@
             0.052
           ]
         }
+      },
+      {
+        "part": "selector",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.2176,
+            -0.2092
+          ],
+          "z": [
+            0.0742,
+            0.0826
+          ]
+        }
       }
     ],
     "anchors": {},
     "parents": {},
     "face_count": 39937,
     "component_count": 51,
-    "source_sha256": "5be83ac695cc4917e857f298b071e409869c6b742f3ae614dfd7244d42385c53"
+    "source_sha256": "5be83ac695cc4917e857f298b071e409869c6b742f3ae614dfd7244d42385c53",
+    "binding_notes": {
+      "trigger": "Isolated trigger blade inside the forward grip opening; the rear magazine release is a separate object.",
+      "selector": "Cross-bolt safety button above the grip, selected from the molded receiver geometry."
+    }
   },
   "rif_famas": {
     "components": {
@@ -1516,11 +1887,35 @@
         }
       }
     ],
-    "anchors": {},
+    "anchors": {
+      "selector": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "x": [
+            -0.007,
+            0.01
+          ],
+          "y": [
+            -0.175,
+            -0.151
+          ],
+          "z": [
+            0.015,
+            0.03
+          ]
+        },
+        "clip_to_bounds": true
+      }
+    },
     "parents": {},
     "face_count": 32869,
     "component_count": 61,
-    "source_sha256": "3a0f37cb8f1ee1abfc5f1316894758ea18ea81b45d52d5ebb99e86680e26c712"
+    "source_sha256": "3a0f37cb8f1ee1abfc5f1316894758ea18ea81b45d52d5ebb99e86680e26c712",
+    "binding_notes": {
+      "selector": "Surface marker around the selector lever and pivot inside the trigger guard; this detail is fused into the source body mesh."
+    }
   },
   "rif_galil": {
     "components": {
@@ -2486,13 +2881,37 @@
             0.073
           ]
         }
+      },
+      {
+        "part": "trigger",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "x": [
+            0.0045,
+            0.0129
+          ],
+          "y": [
+            -0.222,
+            -0.208
+          ],
+          "z": [
+            0.0444,
+            0.0705
+          ]
+        },
+        "contained_faces": true
       }
     ],
     "anchors": {},
     "parents": {},
     "face_count": 24783,
     "component_count": 20,
-    "source_sha256": "3ef0ead745ac7534f466b47f396ad0e56b50939924326fedaf70ed67a4dec9ff"
+    "source_sha256": "3ef0ead745ac7534f466b47f396ad0e56b50939924326fedaf70ed67a4dec9ff",
+    "binding_notes": {
+      "trigger": "Trigger blade at the rear of the front finger opening, isolated from the integrated grip mesh."
+    }
   },
   "smg_tmp": {
     "components": {
@@ -2508,6 +2927,9 @@
       ],
       "trigger": [
         11
+      ],
+      "selector": [
+        36
       ]
     },
     "magazines": {
@@ -2579,7 +3001,10 @@
     "parents": {},
     "face_count": 31004,
     "component_count": 37,
-    "source_sha256": "198627892bca238af4c5f88ec4146006d6c9f8db5c6198ef199d7d6260f3441c"
+    "source_sha256": "198627892bca238af4c5f88ec4146006d6c9f8db5c6198ef199d7d6260f3441c",
+    "binding_notes": {
+      "selector": "Separate molded safety control beside the trigger guard on the supplied MP9-style mesh."
+    }
   },
   "smg_ump45": {
     "components": {
