@@ -1,0 +1,3100 @@
+{
+  "c4": {
+    "components": {
+      "casing": [
+        0,
+        1
+      ],
+      "wires": [
+        3,
+        4,
+        5,
+        8,
+        9
+      ],
+      "keypad": [
+        7
+      ],
+      "display": [
+        6
+      ],
+      "circuit_board": [
+        17,
+        18
+      ],
+      "switch": [
+        2,
+        14,
+        19
+      ]
+    },
+    "magazines": {},
+    "regions": [],
+    "anchors": {},
+    "parents": {},
+    "muzzle": false,
+    "selection_reference": "c4_planted",
+    "face_count": 17937,
+    "component_count": 69,
+    "source_sha256": "de550714b57767e1746dfc44ba11bb4693d6537e9b7048a5883b26337e48e61c"
+  },
+  "c4_planted": {
+    "components": {
+      "casing": [
+        0,
+        1
+      ],
+      "wires": [
+        3,
+        4,
+        5,
+        8,
+        9
+      ],
+      "keypad": [
+        7
+      ],
+      "display": [
+        6
+      ],
+      "circuit_board": [
+        17,
+        18
+      ],
+      "switch": [
+        2,
+        14,
+        19
+      ]
+    },
+    "magazines": {},
+    "regions": [],
+    "anchors": {},
+    "parents": {},
+    "muzzle": false,
+    "face_count": 17937,
+    "component_count": 69,
+    "source_sha256": "9415177a6a46f342f271d62a1f0dcf3d25e07e69968d4d14afd3f96731b3d772"
+  },
+  "eq_eholster_elite": {
+    "components": {
+      "frame": [
+        0
+      ],
+      "slide": [
+        1
+      ],
+      "hammer": [
+        6
+      ],
+      "trigger": [
+        8
+      ],
+      "recoil_spring": [
+        17
+      ],
+      "holster_body": [
+        20
+      ]
+    },
+    "magazines": {
+      "magazine": 2
+    },
+    "regions": [],
+    "anchors": {},
+    "parents": {},
+    "muzzle": false,
+    "face_count": 21083,
+    "component_count": 21,
+    "source_sha256": "022f1b6a43b4e04d7e34c7897c378b48e3458fa6df966254dcdc7299d009b993"
+  },
+  "eq_flashbang": {
+    "components": {
+      "body": [
+        0
+      ],
+      "pull_ring": [
+        1
+      ],
+      "safety_lever": [
+        2
+      ],
+      "fuse": [
+        3
+      ],
+      "safety_pin": [
+        4,
+        5
+      ]
+    },
+    "magazines": {},
+    "regions": [
+      {
+        "part": "base",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "z": [
+            null,
+            -0.049
+          ]
+        }
+      },
+      {
+        "part": "top_cap",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "z": [
+            0.014,
+            0.029
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "muzzle": false,
+    "face_count": 11469,
+    "component_count": 6,
+    "source_sha256": "0a64e8ebb796ad7d3d01511b66e873ca1067142f4fddaad2c1abfffdfbbc1765"
+  },
+  "eq_flashbang_thrown": {
+    "components": {
+      "body": [
+        0
+      ],
+      "pull_ring": [
+        1
+      ],
+      "safety_lever": [
+        2
+      ],
+      "fuse": [
+        3
+      ],
+      "safety_pin": [
+        4,
+        5
+      ]
+    },
+    "magazines": {},
+    "regions": [
+      {
+        "part": "base",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "z": [
+            null,
+            -0.049
+          ]
+        }
+      },
+      {
+        "part": "top_cap",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "z": [
+            0.014,
+            0.029
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "muzzle": false,
+    "selection_reference": "eq_flashbang",
+    "face_count": 11469,
+    "component_count": 6,
+    "source_sha256": "6604a230e163c64170a64f5caa9b94c17221f1c34bc63c3a104bb555aea49e19"
+  },
+  "eq_fraggrenade": {
+    "components": {
+      "body": [
+        1
+      ],
+      "pull_ring": [
+        0
+      ],
+      "top_cap": [
+        2
+      ],
+      "safety_lever": [
+        3
+      ],
+      "fuse": [
+        4
+      ],
+      "safety_pin": [
+        5,
+        6
+      ]
+    },
+    "magazines": {},
+    "regions": [],
+    "anchors": {},
+    "parents": {},
+    "muzzle": false,
+    "face_count": 10398,
+    "component_count": 7,
+    "source_sha256": "7369869923a11048152d693f1cee30d72c8919a1eec6daf78e10206cd577f2f9"
+  },
+  "eq_fraggrenade_thrown": {
+    "components": {
+      "body": [
+        1
+      ],
+      "pull_ring": [
+        0
+      ],
+      "top_cap": [
+        2
+      ],
+      "safety_lever": [
+        3
+      ],
+      "fuse": [
+        4
+      ],
+      "safety_pin": [
+        5,
+        6
+      ]
+    },
+    "magazines": {},
+    "regions": [],
+    "anchors": {},
+    "parents": {},
+    "muzzle": false,
+    "selection_reference": "eq_fraggrenade",
+    "face_count": 10398,
+    "component_count": 7,
+    "source_sha256": "065dea43b0b4314e19f025ef79c28fa5b532453dfffe17fad2ac89c2b1c0f541"
+  },
+  "eq_smokegrenade": {
+    "components": {
+      "body": [
+        2
+      ],
+      "top_cap": [
+        0
+      ],
+      "pull_ring": [
+        1
+      ],
+      "safety_lever": [
+        3
+      ],
+      "fuse": [
+        4
+      ],
+      "safety_pin": [
+        5,
+        6
+      ]
+    },
+    "magazines": {},
+    "regions": [
+      {
+        "part": "base",
+        "components": [
+          2
+        ],
+        "bounds": {
+          "z": [
+            null,
+            -0.034
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "muzzle": false,
+    "face_count": 11121,
+    "component_count": 7,
+    "source_sha256": "acb4b2e2f5e42ede0c9fed284e5a6acd2ae63eccb18d59a2d4388cc37ff845f5"
+  },
+  "eq_smokegrenade_thrown": {
+    "components": {
+      "body": [
+        2
+      ],
+      "top_cap": [
+        0
+      ],
+      "pull_ring": [
+        1
+      ],
+      "safety_lever": [
+        3
+      ],
+      "fuse": [
+        4
+      ],
+      "safety_pin": [
+        5,
+        6
+      ]
+    },
+    "magazines": {},
+    "regions": [
+      {
+        "part": "base",
+        "components": [
+          2
+        ],
+        "bounds": {
+          "z": [
+            null,
+            -0.034
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "muzzle": false,
+    "selection_reference": "eq_smokegrenade",
+    "face_count": 11121,
+    "component_count": 7,
+    "source_sha256": "e7a47fea2d5f7776fc3966addac1894e31f79a675e2522834f1ed008de3876d4"
+  },
+  "mach_m249para": {
+    "components": {
+      "receiver": [
+        0,
+        12
+      ],
+      "barrel": [
+        3,
+        11
+      ],
+      "handguard": [
+        1,
+        2
+      ],
+      "feed_cover": [
+        4,
+        10,
+        15,
+        17,
+        44,
+        62,
+        63,
+        67,
+        70
+      ],
+      "gas_block": [
+        5
+      ],
+      "ammunition_box": [
+        6
+      ],
+      "belt_feed": [
+        7,
+        8,
+        9
+      ],
+      "bipod": [
+        13,
+        14
+      ],
+      "front_sight": [
+        16
+      ]
+    },
+    "magazines": {},
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            0.092,
+            null
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.012,
+            0.069
+          ],
+          "z": [
+            null,
+            0.032
+          ]
+        }
+      },
+      {
+        "part": "trigger",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "x": [
+            0.002,
+            0.01
+          ],
+          "y": [
+            -0.07,
+            -0.047
+          ],
+          "z": [
+            0.014,
+            0.05
+          ]
+        }
+      },
+      {
+        "part": "carry_handle",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.279,
+            -0.174
+          ],
+          "z": [
+            0.088,
+            null
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "face_count": 58912,
+    "component_count": 132,
+    "source_sha256": "b6bc812a58a1d5082c3ccf72b425fe68f4a49ea6979005a931254ec95a6633d3"
+  },
+  "pist_elite": {
+    "components": {
+      "frame": [
+        0
+      ],
+      "frame_right": [
+        1
+      ],
+      "slide": [
+        2
+      ],
+      "slide_right": [
+        3
+      ],
+      "trigger": [
+        16
+      ],
+      "trigger_right": [
+        17
+      ]
+    },
+    "magazines": {
+      "magazine": 4,
+      "magazine_right": 5
+    },
+    "regions": [
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.097,
+            null
+          ],
+          "z": [
+            null,
+            0.024
+          ]
+        }
+      },
+      {
+        "part": "grip_right",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.11,
+            null
+          ],
+          "z": [
+            null,
+            0.016
+          ]
+        }
+      },
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.104
+          ],
+          "z": [
+            0.058,
+            null
+          ]
+        }
+      },
+      {
+        "part": "barrel_right",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.117
+          ],
+          "z": [
+            0.05,
+            null
+          ]
+        }
+      },
+      {
+        "part": "front_sight",
+        "components": [
+          2
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.194
+          ],
+          "z": [
+            0.077,
+            null
+          ]
+        }
+      },
+      {
+        "part": "rear_sight",
+        "components": [
+          2
+        ],
+        "bounds": {
+          "y": [
+            -0.074,
+            null
+          ],
+          "z": [
+            0.077,
+            null
+          ]
+        }
+      },
+      {
+        "part": "front_sight_right",
+        "components": [
+          3
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.207
+          ],
+          "z": [
+            0.069,
+            null
+          ]
+        }
+      },
+      {
+        "part": "rear_sight_right",
+        "components": [
+          3
+        ],
+        "bounds": {
+          "y": [
+            -0.087,
+            null
+          ],
+          "z": [
+            0.069,
+            null
+          ]
+        }
+      }
+    ],
+    "anchors": {
+      "trigger_guard": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.148,
+            -0.113
+          ],
+          "z": [
+            -0.001,
+            0.028
+          ]
+        }
+      },
+      "ejection_port": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.16,
+            -0.12
+          ],
+          "z": [
+            0.06,
+            0.079
+          ]
+        }
+      }
+    },
+    "parents": {
+      "front_sight": "slide",
+      "rear_sight": "slide",
+      "front_sight_right": "slide_right",
+      "rear_sight_right": "slide_right"
+    },
+    "face_count": 41966,
+    "component_count": 40,
+    "source_sha256": "60642e834aa1fabb994afb3c518ba6b27eed4cba9ec81f001fa036f89544f331"
+  },
+  "pist_elite_dropped": {
+    "components": {
+      "frame": [
+        0
+      ],
+      "frame_right": [
+        1
+      ],
+      "slide": [
+        2
+      ],
+      "slide_right": [
+        3
+      ],
+      "trigger": [
+        17
+      ],
+      "trigger_right": [
+        16
+      ]
+    },
+    "magazines": {
+      "magazine": 4,
+      "magazine_right": 5
+    },
+    "regions": [],
+    "anchors": {},
+    "parents": {},
+    "muzzle": false,
+    "face_count": 41966,
+    "component_count": 40,
+    "source_sha256": "43c7e2616468f3c102575f507684f784c91646efeb634e12f35aed9c75d9de54"
+  },
+  "pist_elite_single": {
+    "components": {
+      "frame": [
+        0
+      ],
+      "slide": [
+        1
+      ],
+      "trigger": [
+        8
+      ],
+      "recoil_spring": [
+        17
+      ]
+    },
+    "magazines": {
+      "magazine": 2
+    },
+    "regions": [
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.098,
+            null
+          ],
+          "z": [
+            null,
+            0.026
+          ]
+        }
+      },
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.105
+          ],
+          "z": [
+            0.06,
+            null
+          ]
+        }
+      },
+      {
+        "part": "rear_sight",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.075,
+            null
+          ],
+          "z": [
+            0.079,
+            null
+          ]
+        }
+      },
+      {
+        "part": "front_sight",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.195
+          ],
+          "z": [
+            0.079,
+            null
+          ]
+        }
+      }
+    ],
+    "anchors": {
+      "trigger_guard": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.145,
+            -0.112
+          ],
+          "z": [
+            0.002,
+            0.035
+          ]
+        }
+      },
+      "ejection_port": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.14,
+            -0.104
+          ],
+          "z": [
+            0.06,
+            0.08
+          ]
+        }
+      }
+    },
+    "parents": {
+      "front_sight": "slide",
+      "rear_sight": "slide"
+    },
+    "face_count": 20983,
+    "component_count": 20,
+    "source_sha256": "6acb3d186690636e19b9465c8aab8b99842e47598f0fe172a9880daacc27cd6f"
+  },
+  "pist_fiveseven": {
+    "components": {
+      "frame": [
+        0
+      ],
+      "slide": [
+        1
+      ],
+      "barrel": [
+        4
+      ],
+      "trigger": [
+        9
+      ],
+      "rear_sight": [
+        3,
+        36
+      ],
+      "front_sight": [
+        26
+      ],
+      "recoil_spring": [
+        31
+      ]
+    },
+    "magazines": {
+      "magazine": 2
+    },
+    "regions": [
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.098,
+            null
+          ],
+          "z": [
+            null,
+            0.026
+          ]
+        }
+      }
+    ],
+    "anchors": {
+      "trigger_guard": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.145,
+            -0.112
+          ],
+          "z": [
+            0.002,
+            0.035
+          ]
+        }
+      },
+      "ejection_port": {
+        "components": [
+          4
+        ],
+        "bounds": {
+          "y": [
+            -0.14,
+            -0.104
+          ],
+          "z": [
+            0.06,
+            0.08
+          ]
+        }
+      }
+    },
+    "parents": {
+      "rear_sight": "slide",
+      "front_sight": "slide"
+    },
+    "face_count": 24847,
+    "component_count": 38,
+    "source_sha256": "267a17b144022265daa76386eec96bc0f9f5b0b911d68b92ed4bbd37f7e9caa4"
+  },
+  "pist_glock18": {
+    "components": {
+      "frame": [
+        0
+      ],
+      "slide": [
+        1
+      ],
+      "barrel": [
+        4
+      ],
+      "trigger": [
+        7
+      ],
+      "rear_sight": [
+        12
+      ],
+      "recoil_spring": [
+        3
+      ]
+    },
+    "magazines": {
+      "magazine": 2
+    },
+    "regions": [
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.098,
+            null
+          ],
+          "z": [
+            null,
+            0.026
+          ]
+        }
+      },
+      {
+        "part": "front_sight",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.17
+          ],
+          "z": [
+            0.0754,
+            null
+          ]
+        }
+      }
+    ],
+    "anchors": {
+      "trigger_guard": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.145,
+            -0.112
+          ],
+          "z": [
+            0.002,
+            0.035
+          ]
+        }
+      },
+      "ejection_port": {
+        "components": [
+          4
+        ],
+        "bounds": {
+          "y": [
+            -0.14,
+            -0.104
+          ],
+          "z": [
+            0.06,
+            0.08
+          ]
+        }
+      }
+    },
+    "parents": {
+      "rear_sight": "slide",
+      "front_sight": "slide"
+    },
+    "face_count": 15247,
+    "component_count": 19,
+    "source_sha256": "8f6e981b631583f0c0e088ba2bb5967b5cf79f8b4eeb354bad26755befb463c7"
+  },
+  "pist_p228": {
+    "components": {
+      "frame": [
+        0
+      ],
+      "slide": [
+        1
+      ],
+      "trigger": [
+        7
+      ],
+      "front_sight": [
+        16
+      ],
+      "recoil_spring": [
+        15
+      ]
+    },
+    "magazines": {
+      "magazine": 2
+    },
+    "regions": [
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.098,
+            null
+          ],
+          "z": [
+            null,
+            0.026
+          ]
+        }
+      },
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.1
+          ],
+          "z": [
+            0.064,
+            null
+          ]
+        }
+      },
+      {
+        "part": "rear_sight",
+        "components": [
+          0,
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.075,
+            null
+          ],
+          "z": [
+            0.079,
+            null
+          ]
+        }
+      }
+    ],
+    "anchors": {
+      "trigger_guard": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.145,
+            -0.112
+          ],
+          "z": [
+            0.002,
+            0.035
+          ]
+        }
+      },
+      "ejection_port": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.14,
+            -0.104
+          ],
+          "z": [
+            0.06,
+            0.08
+          ]
+        }
+      }
+    },
+    "parents": {
+      "front_sight": "slide",
+      "rear_sight": "slide"
+    },
+    "face_count": 15743,
+    "component_count": 19,
+    "source_sha256": "c922be8b83c7ed243976699efe720796dfb956c2eaa64b514a875f687f848090"
+  },
+  "pist_usp": {
+    "components": {
+      "frame": [
+        0
+      ],
+      "slide": [
+        1
+      ],
+      "barrel": [
+        3
+      ],
+      "trigger": [
+        9,
+        28,
+        29
+      ],
+      "rear_sight": [
+        4,
+        18,
+        19
+      ],
+      "front_sight": [
+        17
+      ],
+      "recoil_spring": [
+        10
+      ]
+    },
+    "magazines": {
+      "magazine": 2
+    },
+    "regions": [
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.098,
+            null
+          ],
+          "z": [
+            null,
+            0.026
+          ]
+        }
+      }
+    ],
+    "anchors": {
+      "trigger_guard": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.145,
+            -0.112
+          ],
+          "z": [
+            0.002,
+            0.035
+          ]
+        }
+      },
+      "ejection_port": {
+        "components": [
+          3
+        ],
+        "bounds": {
+          "y": [
+            -0.14,
+            -0.104
+          ],
+          "z": [
+            0.06,
+            0.08
+          ]
+        }
+      }
+    },
+    "parents": {
+      "rear_sight": "slide",
+      "front_sight": "slide"
+    },
+    "face_count": 16270,
+    "component_count": 30,
+    "source_sha256": "018bdc5bdd23edc9a54f3214aabaa51ad8f0546e13fe8813e2ab85e7359b26ce"
+  },
+  "pist_usp_silencer": {
+    "components": {
+      "frame": [
+        0
+      ],
+      "slide": [
+        1
+      ],
+      "barrel": [
+        4
+      ],
+      "trigger": [
+        10,
+        29,
+        30
+      ],
+      "rear_sight": [
+        5,
+        18,
+        19
+      ],
+      "front_sight": [
+        20
+      ],
+      "recoil_spring": [
+        11
+      ],
+      "suppressor": [
+        2
+      ]
+    },
+    "magazines": {
+      "magazine": 3
+    },
+    "regions": [
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.098,
+            null
+          ],
+          "z": [
+            null,
+            0.026
+          ]
+        }
+      }
+    ],
+    "anchors": {
+      "trigger_guard": {
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.145,
+            -0.112
+          ],
+          "z": [
+            0.002,
+            0.035
+          ]
+        }
+      },
+      "ejection_port": {
+        "components": [
+          4
+        ],
+        "bounds": {
+          "y": [
+            -0.14,
+            -0.104
+          ],
+          "z": [
+            0.06,
+            0.08
+          ]
+        }
+      }
+    },
+    "parents": {
+      "rear_sight": "slide",
+      "front_sight": "slide"
+    },
+    "muzzle_part": "suppressor",
+    "face_count": 18918,
+    "component_count": 31,
+    "source_sha256": "ddef151c22e89b9dedb61b627ac7be2553afca94cce0ef420d637082bafa9aef"
+  },
+  "rif_aug": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "optic": [
+        1,
+        4,
+        40,
+        43,
+        44,
+        46,
+        47
+      ],
+      "top_rail": [
+        3
+      ],
+      "foregrip": [
+        5
+      ],
+      "charging_handle": [
+        6
+      ],
+      "front_sight": [
+        12,
+        42
+      ],
+      "trigger": [
+        41
+      ]
+    },
+    "magazines": {
+      "magazine": 2
+    },
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.03,
+            null
+          ]
+        }
+      },
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.389
+          ]
+        }
+      },
+      {
+        "part": "handguard",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.389,
+            -0.285
+          ],
+          "z": [
+            0.08,
+            null
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.255,
+            -0.165
+          ],
+          "z": [
+            null,
+            0.052
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "face_count": 39937,
+    "component_count": 51,
+    "source_sha256": "5be83ac695cc4917e857f298b071e409869c6b742f3ae614dfd7244d42385c53"
+  },
+  "rif_famas": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "barrel": [
+        1
+      ],
+      "bipod": [
+        3,
+        4
+      ],
+      "charging_handle": [
+        6
+      ],
+      "front_sight": [
+        16,
+        28,
+        29,
+        30,
+        33,
+        34,
+        36,
+        37,
+        38,
+        39
+      ],
+      "trigger": [
+        31
+      ],
+      "ejection_port": [
+        13
+      ],
+      "rear_sight": [
+        5,
+        7,
+        9,
+        17,
+        19
+      ]
+    },
+    "magazines": {
+      "magazine": 2
+    },
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            0.071,
+            null
+          ]
+        }
+      },
+      {
+        "part": "handguard",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.205
+          ],
+          "z": [
+            null,
+            0.084
+          ]
+        }
+      },
+      {
+        "part": "carry_handle",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "z": [
+            0.105,
+            null
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.13,
+            -0.055
+          ],
+          "z": [
+            null,
+            0.029
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "face_count": 32869,
+    "component_count": 61,
+    "source_sha256": "3a0f37cb8f1ee1abfc5f1316894758ea18ea81b45d52d5ebb99e86680e26c712"
+  },
+  "rif_galil": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "stock_latch": [
+        2
+      ],
+      "charging_handle": [
+        3
+      ],
+      "bolt_or_action": [
+        4
+      ],
+      "rear_sight": [
+        5,
+        13
+      ],
+      "selector": [
+        6,
+        12
+      ],
+      "front_sight": [
+        11
+      ],
+      "trigger": [
+        37
+      ]
+    },
+    "magazines": {
+      "magazine": 1
+    },
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.012,
+            null
+          ]
+        }
+      },
+      {
+        "part": "handguard",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.345,
+            -0.218
+          ]
+        }
+      },
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.345
+          ]
+        }
+      },
+      {
+        "part": "front_sight",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.423,
+            -0.386
+          ],
+          "z": [
+            0.085,
+            null
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.135,
+            -0.055
+          ],
+          "z": [
+            null,
+            0.025
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {
+      "stock_latch": "stock"
+    },
+    "face_count": 41072,
+    "component_count": 48,
+    "source_sha256": "e2704656d2df0f8418ca68b06e7540e61f0e8b94b79704ad592bc700649206ef"
+  },
+  "rif_m4a1": {
+    "components": {
+      "barrel": [
+        0,
+        28,
+        38
+      ],
+      "receiver": [
+        1
+      ],
+      "handguard": [
+        3
+      ],
+      "bolt_or_action": [
+        4
+      ],
+      "rear_sight": [
+        5,
+        15,
+        26,
+        33,
+        34
+      ],
+      "charging_handle": [
+        6,
+        25
+      ],
+      "stock_latch": [
+        10,
+        12,
+        30,
+        32,
+        36
+      ],
+      "trigger": [
+        13
+      ],
+      "selector": [
+        14
+      ]
+    },
+    "magazines": {
+      "magazine": 2
+    },
+    "regions": [
+      {
+        "part": "handguard",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.384,
+            null
+          ]
+        }
+      },
+      {
+        "part": "front_sight",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.435,
+            -0.384
+          ],
+          "z": [
+            0.088,
+            null
+          ]
+        }
+      },
+      {
+        "part": "stock",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.019,
+            null
+          ]
+        }
+      },
+      {
+        "part": "carry_handle",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "z": [
+            0.098,
+            null
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.095,
+            -0.016
+          ],
+          "z": [
+            null,
+            0.035
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {
+      "stock_latch": "stock",
+      "rear_sight": "carry_handle"
+    },
+    "face_count": 42669,
+    "component_count": 45,
+    "source_sha256": "10b13414e2ccbc24d9122920be3c24359a0f2c68d8125d76ce0e9e1910443bc3"
+  },
+  "rif_m4a1_silencer": {
+    "components": {
+      "barrel": [
+        0,
+        29,
+        39
+      ],
+      "receiver": [
+        1
+      ],
+      "handguard": [
+        4
+      ],
+      "bolt_or_action": [
+        5
+      ],
+      "rear_sight": [
+        6,
+        16,
+        27,
+        34,
+        35
+      ],
+      "charging_handle": [
+        7,
+        26
+      ],
+      "stock_latch": [
+        11,
+        13,
+        31,
+        33,
+        37
+      ],
+      "trigger": [
+        14
+      ],
+      "selector": [
+        15
+      ],
+      "suppressor": [
+        3
+      ]
+    },
+    "magazines": {
+      "magazine": 2
+    },
+    "regions": [
+      {
+        "part": "handguard",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.384,
+            null
+          ]
+        }
+      },
+      {
+        "part": "front_sight",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.435,
+            -0.384
+          ],
+          "z": [
+            0.088,
+            null
+          ]
+        }
+      },
+      {
+        "part": "stock",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.019,
+            null
+          ]
+        }
+      },
+      {
+        "part": "carry_handle",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "z": [
+            0.098,
+            null
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.095,
+            -0.016
+          ],
+          "z": [
+            null,
+            0.035
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {
+      "stock_latch": "stock",
+      "rear_sight": "carry_handle"
+    },
+    "muzzle_part": "suppressor",
+    "face_count": 44785,
+    "component_count": 46,
+    "source_sha256": "f9a083f0c42cf143c4f100a87061c7145e9d65694eae68b56b367dd5d9c33550"
+  },
+  "rif_sg552": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "optic": [
+        1,
+        4,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        32,
+        44,
+        46
+      ],
+      "stock": [
+        2,
+        8,
+        34,
+        43
+      ],
+      "bolt_or_action": [
+        9
+      ],
+      "charging_handle": [
+        33
+      ],
+      "trigger": [
+        23
+      ],
+      "selector": [
+        22,
+        24
+      ]
+    },
+    "magazines": {
+      "magazine": 3
+    },
+    "regions": [
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.465
+          ]
+        }
+      },
+      {
+        "part": "handguard",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.465,
+            -0.24
+          ]
+        }
+      },
+      {
+        "part": "front_sight",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.474,
+            -0.444
+          ],
+          "z": [
+            0.082,
+            null
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.104,
+            -0.028
+          ],
+          "z": [
+            null,
+            0.023
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "face_count": 52361,
+    "component_count": 49,
+    "source_sha256": "96e097a29dd261ca4fcfed920ca1cc451a0f70639de1d1a5e0267d828ef9c99a"
+  },
+  "shot_m3super90": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "fore_end": [
+        1
+      ],
+      "rear_sight": [
+        2,
+        4,
+        6,
+        12,
+        14
+      ],
+      "stock_hardware": [
+        3
+      ],
+      "bolt_or_action": [
+        5
+      ],
+      "trigger": [
+        7
+      ],
+      "loading_port": [
+        8
+      ],
+      "front_sight": [
+        9,
+        10,
+        11,
+        13
+      ]
+    },
+    "magazines": {},
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.005,
+            null
+          ]
+        }
+      },
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.221
+          ],
+          "z": [
+            0.081,
+            null
+          ]
+        }
+      },
+      {
+        "part": "tube_magazine",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.221
+          ],
+          "z": [
+            null,
+            0.081
+          ]
+        }
+      }
+    ],
+    "anchors": {
+      "ejection_port": {
+        "components": [
+          5
+        ],
+        "bounds": {
+          "y": [
+            -0.218,
+            -0.147
+          ]
+        }
+      }
+    },
+    "parents": {
+      "stock_hardware": "stock"
+    },
+    "face_count": 25908,
+    "component_count": 19,
+    "source_sha256": "36b0e402f647b1039a9f7837d9bddc216892f7799c696d4d14f1817e7d3238f3"
+  },
+  "shot_xm1014": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "bolt_or_action": [
+        1
+      ],
+      "cheek_rest": [
+        2
+      ],
+      "loading_port": [
+        3
+      ],
+      "rear_sight": [
+        4,
+        10
+      ],
+      "front_sight": [
+        7,
+        8,
+        11,
+        16
+      ]
+    },
+    "magazines": {},
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            0.05,
+            null
+          ]
+        }
+      },
+      {
+        "part": "fore_end",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.266,
+            -0.129
+          ],
+          "z": [
+            null,
+            0.068
+          ]
+        }
+      },
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.126
+          ],
+          "z": [
+            0.068,
+            null
+          ]
+        }
+      },
+      {
+        "part": "tube_magazine",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.266
+          ],
+          "z": [
+            null,
+            0.068
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            0.012,
+            0.076
+          ],
+          "z": [
+            null,
+            0.03
+          ]
+        }
+      },
+      {
+        "part": "trigger",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.017,
+            0.004
+          ],
+          "z": [
+            0.029,
+            0.055
+          ]
+        }
+      }
+    ],
+    "anchors": {
+      "ejection_port": {
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.115,
+            -0.05
+          ]
+        }
+      }
+    },
+    "parents": {
+      "cheek_rest": "stock"
+    },
+    "face_count": 26350,
+    "component_count": 23,
+    "source_sha256": "b226f5f645de410e92dc06467d29a9bd0a284ddc2e1ea23937d186c57a017abf"
+  },
+  "smg_mac10": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "stock": [
+        1,
+        2,
+        3
+      ],
+      "sling": [
+        5,
+        7,
+        13
+      ],
+      "charging_handle": [
+        6
+      ],
+      "trigger_guard": [
+        14
+      ],
+      "trigger": [
+        24
+      ],
+      "selector": [
+        26
+      ]
+    },
+    "magazines": {
+      "magazine": 4
+    },
+    "regions": [
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.275
+          ]
+        }
+      },
+      {
+        "part": "front_sight",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.275,
+            -0.253
+          ],
+          "z": [
+            0.125,
+            null
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.178,
+            -0.131
+          ],
+          "z": [
+            null,
+            0.075
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "face_count": 25308,
+    "component_count": 33,
+    "source_sha256": "e7e3ec708c5c680287bf88c5a99935125b51082b7043076bec175b84a7f0cf50"
+  },
+  "smg_mp5": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "charging_handle": [
+        6
+      ],
+      "selector": [
+        7
+      ],
+      "rear_sight": [
+        10,
+        17,
+        18
+      ],
+      "trigger": [
+        11
+      ]
+    },
+    "magazines": {
+      "magazine": 1
+    },
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.043,
+            null
+          ]
+        }
+      },
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.435
+          ]
+        }
+      },
+      {
+        "part": "handguard",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.435,
+            -0.282
+          ],
+          "z": [
+            null,
+            0.13
+          ]
+        }
+      },
+      {
+        "part": "front_sight",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.448,
+            -0.415
+          ],
+          "z": [
+            0.125,
+            null
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.152,
+            -0.07
+          ],
+          "z": [
+            null,
+            0.043
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "face_count": 37799,
+    "component_count": 26,
+    "source_sha256": "23c266445a0e0b3cecd6eedb989ee51ca8bee14bfefe6e16dda6fb05aeacbcec"
+  },
+  "smg_p90": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "front_sight": [
+        2,
+        7,
+        10,
+        18
+      ],
+      "rear_sight": [
+        4,
+        8,
+        11,
+        19
+      ],
+      "magazine_feed": [
+        3,
+        13
+      ],
+      "charging_handle": [
+        5,
+        6
+      ],
+      "selector": [
+        15
+      ]
+    },
+    "magazines": {
+      "magazine": 1
+    },
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.048,
+            null
+          ]
+        }
+      },
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.31
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.225,
+            -0.09
+          ],
+          "z": [
+            null,
+            0.073
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "face_count": 24783,
+    "component_count": 20,
+    "source_sha256": "3ef0ead745ac7534f466b47f396ad0e56b50939924326fedaf70ed67a4dec9ff"
+  },
+  "smg_tmp": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "stock": [
+        1
+      ],
+      "charging_handle": [
+        8,
+        9
+      ],
+      "trigger": [
+        11
+      ]
+    },
+    "magazines": {
+      "magazine": 2
+    },
+    "regions": [
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.238
+          ]
+        }
+      },
+      {
+        "part": "front_sight",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.23,
+            -0.204
+          ],
+          "z": [
+            0.121,
+            null
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.132,
+            -0.086
+          ],
+          "z": [
+            null,
+            0.077
+          ]
+        }
+      },
+      {
+        "part": "foregrip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.219,
+            -0.174
+          ],
+          "z": [
+            null,
+            0.071
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "face_count": 31004,
+    "component_count": 37,
+    "source_sha256": "198627892bca238af4c5f88ec4146006d6c9f8db5c6198ef199d7d6260f3441c"
+  },
+  "smg_ump45": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "lower_receiver": [
+        1
+      ],
+      "foregrip": [
+        2
+      ],
+      "handguard_rail": [
+        3
+      ],
+      "barrel": [
+        4
+      ],
+      "charging_handle": [
+        12
+      ],
+      "selector": [
+        15,
+        17
+      ],
+      "trigger": [
+        16
+      ]
+    },
+    "magazines": {
+      "magazine": 5
+    },
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.023,
+            null
+          ]
+        }
+      },
+      {
+        "part": "front_sight",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.327
+          ],
+          "z": [
+            0.105,
+            null
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.125,
+            -0.04
+          ],
+          "z": [
+            null,
+            0.028
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "face_count": 32793,
+    "component_count": 42,
+    "source_sha256": "040597f4989a72da4438fa969efaa513ef00887a104b9cf7ed7aba15e6ac771d"
+  },
+  "snip_awp": {
+    "components": {
+      "stock": [
+        0,
+        21,
+        23
+      ],
+      "scope_body": [
+        1
+      ],
+      "bolt_or_action": [
+        4,
+        19,
+        24
+      ],
+      "scope_turret": [
+        5,
+        7,
+        11
+      ],
+      "barrel": [
+        6,
+        55,
+        56
+      ],
+      "receiver": [
+        10,
+        20
+      ],
+      "trigger": [
+        35
+      ],
+      "bipod": [
+        2,
+        3,
+        8,
+        9,
+        22,
+        25,
+        26,
+        28,
+        31,
+        33,
+        34,
+        36,
+        37,
+        38,
+        39,
+        40,
+        42,
+        43,
+        44,
+        45,
+        58,
+        59,
+        60,
+        63,
+        77,
+        80
+      ]
+    },
+    "magazines": {
+      "magazine": 12
+    },
+    "regions": [
+      {
+        "part": "scope_objective",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.24
+          ]
+        }
+      },
+      {
+        "part": "scope_eyepiece",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.125,
+            null
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "face_count": 39769,
+    "component_count": 81,
+    "source_sha256": "826f7d46f770330583d6235b33c68ec5cb9af6bcb31bc3151cfc46ea3ec8c5fa"
+  },
+  "snip_g3sg1": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "scope_body": [
+        1
+      ],
+      "scope_mount": [
+        2
+      ],
+      "scope_turret": [
+        5
+      ],
+      "bolt_or_action": [
+        4,
+        12
+      ],
+      "trigger": [
+        15
+      ]
+    },
+    "magazines": {
+      "magazine": 3
+    },
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            0.02,
+            null
+          ]
+        }
+      },
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.491
+          ]
+        }
+      },
+      {
+        "part": "handguard",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.491,
+            -0.235
+          ],
+          "z": [
+            null,
+            0.104
+          ]
+        }
+      },
+      {
+        "part": "grip",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.088,
+            -0.025
+          ],
+          "z": [
+            null,
+            0.028
+          ]
+        }
+      },
+      {
+        "part": "scope_objective",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.16
+          ]
+        }
+      },
+      {
+        "part": "scope_eyepiece",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.056,
+            null
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {},
+    "face_count": 47636,
+    "component_count": 46,
+    "source_sha256": "70341939c1c7ccc086b48884427410914703258298ed542df6720796af84eeee"
+  },
+  "snip_scout": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "scope_eyepiece": [
+        1
+      ],
+      "bolt_or_action": [
+        2,
+        10
+      ],
+      "stock_hardware": [
+        3,
+        7,
+        9,
+        14,
+        16,
+        18
+      ],
+      "bipod": [
+        4,
+        8,
+        13,
+        15
+      ],
+      "barrel": [
+        6
+      ],
+      "trigger": [
+        17
+      ]
+    },
+    "magazines": {
+      "magazine": 5
+    },
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            0.012,
+            null
+          ]
+        }
+      },
+      {
+        "part": "handguard",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.517,
+            -0.263
+          ],
+          "z": [
+            null,
+            0.102
+          ]
+        }
+      },
+      {
+        "part": "scope_objective",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.263,
+            -0.19
+          ],
+          "z": [
+            0.111,
+            null
+          ]
+        }
+      },
+      {
+        "part": "scope_turret",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.222,
+            -0.178
+          ],
+          "z": [
+            0.144,
+            null
+          ]
+        }
+      },
+      {
+        "part": "scope_body",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.19,
+            -0.16
+          ],
+          "z": [
+            0.113,
+            null
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {
+      "stock_hardware": "stock"
+    },
+    "face_count": 49257,
+    "component_count": 51,
+    "source_sha256": "1b99895e2776ce80d1429e09cf0484798f6b23644d2894785a29759fc9dd9d6b"
+  },
+  "snip_sg550": {
+    "components": {
+      "receiver": [
+        0
+      ],
+      "scope_body": [
+        1
+      ],
+      "cheek_rest": [
+        2
+      ],
+      "bolt_or_action": [
+        4,
+        15,
+        19
+      ],
+      "scope_turret": [
+        10,
+        11,
+        12
+      ],
+      "trigger": [
+        30
+      ]
+    },
+    "magazines": {
+      "magazine": 3
+    },
+    "regions": [
+      {
+        "part": "stock",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            0.009,
+            null
+          ]
+        }
+      },
+      {
+        "part": "barrel",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.479
+          ]
+        }
+      },
+      {
+        "part": "handguard",
+        "components": [
+          0
+        ],
+        "bounds": {
+          "y": [
+            -0.479,
+            -0.229
+          ],
+          "z": [
+            null,
+            0.103
+          ]
+        }
+      },
+      {
+        "part": "scope_objective",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            null,
+            -0.235
+          ]
+        }
+      },
+      {
+        "part": "scope_eyepiece",
+        "components": [
+          1
+        ],
+        "bounds": {
+          "y": [
+            -0.101,
+            null
+          ]
+        }
+      }
+    ],
+    "anchors": {},
+    "parents": {
+      "cheek_rest": "stock"
+    },
+    "face_count": 55076,
+    "component_count": 48,
+    "source_sha256": "dc57eb1b976df0a32fbeedc7323d6a6f9b3b54f7492db341a68a23d56379760e"
+  }
+}

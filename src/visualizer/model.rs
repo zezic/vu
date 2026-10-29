@@ -710,10 +710,10 @@ mod tests {
     #[test]
     fn empty_anchor_radius_uses_the_full_scaled_diagonal() -> anyhow::Result<()> {
         let models = ModelSet::load()?;
-        let model = models.current();
-        let empty = model
-            .anchors
-            .values()
+        let empty = models
+            .models
+            .iter()
+            .flat_map(|model| model.anchors.values())
             .find(|anchor| anchor.part.is_none())
             .expect("the bundled model has an empty anchor");
         assert!((empty.radius - empty.size.length()).abs() < 1e-6);
