@@ -63,9 +63,12 @@ const POI_SWITCH_CLOSENESS_POWER: f32 = 2.0;
 /// Relative weight kept by the farthest candidate so a long jump stays
 /// possible.
 const POI_SWITCH_FAR_CHANCE: f32 = 0.1;
-/// The entry blend must be both visually complete and nearly motionless
-/// before kick-driven orbit and FOV changes are accepted.
-const ENTRY_SETTLED_BLEND: f32 = 0.999;
+/// The entry flight must be visually complete and nearly motionless before
+/// kick-driven orbit and FOV changes are accepted. Kicks modify the orbit and
+/// FOV springs, so all three must reach their targets before the gate opens.
+const ENTRY_SETTLED_BLEND_GAP: f32 = 0.001;
+const ENTRY_SETTLED_ANGLE: f32 = 0.005;
+const ENTRY_SETTLED_FOV: f32 = 0.005;
 const ENTRY_SETTLED_VELOCITY: f32 = 0.02;
 
 /// Every tunable showcase parameter. Stored with the rest of the inspector
@@ -373,6 +376,16 @@ pub struct ShowcaseFrame {
     pub selector: SelectorView,
 }
 
+impl ShowcaseFrame {
+    /// Hides every mesh-focus effect for a model that is not upright.
+    pub fn hide_mesh_effects(&mut self) {
+        self.highlight_part = None;
+        self.focus_child = None;
+        self.mesh_attenuation = 1.0;
+        self.selector = SelectorView::NONE;
+    }
+}
+
 pub struct Showcase {
     settings: ShowcaseSettings,
     mode: ShowcaseMode,
@@ -659,6 +672,13 @@ impl Showcase {
         }
     }
 
+    /// Drops the mesh-focus effects while the model is not upright. A pending
+    /// selector entry stays armed, so it can still start after the flip ends.
+    pub fn hide_effects(&mut self) {
+        self.selector.hide();
+        self.mesh_fade = 0.0;
+    }
+
     pub fn hat(&mut self, rng: &mut Rng) {
         if self.mode == ShowcaseMode::Poi {
             self.advance_poi_child();
@@ -703,18 +723,6 @@ impl Showcase {
         let settings = &self.settings;
         self.blend
             .advance(dt, settings.focus_stiffness, settings.focus_damping);
-        if self.mode == ShowcaseMode::Poi
-            && !self.entry_settled
-            && self.blend.value() >= ENTRY_SETTLED_BLEND
-            && self.blend.velocity().abs() <= ENTRY_SETTLED_VELOCITY
-        {
-            self.entry_settled = true;
-        }
-        if self.mode == ShowcaseMode::Poi && self.entry_settled {
-            self.orbit_drift_yaw += dt * settings.orbit_speed;
-            self.dolly_phase =
-                (self.dolly_phase + dt * TAU / settings.dolly_period).rem_euclid(TAU);
-        }
         self.motion
             .advance(dt, settings.motion_stiffness, settings.motion_damping);
         for spring in &mut self.center {
@@ -730,6 +738,28 @@ impl Showcase {
             .advance(dt, settings.dolly_stiffness, settings.dolly_damping);
         self.slide
             .advance(dt, settings.focus_stiffness, settings.focus_damping);
+        if self.mode == ShowcaseMode::Poi
+            && !self.entry_settled
+            && self
+                .blend
+                .is_settled(ENTRY_SETTLED_BLEND_GAP, ENTRY_SETTLED_VELOCITY)
+            && self
+                .orbit_yaw
+                .is_settled(ENTRY_SETTLED_ANGLE, ENTRY_SETTLED_VELOCITY)
+            && self
+                .orbit_pitch
+                .is_settled(ENTRY_SETTLED_ANGLE, ENTRY_SETTLED_VELOCITY)
+            && self
+                .fov
+                .is_settled(ENTRY_SETTLED_FOV, ENTRY_SETTLED_VELOCITY)
+        {
+            self.entry_settled = true;
+        }
+        if self.mode == ShowcaseMode::Poi && self.entry_settled {
+            self.orbit_drift_yaw += dt * settings.orbit_speed;
+            self.dolly_phase =
+                (self.dolly_phase + dt * TAU / settings.dolly_period).rem_euclid(TAU);
+        }
         self.poi_switch_cooldown = (self.poi_switch_cooldown - dt).max(0.0);
         let mesh_target = if self.mode == ShowcaseMode::Poi
             && self
@@ -756,7 +786,7 @@ impl Showcase {
     }
 
     pub fn frame(&self) -> ShowcaseFrame {
-        let blend = self.blend.value().clamp(0.0, 1.0);
+        let blend = self.blend.value();
         let target = self.target.as_ref();
         let center = Vec3::new(
             self.center[0].value(),
@@ -764,18 +794,18 @@ impl Showcase {
             self.center[2].value(),
         );
         let fov = self.fov.value().clamp(0.017, std::f32::consts::PI - 0.017);
-        let slide = self.slide.value().clamp(0.0, 1.0);
+        let slide = self.slide.value();
         ShowcaseFrame {
             focus: FocusView {
                 center,
-                radius: self.radius.value().max(0.0),
+                radius: self.radius.value().abs(),
                 orbit_yaw: self.orbit_yaw.value(),
                 orbit_pitch: self.orbit_pitch.value(),
                 orbit_drift_yaw: self.orbit_drift_yaw,
                 dolly_scale: 1.0 + self.settings.dolly_depth * self.dolly_phase.sin(),
                 fov,
                 blend,
-                model_motion: self.motion.value().clamp(0.0, 1.0),
+                model_motion: self.motion.value(),
                 freeze_motion: self.mode == ShowcaseMode::Poi,
             },
             highlight_part: if blend > 0.01 {
@@ -1022,6 +1052,13 @@ impl SelectorState {
         self.gap_elapsed = 0.0;
     }
 
+    /// Stops the visible effect immediately without disarming a pending entry.
+    fn hide(&mut self) {
+        self.active = false;
+        self.alternate_color = false;
+        self.progress = 0.0;
+    }
+
     /// Counts an entry kick while the selector is off. Reaching the configured
     /// count opens the selector.
     fn record_entry_kick(&mut self, settings: &ShowcaseSettings) -> bool {
@@ -1157,8 +1194,8 @@ fn signed_fov_step(rng: &mut Rng, current: f32, minimum: f32, maximum: f32) -> f
 /// Camera distance that fits a sphere of `radius` into the focused view while
 /// keeping its projected size constant across the FOV.
 pub fn framed_distance(radius: f32, fov: f32) -> f32 {
-    let radius = radius.max(1e-4);
-    let tangent = (fov * 0.5).clamp(0.01, 1.5).tan();
+    let radius = radius.abs().max(1e-4);
+    let tangent = (fov * 0.5).max(0.01).tan();
     radius * (1.0 + 1.0 / (FOCUS_FILL * tangent).powi(2)).sqrt()
 }
 
@@ -1173,6 +1210,13 @@ mod tests {
             radius: 0.2,
             size: Vec3::new(0.05, 0.05, 0.25),
             part,
+        }
+    }
+
+    fn small_anchor(x: f32) -> Anchor {
+        Anchor {
+            radius: 0.013,
+            ..anchor(x, None)
         }
     }
 
@@ -2049,6 +2093,142 @@ mod tests {
         showcase.kick(&mut rng, true);
         assert!((showcase.orbit_yaw.target() - orbit_target).abs() > 1e-6);
         assert!((showcase.fov.target() - fov_target).abs() > 1e-6);
+    }
+
+    #[test]
+    fn hide_effects_resets_the_poi_mesh_fade() {
+        let mut showcase = Showcase::new(ShowcaseSettings::default());
+        showcase.set_model(
+            vec![FocusPoi::new(
+                "body".to_owned(),
+                anchor(0.8, Some(0)),
+                false,
+            )],
+            2,
+        );
+        let mut rng = Rng::new(75);
+        assert!(showcase.enter_focus(&mut rng, 0.75));
+        for _ in 0..60 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!(
+            showcase.frame().mesh_attenuation < 1.0,
+            "the POI focus must have faded the other meshes"
+        );
+        showcase.hide_effects();
+        assert_eq!(
+            showcase.frame().mesh_attenuation,
+            1.0,
+            "hiding the effects must clear the POI attenuation"
+        );
+    }
+
+    #[test]
+    fn underdamped_entry_lets_the_blend_ring_through_its_target() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            focus_stiffness: 160.0,
+            focus_damping: 13.0,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![FocusPoi::new("small".to_owned(), small_anchor(0.0), false)],
+            1,
+        );
+        let mut rng = Rng::new(72);
+        assert!(showcase.enter_focus(&mut rng, 0.75));
+
+        let mut peak = 0.0_f32;
+        let mut lowest_after_peak = 1.0_f32;
+        let mut peaked = false;
+        for _ in 0..180 {
+            showcase.advance(1.0 / 60.0);
+            let blend = showcase.blend.value();
+            peak = peak.max(blend);
+            if blend > 1.0 {
+                peaked = true;
+            } else if peaked {
+                lowest_after_peak = lowest_after_peak.min(blend);
+            }
+        }
+        assert!(peak > 1.05, "the entry spring must oscillate freely");
+        assert!(
+            lowest_after_peak < 0.99,
+            "the spring must also swing back through its target"
+        );
+        assert!(showcase.entry_settled);
+    }
+
+    #[test]
+    fn underdamped_motion_fade_rings_through_the_frozen_state() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            motion_stiffness: 262.5,
+            motion_damping: 7.0,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![FocusPoi::new("poi".to_owned(), anchor(0.8, None), false)],
+            1,
+        );
+        let mut rng = Rng::new(73);
+        assert!(showcase.enter_focus(&mut rng, 0.75));
+
+        let mut lowest = 0.0_f32;
+        let mut returned = 0.0_f32;
+        let mut went_negative = false;
+        for _ in 0..180 {
+            showcase.advance(1.0 / 60.0);
+            let motion = showcase.motion.value();
+            lowest = lowest.min(motion);
+            if motion < 0.0 {
+                went_negative = true;
+            } else if went_negative {
+                returned = returned.max(motion);
+            }
+        }
+        assert!(lowest < -0.1, "the motion spring must ring through zero");
+        assert!(
+            returned > 0.0,
+            "the motion spring must return through the frozen state"
+        );
+    }
+
+    #[test]
+    fn kicks_wait_for_the_orbit_to_finish_the_entry_flight() {
+        let mut showcase = Showcase::new(ShowcaseSettings {
+            focus_stiffness: 160.0,
+            focus_damping: 25.3,
+            orbit_stiffness: 40.0,
+            orbit_damping: 8.0,
+            ..ShowcaseSettings::default()
+        });
+        showcase.set_model(
+            vec![FocusPoi::new("poi".to_owned(), anchor(0.8, None), false)],
+            1,
+        );
+        let mut rng = Rng::new(74);
+        assert!(showcase.enter_focus(&mut rng, 0.75));
+        for _ in 0..50 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!(
+            showcase.blend.value() > 0.999,
+            "the blend reaches its target before the orbit does"
+        );
+        assert!(!showcase.entry_settled);
+        let orbit_target = showcase.orbit_yaw.target();
+        showcase.kick(&mut rng, true);
+        assert_eq!(
+            showcase.orbit_yaw.target(),
+            orbit_target,
+            "a kick must not re-aim the orbit while the entry flight is still moving"
+        );
+
+        for _ in 0..300 {
+            showcase.advance(1.0 / 60.0);
+        }
+        assert!(showcase.entry_settled);
+        showcase.kick(&mut rng, true);
+        assert!((showcase.orbit_yaw.target() - orbit_target).abs() > 1e-6);
     }
 
     #[test]

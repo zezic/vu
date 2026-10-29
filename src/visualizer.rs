@@ -2968,9 +2968,14 @@ impl Visualizer {
             self.detectors.flip_damping,
         );
         // A selector entry armed while the model was flipping waits for the
-        // flip to finish upright before the effect turns on.
-        if self.flip_is_upright() {
+        // flip to finish upright before the effect turns on. Every mesh-focus
+        // effect is cleared while the model is not upright; a pending entry
+        // stays armed.
+        let model_upright = self.flip_is_upright();
+        if model_upright {
             self.showcase.activate_pending_selector(&mut self.rng);
+        } else {
+            self.showcase.hide_effects();
         }
         self.quake_x.advance(
             dt,
@@ -3022,7 +3027,10 @@ impl Visualizer {
             self.record_debug_sample();
             return;
         }
-        let showcase = self.showcase.frame();
+        let mut showcase = self.showcase.frame();
+        if !model_upright {
+            showcase.hide_mesh_effects();
+        }
         self.scene.update(
             dt,
             &music,
@@ -3322,12 +3330,18 @@ impl Visualizer {
     }
 
     /// Whether the flip has settled on an upright whole turn, so the selector
-    /// can turn on with the model in its normal orientation.
+    /// can turn on with the model in its normal orientation. The unwrapped
+    /// distance to the target is part of the check: a whole turn still owed to
+    /// the spring is a pending flip even when both ends wrap to upright.
     fn flip_is_upright(&self) -> bool {
-        !self.property_gates.plays(Property::Flip)
-            || (wrap_angle(self.flip_target()).abs() <= SELECTOR_UPRIGHT_ANGLE
-                && wrap_angle(self.flip.value()).abs() <= SELECTOR_UPRIGHT_ANGLE
-                && self.flip.velocity().abs() <= SELECTOR_UPRIGHT_SPEED)
+        if !self.property_gates.plays(Property::Flip) {
+            return true;
+        }
+        let target = self.flip_target();
+        wrap_angle(target).abs() <= SELECTOR_UPRIGHT_ANGLE
+            && wrap_angle(self.flip.value()).abs() <= SELECTOR_UPRIGHT_ANGLE
+            && (self.flip.value() - target).abs() <= SELECTOR_UPRIGHT_ANGLE
+            && self.flip.velocity().abs() <= SELECTOR_UPRIGHT_SPEED
     }
 
     fn quake_impulse(&mut self, direction: QuakeDirection, velocity: f32) {
@@ -3744,11 +3758,29 @@ struct VertexDiagnosis {
     acceleration: Vec2,
 }
 
+/// Interpolates two positive values in log space. A blend outside `[0, 1]`
+/// overshoots in either direction without crossing zero.
+fn blend_positive(from: f32, to: f32, blend: f32) -> f32 {
+    assert!(
+        from > 0.0 && to > 0.0,
+        "a positive blend needs positive endpoints"
+    );
+    if from == to {
+        from
+    } else {
+        from * (to / from).powf(blend)
+    }
+}
+
 /// Depth-fade radius for the focus blend. The focused volume spans three POI
 /// diameters, capped by the model diameter; normal mode keeps the model radius.
+/// The interpolation stays positive when the free entry spring overshoots.
 fn focus_depth_radius(model_radius: f32, poi_radius: f32, blend: f32) -> f32 {
-    let focused = (poi_radius * POI_DEPTH_SCALE).min(model_radius);
-    model_radius + (focused - model_radius) * blend
+    let model_radius = model_radius.abs().max(1e-4);
+    let focused = (poi_radius.abs() * POI_DEPTH_SCALE)
+        .min(model_radius)
+        .max(1e-4);
+    blend_positive(model_radius, focused, blend)
 }
 
 impl ModelRuntime {
@@ -3888,7 +3920,7 @@ impl ModelRuntime {
         );
         let spin = gates.drive(Property::Spin, mixer.value(MixPoint::SpinSpeed, &context));
         self.spin_speed = spin;
-        let model_motion = showcase.focus.model_motion.clamp(0.0, 1.0);
+        let model_motion = showcase.focus.model_motion;
         if showcase.focus.freeze_motion && !self.motion_frozen {
             self.frozen_scale = self.pose.scale;
             self.motion_frozen = true;
@@ -3924,7 +3956,11 @@ impl ModelRuntime {
         );
         let scale = entrance_scale * energy * self.style.zoom_bias * camera_zoom;
         let target_scale = soft_saturate(scale, 1.45).max(0.35);
-        self.pose.scale = self.frozen_scale + (target_scale - self.frozen_scale) * model_motion;
+        // The free motion spring rings through the frozen state. The scale
+        // follows its magnitude so a negative excursion cannot mirror the
+        // model, while the rotations use the signed value.
+        self.pose.scale =
+            self.frozen_scale + (target_scale - self.frozen_scale) * model_motion.abs();
         // Models are rigid, so the vertex distortion controls contribute an
         // identity transform.
         let deformation = Deformation::default();
@@ -3972,19 +4008,16 @@ impl ModelRuntime {
         let base_rate = 1.0 - (-14.0 * dt).exp();
         self.base_yaw += wrap_angle(target_base_yaw - self.base_yaw) * base_rate;
         self.base_pitch += wrap_angle(target_base_pitch - self.base_pitch) * base_rate;
+        let blend = showcase.focus.blend;
         let normal_yaw =
-            (self.base_yaw + showcase.focus.orbit_yaw + showcase.focus.orbit_drift_yaw)
-                * showcase.focus.blend;
-        let normal_pitch = (self.base_pitch + showcase.focus.orbit_pitch) * showcase.focus.blend;
+            (self.base_yaw + showcase.focus.orbit_yaw + showcase.focus.orbit_drift_yaw) * blend;
+        let normal_pitch = (self.base_pitch + showcase.focus.orbit_pitch) * blend;
         if reentered_from_exit {
             self.rotation_offset_yaw = wrap_angle(self.last_rotation_yaw - normal_yaw);
             self.rotation_offset_pitch = wrap_angle(self.last_rotation_pitch - normal_pitch);
         }
         let (rotation_yaw, rotation_pitch) = if self.exit_rotation {
-            (
-                self.exit_total_yaw * showcase.focus.blend,
-                self.exit_total_pitch * showcase.focus.blend,
-            )
+            (self.exit_total_yaw * blend, self.exit_total_pitch * blend)
         } else {
             (
                 normal_yaw + self.rotation_offset_yaw,
@@ -3999,13 +4032,22 @@ impl ModelRuntime {
         let focus_radius = showcase.focus.radius * self.pose.scale;
         let focus_distance = showcase::framed_distance(focus_radius, showcase.focus.fov)
             * showcase.focus.dolly_scale;
+        let focused_near = (focus_distance * 0.05).max(0.001);
+        let view_distance = blend_positive(self.pose.distance, focus_distance, blend);
+        let view_focal = blend_positive(
+            camera.focal,
+            camera.focal_for_fov(showcase.focus.fov),
+            blend,
+        );
+        let view_near = blend_positive(0.4, focused_near, blend);
         let focus = FocusProjection {
             target: showcase.focus.center,
             rotation_yaw,
             rotation_pitch,
-            distance: focus_distance,
-            focal: camera.focal_for_fov(showcase.focus.fov),
-            blend: showcase.focus.blend,
+            distance: view_distance,
+            focal: view_focal,
+            near: view_near,
+            blend,
         };
         for index in 0..self.wireframe.vertex_count() {
             let mut rest = self.wireframe.vertex(index);
@@ -4014,7 +4056,7 @@ impl ModelRuntime {
             }
             let world = deformation.apply(rest);
             self.world_vertices.push(world);
-            self.vertices.push(if showcase.focus.blend > 0.0 {
+            self.vertices.push(if blend != 0.0 {
                 camera.project_focused(world, pose, focus)
             } else {
                 camera.project(world, pose)
@@ -4024,10 +4066,9 @@ impl ModelRuntime {
         // Models are fitted to a unit radius, so `pose.scale` is the model
         // radius in view space. Keep the depth planes on that fitted sphere
         // instead of following the silhouette of the current pose.
-        let depth_center =
-            self.pose.distance + (focus_distance - self.pose.distance) * showcase.focus.blend;
-        let depth_radius = focus_depth_radius(self.pose.scale, focus_radius, showcase.focus.blend);
-        let depth_opacity = DepthOpacity::centered(depth_center, depth_radius.max(0.0), depth_fade);
+        let depth_center = view_distance;
+        let depth_radius = focus_depth_radius(self.pose.scale, focus_radius, blend);
+        let depth_opacity = DepthOpacity::centered(depth_center, depth_radius, depth_fade);
         self.current.clear();
         self.current
             .extend(self.wireframe.edges().iter().map(|edge| {
@@ -4797,6 +4838,21 @@ mod tests {
     }
 
     #[test]
+    fn positive_blend_keeps_entry_overshoot_in_front_of_the_camera() {
+        let normal = 4.2;
+        let focus = 0.049;
+        assert!((blend_positive(normal, focus, 0.0) - normal).abs() < 1e-5);
+        assert!((blend_positive(normal, focus, 1.0) - focus).abs() < 1e-5);
+        let overshoot = blend_positive(normal, focus, 1.15);
+        assert!(
+            overshoot > 0.0 && overshoot < focus,
+            "an overshooting blend must stay in front of the target"
+        );
+        let undershoot = blend_positive(normal, focus, -0.15);
+        assert!(undershoot > normal, "an undershooting blend pulls back");
+    }
+
+    #[test]
     fn focused_depth_spans_three_poi_diameters_but_not_more_than_the_model() {
         let model_radius = 1.0;
         // Three POI diameters across: a POI radius of 0.2 becomes 0.6.
@@ -4806,8 +4862,13 @@ mod tests {
         assert!((focus_depth_radius(model_radius, 0.5, 1.0) - model_radius).abs() < 1e-6);
         // Normal mode keeps the model radius.
         assert!((focus_depth_radius(model_radius, 0.2, 0.0) - model_radius).abs() < 1e-6);
-        // The entry blend interpolates between the two.
-        assert!((focus_depth_radius(model_radius, 0.2, 0.5) - 0.8).abs() < 1e-6);
+        // The entry blend interpolates in log space between the two.
+        assert!((focus_depth_radius(model_radius, 0.2, 0.5) - 0.6_f32.sqrt()).abs() < 1e-6);
+        // An overshoot stays positive instead of crossing zero.
+        let overshoot = focus_depth_radius(model_radius, 0.2, 1.15);
+        assert!(overshoot > 0.0 && overshoot < 0.6);
+        let undershoot = focus_depth_radius(model_radius, 0.2, -0.15);
+        assert!(undershoot > model_radius);
         // The cap follows a larger model radius.
         assert!((focus_depth_radius(2.0, 0.9, 1.0) - 2.0).abs() < 1e-6);
     }
@@ -5545,6 +5606,27 @@ mod tests {
     }
 
     #[test]
+    fn focus_projection_survives_a_free_entry_overshoot() {
+        let mut runtime = test_runtime();
+        for blend in [1.15, 0.5, -0.15] {
+            let mut showcase = test_showcase_frame(blend, blend > 0.0, 0.0);
+            showcase.focus.radius = 0.013;
+            showcase.focus.fov = 0.75;
+            showcase.focus.center = Vec3::new(0.8, 0.0, 0.0);
+            step_runtime(&mut runtime, &showcase);
+            assert!(
+                runtime.vertices.iter().all(|vertex| {
+                    vertex.screen.x.is_finite()
+                        && vertex.screen.y.is_finite()
+                        && vertex.depth.is_finite()
+                        && vertex.depth > 0.0
+                }),
+                "blend {blend} must keep every vertex in front of the near plane"
+            );
+        }
+    }
+
+    #[test]
     fn a_flip_is_not_scaled_by_the_model_motion_fade() {
         let half_motion = flip_line_endpoints(0.5);
         let full_motion = flip_line_endpoints(1.0);
@@ -5761,6 +5843,64 @@ mod tests {
         assert!(
             (visualizer.flip_target() - TAU).abs() < 1e-5,
             "a drop entry must also finish the flip upright"
+        );
+    }
+
+    #[test]
+    fn selector_gate_waits_for_a_full_pending_turn_to_finish() {
+        let mut visualizer = loaded_visualizer();
+        visualizer.flip.reset(0.0);
+        visualizer.flip_half_turns = 1;
+        assert!(!visualizer.flip_is_upright());
+        visualizer.settle_flip_upright();
+        assert_eq!(visualizer.flip_half_turns, 2);
+        assert!(
+            !visualizer.flip_is_upright(),
+            "a whole turn owed to the spring is still a pending flip"
+        );
+        visualizer.flip_half_turns = 2;
+        visualizer.flip.reset(TAU);
+        assert!(visualizer.flip_is_upright());
+    }
+
+    #[test]
+    fn selector_is_hidden_while_the_model_is_flipping() {
+        let mut visualizer = loaded_visualizer();
+        visualizer.set_parameter(Parameter::SelectorEntryKicks, 1.0);
+        visualizer.set_parameter(Parameter::SelectorExitTriggers, 1.0);
+        visualizer.set_parameter(Parameter::SelectorFadeOut, 0.5);
+        let palette = Palette::from_theme(ThemeId::default());
+        let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
+        let mut advance = |visualizer: &mut Visualizer| {
+            visualizer.update(
+                frame,
+                ShutterFrames::try_from(1.0).unwrap(),
+                1.0 / 60.0,
+                &palette,
+                (1280.0, 440.0),
+                1.0,
+                1.0,
+            );
+            frame = AudioInterval::new(frame.end(), frame.end().shifted(1.0 / 60.0));
+        };
+
+        visualizer.handle_action(Action::Kick(0.5), 0.0, 0.75);
+        assert!(visualizer.showcase.selector_active());
+        advance(&mut visualizer);
+        assert!(
+            visualizer.showcase.frame().selector.attenuation < 1.0,
+            "the selector is visible before the flip"
+        );
+
+        visualizer.handle_action(Action::Kick(0.5), 0.0, 0.75);
+        assert!(!visualizer.showcase.selector_active());
+        visualizer.handle_action(Action::Snare, 0.0, 0.75);
+        advance(&mut visualizer);
+        assert!(!visualizer.showcase.selector_active());
+        assert_eq!(
+            visualizer.showcase.frame().selector.attenuation,
+            1.0,
+            "the selector must be hidden while the model is not upright"
         );
     }
 

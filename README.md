@@ -80,9 +80,13 @@ current camera angle, then clamped to the switch range: `SWITCH MIN` (default
 0 deg) raises a smaller step, and `SWITCH MAX` (default 45 deg) caps a larger
 one, so every switch starts from the view currently on screen rather than from
 the view the POI started with. A `SWITCH MAX` of 180 deg leaves the drawn step
-uncapped. The FOV stays inside 30-120 deg. The FOV and camera distance move
-together, so the POI keeps its size while the surrounding model undergoes a
-dolly zoom. `KICK ATTACK` (default 4/s) adds an initial velocity to the yaw,
+uncapped. The FOV target stays inside 30-120 deg; the spring may briefly
+overshoot it. The FOV and camera distance move together, so the POI keeps its
+size while the surrounding model undergoes a dolly zoom. The entry blend
+spring is free to overshoot; the camera distance,
+near plane, and depth radius are interpolated in log space so an overshoot
+moves past the target instead of crossing the camera through it. `KICK ATTACK`
+(default 4/s) adds an initial velocity to the yaw,
 pitch, and FOV springs when a kick sets a new target, so the move starts
 immediately instead of waiting for the spring to accelerate from rest. Kicks
 are ignored until the entry spring has settled, so the
@@ -123,8 +127,10 @@ The selector effect is available only in normal mode. `SEL ENTRY N` kicks
 or off. While active it keeps one mesh at full opacity, fades the other meshes
 to the configured attenuation (`SEL ATTEN`), and has a 25% chance to color the
 selected mesh differently. Entering the selector returns the model's flip
-spring to an upright pose and holds the effect off until the model has
-finished turning upright. Kicks and snares count toward an exit threshold
+spring to an upright pose and hides the selector effect and the POI mesh
+attenuation until the spring has settled on that upright whole turn, including
+any whole turn still owed to it. A pending entry stays armed and starts only
+after the flip has finished. Kicks and snares count toward an exit threshold
 (`SEL EXIT N`, default 20); the trigger that reaches the threshold turns the
 selector off. A drop or a model change turns it off immediately. A gap-gate
 entry no longer turns it off: the selector turns off only after the gap gate

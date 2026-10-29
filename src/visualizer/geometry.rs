@@ -410,11 +410,7 @@ impl Camera {
         let rotated = relative
             .rotate_y(focus.rotation_yaw)
             .rotate_x(focus.rotation_pitch);
-        let distance = pose.distance + (focus.distance - pose.distance) * focus.blend;
-        let focal = self.focal + (focus.focal - self.focal) * focus.blend;
-        let focused_near = (focus.distance * 0.05).max(0.001);
-        let near = 0.4 + (focused_near - 0.4) * focus.blend;
-        self.project_oriented(rotated, distance, pose.shake, focal, near)
+        self.project_oriented(rotated, focus.distance, pose.shake, focus.focal, focus.near)
     }
 
     fn project_oriented(
@@ -459,7 +455,6 @@ pub(super) fn focus_base_angles(target: Vec3) -> (f32, f32) {
 }
 
 /// A partially blended POI view applied after the model pose.
-
 #[derive(Clone, Copy, Debug)]
 pub struct FocusProjection {
     /// POI center in model space.
@@ -468,11 +463,15 @@ pub struct FocusProjection {
     /// exit blend before filling these.
     pub rotation_yaw: f32,
     pub rotation_pitch: f32,
-    /// Camera distance for the focused framing.
+    /// Effective camera distance for the current blend.
     pub distance: f32,
-    /// Camera focal length for the focused FOV.
+    /// Effective camera focal length for the current blend.
     pub focal: f32,
-    /// Zero keeps the normal view; one uses the focused view.
+    /// Effective near plane for the current blend.
+    pub near: f32,
+    /// Zero keeps the normal view; one uses the focused view. Values outside
+    /// the interval extrapolate the view without crossing the camera through
+    /// the target.
     pub blend: f32,
 }
 
@@ -597,6 +596,7 @@ mod tests {
             rotation_pitch: 0.3,
             distance: 3.0,
             focal: camera.focal_for_fov(0.7),
+            near: 0.4,
             blend: 1.0,
         };
         let projected = camera.project_focused(target, pose, focus);
@@ -613,8 +613,9 @@ mod tests {
             target: Vec3::new(0.2, 0.1, -0.1),
             rotation_yaw: 0.0,
             rotation_pitch: 0.0,
-            distance: 3.0,
-            focal: camera.focal_for_fov(0.7),
+            distance: pose.distance,
+            focal: camera.focal,
+            near: 0.4,
             blend: 0.0,
         };
         let normal = camera.project(vertex, pose);
@@ -651,6 +652,7 @@ mod tests {
             rotation_pitch: 0.0,
             distance: 0.1,
             focal: camera.focal_for_fov(2.0),
+            near: 0.005,
             blend: 1.0,
         };
         let behind = camera.project_focused(Vec3::new(0.0, 0.0, -1.0), pose, focus);

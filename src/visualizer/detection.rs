@@ -2422,7 +2422,7 @@ impl QuakeSequence {
     }
 }
 
-/// A damped spring used by the flip and quake actions.
+/// A damped spring used by the camera and model actions.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Spring {
     value: f32,
@@ -2468,6 +2468,14 @@ impl Spring {
         self.value = value;
         self.velocity = 0.0;
         self.target = value;
+    }
+
+    /// Whether the spring is within `position_epsilon` of its target and
+    /// moving no faster than `velocity_epsilon`.
+    #[must_use]
+    pub fn is_settled(&self, position_epsilon: f32, velocity_epsilon: f32) -> bool {
+        (self.value - self.target).abs() <= position_epsilon
+            && self.velocity.abs() <= velocity_epsilon
     }
 }
 
