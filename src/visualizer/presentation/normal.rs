@@ -23,6 +23,10 @@ use super::{
     text::{AnimatedText, Backdrop, CharEffect, PaintStyle, TextPhase},
 };
 
+/// Chance that one numeric field uses the spinner on its first appearance in a
+/// scene.
+const SPINNER_CHANCE: f32 = 0.7;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum SpecField {
     Capacity,
@@ -621,6 +625,8 @@ impl TextItem {
         }
         self.suppressed = false;
         if matches!(self.text.phase(), TextPhase::Hidden | TextPhase::Disappear) {
+            // The spinner belongs to the item's first appearance in a scene.
+            self.text.disable_odometer();
             self.text.enter(self.enter_effect, rng);
         }
     }
@@ -991,7 +997,7 @@ fn build_plan(
             };
             let numeric = field.is_numeric();
             let label_paint = PaintStyle::Fill;
-            let odometer = numeric && rng.unit() < 0.7;
+            let odometer = numeric && rng.unit() < SPINNER_CHANCE;
             let mut value_paint = if numeric && index == hero {
                 match rng.range(3) {
                     0 => PaintStyle::Stroke,
@@ -1139,5 +1145,55 @@ fn build_plan(
         specs,
         note,
         fact,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vello::kurbo::Size;
+
+    #[test]
+    fn a_restored_item_does_not_spin_again() -> anyhow::Result<()> {
+        let stage = Stage::new(Size::new(1920.0, 1080.0));
+        let mut fonts = Fonts::new()?;
+        let mut rng = Rng::new(7);
+        let mut text = AnimatedText::new(
+            "4299 MM",
+            64.0,
+            UiFace::SemiBold,
+            BlockAlign::Left,
+            None,
+            1.02,
+            PaintStyle::Fill,
+        )
+        .with_odometer(true);
+        text.layout(&mut fonts, &stage, &mut rng);
+        let mut item = TextItem {
+            text,
+            origin: Point::ORIGIN,
+            rotation: 0.0,
+            role: Role::SpecValue,
+            enter_effect: CharEffect::Fade,
+            exit_effect: CharEffect::Fade,
+            decoration: None,
+            rail: None,
+            rail_labels: None,
+            suppressed: false,
+            started: false,
+        };
+
+        item.start(&mut rng);
+        assert!(item.text.has_odometer(), "the first appearance spins");
+
+        for cycle in 0..2 {
+            item.suppress(&mut rng);
+            item.restore(&mut rng);
+            assert!(
+                !item.text.has_odometer(),
+                "reappearance {cycle} in the same scene must not spin"
+            );
+        }
+        Ok(())
     }
 }

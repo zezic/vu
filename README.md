@@ -179,7 +179,8 @@ rotated rail), field styles, and optional side decorations. Long notes, facts,
 actions, and fire modes wrap. Some rows carry a horizontal strip of
 line-height rectangles or a small square matrix on the aligned side. One
 numeric field can use a tick-marked comparison rail. Numeric fields can use the
-number spinner on entrance. If the model has a magazine with at least three
+number spinner on their first entrance in a scene; later reappearances use the
+usual character effect. If the model has a magazine with at least three
 modelled children, the first child wireframe is repeated once per
 `capacity_rounds` as an ammo tally; capacity values can also use the odometer.
 One `interesting_facts` sentence is typed into an edge block with a blinking

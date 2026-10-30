@@ -3,9 +3,9 @@
 //! Text is laid out once per stage size, then every glyph is drawn with its own
 //! alpha and substituted glyph id. This supports fade, neon flicker, glitch and
 //! typewriter entrances without relaying out every frame. Numeric blocks can
-//! instead use the odometer: coupled digit wheels turn from a wound-back number
-//! and bounce onto their stop on a virtual damped spring, and each wheel is
-//! drawn as an analytical motion sweep.
+//! instead use the odometer: each digit wheel starts behind its target digit and
+//! bounces onto it on a virtual damped spring, and each wheel is drawn as an
+//! analytical motion sweep.
 
 use vello::{
     kurbo::{Affine, BezPath, Point, Rect},
@@ -32,14 +32,21 @@ const STOP_BOUNCE_HZ: f64 = 2.6;
 /// wobbles before the wheel comes to rest.
 const STOP_BOUNCE_DAMPING: f64 = 0.16;
 
-/// Fraction of the spin's starting speed the stop bounce may start with. A
-/// register that only turns a few cells would otherwise start the bounce
-/// faster than it spins.
-const STOP_BOUNCE_ENTRY: f64 = 0.25;
-
 /// Slope of the normalized drive at the spawn. The wheels appear already at
 /// full speed, so the drive only ever decelerates.
 const DRIVE_START_SLOPE: f64 = 3.0;
+
+/// Cells the most significant wheel turns. Each place below it turns
+/// `WHEEL_TRAVEL_STEP` times farther.
+const TOP_WHEEL_TRAVEL: f64 = 7.0;
+
+/// How many times farther each place below the most significant turns than the
+/// place above it.
+const WHEEL_TRAVEL_STEP: f64 = 4.0;
+
+/// Least cells the lowest wheel turns during a spin. It does not depend on the
+/// value, so short numbers still start with a fast lowest wheel.
+const LOWEST_WHEEL_TRAVEL: f64 = 400.0;
 
 /// Spin seconds, chosen per register and per entrance.
 const SPIN_SECONDS_MIN: f32 = 0.85;
@@ -49,8 +56,9 @@ const SPIN_SECONDS_SPAN: f32 = 0.3;
 /// drawn until the spring comes to rest, so this only has to be close.
 const STOP_CLOCK_TAIL: f32 = 0.25;
 
-/// Below this sweep length a digit is drawn as a plain glyph.
-const PLAIN_SMEAR_PIXELS: f64 = 0.6;
+/// Below this sweep length a digit is drawn as a plain glyph. Kept small so
+/// even the slow high wheels keep their analytical exposure blur.
+const PLAIN_SMEAR_PIXELS: f64 = 0.2;
 
 /// Longest sweep that is drawn, in line heights. The digit strip repeats every
 /// ten cells, so a sweep of one period already averages over the whole digit
@@ -147,7 +155,7 @@ struct Dial {
     glyph: usize,
     /// Digit the wheel stops on.
     target: u32,
-    /// Whole cells the wheel turns during the spin.
+    /// Cells the wheel turns during the spin.
     travel: f64,
 }
 
@@ -203,7 +211,8 @@ impl Bounce {
 
 /// One number: its wheels share one drive and stop together on one bounce.
 struct Register {
-    /// Cells the lowest wheel turns; zero when the register does not move.
+    /// Cells the lowest wheel turns. The stop spring's amplitude is measured in
+    /// these cells.
     travel: f64,
     dials: Vec<Dial>,
     bounce: Bounce,
@@ -219,11 +228,6 @@ struct Register {
 
 impl Register {
     fn advance(&mut self, dt: f32, elapsed: f32) {
-        if self.travel <= 0.0 {
-            self.exposure = 0.0;
-            self.shown = 1.0;
-            return;
-        }
         let previous = self.shown;
         let shown = if elapsed >= self.seconds {
             if !self.released {
@@ -241,7 +245,7 @@ impl Register {
     }
 
     fn settled(&self) -> bool {
-        self.travel <= 0.0 || (self.released && self.bounce.settled(self.travel))
+        self.released && self.bounce.settled(self.travel)
     }
 }
 
@@ -291,7 +295,7 @@ impl Odometer {
         odometer
     }
 
-    /// Starts one spin with a fresh length. The wheels of a register unwind
+    /// Starts one spin with a fresh length. The wheels of a register start
     /// together.
     fn rewind(&mut self, rng: &mut Rng) {
         let mut duration = 0.0f32;
@@ -299,17 +303,11 @@ impl Odometer {
             register.exposure = 0.0;
             register.released = false;
             register.bounce.rest();
-            register.shown = if register.travel > 0.0 { 0.0 } else { 1.0 };
-            if register.travel <= 0.0 {
-                register.seconds = 0.0;
-                register.entry_slope = 0.0;
-                continue;
-            }
+            register.shown = 0.0;
             register.seconds = SPIN_SECONDS_MIN + rng.unit() * SPIN_SECONDS_SPAN;
             // The stop spring's amplitude is the bounce in cells, so the spin
             // only has to hand it the matching speed.
-            let entry_speed = (STOP_BOUNCE_CELLS * bounce_radians() / register.travel)
-                .min(STOP_BOUNCE_ENTRY * DRIVE_START_SLOPE / f64::from(register.seconds));
+            let entry_speed = STOP_BOUNCE_CELLS * bounce_radians() / register.travel;
             register.entry_slope = entry_speed * f64::from(register.seconds);
             duration = duration.max(register.seconds + STOP_CLOCK_TAIL);
         }
@@ -338,8 +336,10 @@ impl Odometer {
     }
 }
 
-/// Builds one register from a digit run: wheels share one drive, and each
-/// wheel turns ten times less than the wheel to its right.
+/// Builds one register from a digit run. The most significant wheel turns
+/// `TOP_WHEEL_TRAVEL` cells, each place below turns `WHEEL_TRAVEL_STEP` times
+/// farther, and the lowest wheel is held to at least `LOWEST_WHEEL_TRAVEL`, so
+/// every wheel starts behind its target regardless of the value.
 fn build_register(atlas: &GlyphAtlas, plan: &TextPlan, run: &[usize]) -> Register {
     let digits: Vec<u32> = run
         .iter()
@@ -349,35 +349,26 @@ fn build_register(atlas: &GlyphAtlas, plan: &TextPlan, run: &[usize]) -> Registe
                 .expect("a register run holds digits")
         })
         .collect();
-    let mut value = 0u64;
-    for &digit in &digits {
-        value = value * 10 + u64::from(digit);
-    }
-    // Wind back by the smallest number of lowest-wheel cells that still turns
-    // the most significant wheel at least one digit, and never below zero.
-    let places = digits.len() - 1;
-    let travel = if places == 0 {
-        value
-    } else {
-        let top = 10u64.pow(places as u32);
-        (top + value % top).min(value)
-    };
-    let start = value - travel;
-    let dials = digits
+    let lowest = digits.len() - 1;
+    let dials: Vec<Dial> = digits
         .iter()
         .enumerate()
         .map(|(index, &target)| {
-            let place = u32::try_from(digits.len() - 1 - index).expect("few digits");
-            let step = 10u64.pow(place);
+            let travel = TOP_WHEEL_TRAVEL * WHEEL_TRAVEL_STEP.powi(index as i32);
             Dial {
                 glyph: run[index],
                 target,
-                travel: (value / step - start / step) as f64,
+                travel: if index == lowest {
+                    travel.max(LOWEST_WHEEL_TRAVEL)
+                } else {
+                    travel
+                },
             }
         })
         .collect();
+    let travel = dials.last().expect("a register holds digits").travel;
     Register {
-        travel: travel as f64,
+        travel,
         dials,
         bounce: Bounce::new(),
         seconds: 0.0,
@@ -488,6 +479,17 @@ impl AnimatedText {
     pub fn with_odometer(mut self, odometer: bool) -> Self {
         self.odometer = odometer;
         self
+    }
+
+    /// Drops the odometer so later entrances use the text's character effect.
+    pub fn disable_odometer(&mut self) {
+        self.odometer = false;
+        self.odometer_state = None;
+    }
+
+    #[cfg(test)]
+    pub fn has_odometer(&self) -> bool {
+        self.odometer_state.is_some()
     }
 
     pub fn plan(&self) -> Option<&TextPlan> {
@@ -868,22 +870,11 @@ impl AnimatedText {
         }
         for register in &odometer.registers {
             let progress = f64::from(register.shown);
-            let settled = register.settled();
             for dial in &register.dials {
                 let glyph = &plan.glyphs[dial.glyph];
                 // The displacement of this wheel during the exposure, in its
                 // own cells and in stage units.
                 let smear = drawn_sweep_cells(register.exposure, dial.travel) * line_height;
-                if settled && smear < PLAIN_SMEAR_PIXELS {
-                    atlas.draw(
-                        scene,
-                        transform * Affine::translate((glyph.x, glyph.y)),
-                        glyph.id,
-                        palette.ink,
-                        alpha,
-                    );
-                    continue;
-                }
                 let line = plan.lines.get(usize::from(glyph.line));
                 let top = line.map_or(glyph.y - plan.cap_height, |line| line.top);
                 let bottom = line.map_or(glyph.y + line_height, |line| line.top + line.line_height);
@@ -1306,43 +1297,57 @@ mod tests {
     }
 
     #[test]
-    fn odometer_registers_wind_back_by_whole_digits_of_every_place() -> anyhow::Result<()> {
+    fn odometer_wheels_start_farther_towards_the_lowest_place() -> anyhow::Result<()> {
         let mut rng = Rng::new(3);
-        let cases: [(&str, &[(u32, f64)]); 7] = [
-            ("8 RND", &[(8, 8.0)]),
-            ("43 RND", &[(4, 1.0), (3, 13.0)]),
-            ("100 RND", &[(1, 1.0), (0, 10.0), (0, 100.0)]),
-            ("$499 USD", &[(4, 1.0), (9, 19.0), (9, 199.0)]),
-            ("4299 MM", &[(4, 1.0), (2, 12.0), (9, 129.0), (9, 1299.0)]),
-            ("2.3 KG", &[(2, 1.0), (3, 13.0)]),
-            ("0.7 KG", &[(0, 0.0), (7, 7.0)]),
-        ];
-        for (source, expected) in cases {
+        for source in [
+            "8 RND", "43 RND", "100 RND", "$499 USD", "4299 MM", "2.3 KG", "0.7 KG",
+        ] {
             let text = laid_out(source, &mut rng)?;
-            assert_eq!(dials(&text), expected, "{source}");
+            let dials = dials(&text);
+            let count = dials.len();
+            for (index, (_, travel)) in dials.iter().enumerate() {
+                let natural = TOP_WHEEL_TRAVEL * WHEEL_TRAVEL_STEP.powi(index as i32);
+                let expected = if index + 1 == count {
+                    natural.max(LOWEST_WHEEL_TRAVEL)
+                } else {
+                    natural
+                };
+                assert!(
+                    (travel - expected).abs() < 1e-9,
+                    "{source} wheel {index} turns {travel} cells"
+                );
+            }
+            let (_, lowest) = *dials.last().expect("a number has a wheel");
+            assert!(
+                lowest >= LOWEST_WHEEL_TRAVEL,
+                "{source} lowest wheel turns only {lowest} cells"
+            );
+            for pair in dials.windows(2) {
+                assert!(
+                    pair[0].1 < pair[1].1,
+                    "{source} a wheel does not turn farther than the one above it"
+                );
+            }
         }
         Ok(())
     }
 
     #[test]
-    fn odometer_start_and_stop_read_the_wound_back_number() -> anyhow::Result<()> {
+    fn odometer_wheels_stop_on_their_target_digits() -> anyhow::Result<()> {
         let mut rng = Rng::new(9);
-        for (source, start, stop) in [
-            ("$499 USD", 300u32, 499u32),
-            ("4299 MM", 3000, 4299),
-            ("2.3 KG", 10, 23),
-            ("0.7 KG", 0, 7),
-        ] {
+        for source in ["$499 USD", "4299 MM", "2.3 KG", "0.7 KG"] {
             let text = laid_out(source, &mut rng)?;
             let odometer = text.odometer_state.as_ref().expect("odometer");
-            let register = &odometer.registers[0];
-            let read = |progress: f64| {
-                register.dials.iter().fold(0u32, |value, dial| {
-                    value * 10 + wheel_center(*dial, progress).floor() as u32
-                })
-            };
-            assert_eq!(read(0.0), start, "{source} at rest before the spin");
-            assert_eq!(read(1.0), stop, "{source} on its target");
+            for register in &odometer.registers {
+                for dial in &register.dials {
+                    let at_stop = wheel_center(*dial, 1.0);
+                    assert!(
+                        (at_stop - f64::from(dial.target)).abs() < 1e-9,
+                        "{source} stops {} cells off target",
+                        at_stop - f64::from(dial.target)
+                    );
+                }
+            }
         }
         Ok(())
     }
