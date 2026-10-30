@@ -120,7 +120,7 @@ impl DepthFade {
 
 impl Default for DepthFade {
     fn default() -> Self {
-        Self(0.5)
+        Self(1.0)
     }
 }
 
@@ -150,7 +150,7 @@ pub struct NearOpacity(f32);
 impl NearOpacity {
     const MIN: f32 = 0.01;
     const MAX: f32 = 1.0;
-    const DEFAULT: f32 = 0.6;
+    const DEFAULT: f32 = 0.49999988;
     const STEP: f32 = 0.05;
     const LOW_MAX: f32 = 0.1;
     const LOW_STEP: f32 = 0.01;
@@ -235,7 +235,7 @@ impl CreaseThreshold {
 
 impl Default for CreaseThreshold {
     fn default() -> Self {
-        Self(45.0)
+        Self(5.0)
     }
 }
 
@@ -289,7 +289,7 @@ impl LineWidth {
 
 impl Default for LineWidth {
     fn default() -> Self {
-        Self(1.0)
+        Self(0.8000001)
     }
 }
 
@@ -316,8 +316,8 @@ impl From<LineWidth> for f32 {
 /// Whether the model uses the analytical exposure sweep.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelMotion {
-    #[default]
     Still,
+    #[default]
     Swept,
 }
 
@@ -346,7 +346,7 @@ pub struct MotionOpacity(f32);
 impl MotionOpacity {
     pub const MIN: f32 = 0.0;
     pub const MAX: f32 = 1.0;
-    pub const DEFAULT: f32 = 0.35;
+    pub const DEFAULT: f32 = 0.000000007450581;
     const STEP: f32 = 0.05;
 
     pub fn value(self) -> f32 {
@@ -402,7 +402,7 @@ pub struct MotionFadePower(f32);
 impl MotionFadePower {
     pub const MIN: f32 = 0.1;
     pub const MAX: f32 = 4.0;
-    pub const DEFAULT: f32 = 1.0;
+    pub const DEFAULT: f32 = 0.5;
     const STEP: f32 = 0.1;
 
     pub fn power(self) -> f32 {
@@ -471,9 +471,11 @@ pub struct InputTuning {
 
 impl InputTuning {
     fn band(index: usize) -> Self {
-        // The factory preset damps this band faster than the linear ramp.
+        // Tuned bands use faster envelopes than the linear ramp.
         let (attack, release) = match index {
+            2 => (6.6667376, 2.0955334),
             7 => (2.0291474, 2.0105636),
+            11 => (0.6327858, 0.51295996),
             _ => (14.0, 5.0 + 5.0 * index as f32 / (BAND_COUNT - 1) as f32),
         };
         Self {
@@ -4993,19 +4995,19 @@ mod tests {
         assert!(detectors.kick_contains(0));
         assert!(detectors.kick_contains(15));
         assert!(detectors.snare_contains(4));
-        assert!(detectors.snare_contains(15));
+        assert!(!detectors.snare_contains(15));
         assert!(!detectors.snare_contains(1));
-        assert_eq!(detectors.kick_onset_min_interval, 0.09514833);
-        assert_eq!(detectors.kick_onset_pre_gain, 0.49823883);
-        assert_eq!(detectors.kick_onset_suppression, 0.5);
+        assert_eq!(detectors.kick_onset_min_interval, 0.15654644);
+        assert_eq!(detectors.kick_onset_pre_gain, 0.2977303);
+        assert_eq!(detectors.kick_onset_suppression, 0.0);
         assert_eq!(detectors.snare_onset_attack, 0.001);
         assert_eq!(detectors.snare_onset_pre_gain, 1.0054638);
-        assert_eq!(detectors.snare_onset_suppression, 0.32999998);
+        assert_eq!(detectors.snare_onset_suppression, 0.099999994);
         assert_eq!(detectors.snare_min_rms_db, SNARE_RMS_GATE_DEFAULT_DB);
-        assert_eq!(detectors.hat_onset_min_interval, 0.06);
-        assert_eq!(detectors.hat_onset_pre_gain, 1.0054638);
-        assert_eq!(detectors.snare_poi_switches, 3);
-        assert_eq!(detectors.drop_gap_threshold, -18.0);
+        assert_eq!(detectors.hat_onset_min_interval, 0.030284878);
+        assert_eq!(detectors.hat_onset_pre_gain, 4.0);
+        assert_eq!(detectors.snare_poi_switches, 16);
+        assert_eq!(detectors.drop_gap_threshold, -21.0);
         assert_eq!(detectors.drop_onset_pre_gain, 1.0054638);
         assert_eq!(detectors.drop_onset_attack, 0.024582442);
         assert_eq!(detectors.drop_onset_min_threshold, 0.125);
@@ -5058,7 +5060,7 @@ mod tests {
         assert!(detectors.kick_contains(0));
         assert!(detectors.kick_contains(15));
         assert!(detectors.snare_contains(4));
-        assert!(detectors.snare_contains(15));
+        assert!(!detectors.snare_contains(15));
         assert!(!detectors.snare_contains(1));
     }
 
@@ -5078,9 +5080,9 @@ mod tests {
     #[test]
     fn depth_fade_adjusts_in_five_percent_steps_and_stays_normalized() {
         let fade = DepthFade::default();
-        assert_eq!(fade.percent(), 50);
-        assert_eq!(fade.adjusted(Adjustment::Increase).percent(), 55);
-        assert_eq!(fade.adjusted(Adjustment::Decrease).percent(), 45);
+        assert_eq!(fade.percent(), 100);
+        assert_eq!(fade.adjusted(Adjustment::Increase).percent(), 100);
+        assert_eq!(fade.adjusted(Adjustment::Decrease).percent(), 95);
 
         let mut lowest = fade;
         for _ in 0..30 {
@@ -5138,9 +5140,9 @@ mod tests {
     #[test]
     fn near_opacity_uses_five_percent_then_one_percent_steps() {
         let opacity = NearOpacity::default();
-        assert_eq!(opacity.percent(), 60);
-        assert_eq!(opacity.adjusted(Adjustment::Increase).percent(), 65);
-        assert_eq!(opacity.adjusted(Adjustment::Decrease).percent(), 55);
+        assert_eq!(opacity.percent(), 50);
+        assert_eq!(opacity.adjusted(Adjustment::Increase).percent(), 55);
+        assert_eq!(opacity.adjusted(Adjustment::Decrease).percent(), 45);
 
         let mut highest = opacity;
         for _ in 0..30 {
@@ -5462,7 +5464,10 @@ mod tests {
     fn kick_detection_holds_across_input_gain() {
         fn hits(gain: f32) -> u32 {
             let mut visualizer = loaded_visualizer();
-            visualizer.set_detector_settings(kick_only_settings());
+            visualizer.set_detector_settings(DetectorSettings {
+                kick_onset_min_threshold: 0.0,
+                ..kick_only_settings()
+            });
             visualizer.set_samplerate(48_000);
             for frame in 0..720 {
                 visualizer.consume_buf(&kick_burst(frame), gain);
@@ -6280,6 +6285,7 @@ mod tests {
     #[test]
     fn selector_attenuates_every_mesh_but_the_selected_one() {
         let mut visualizer = loaded_visualizer();
+        visualizer.set_model_motion(ModelMotion::Still);
         assert!(visualizer.showcase.poi_count() > 0);
         let palette = Palette::from_theme(ThemeId::default());
         visualizer.set_parameter(Parameter::SelectorEntryKicks, 1.0);
@@ -6308,7 +6314,7 @@ mod tests {
             .expect("some mesh has visible edges");
 
         let mut frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
-        for _ in 0..24 {
+        for _ in 0..120 {
             visualizer.update(
                 frame,
                 ShutterFrames::try_from(1.0).unwrap(),
@@ -6349,6 +6355,11 @@ mod tests {
     #[test]
     fn snare_enters_poi_focus_and_the_camera_reframes() {
         let mut visualizer = loaded_visualizer();
+        visualizer.set_model_motion(ModelMotion::Still);
+        visualizer.set_detector_settings(DetectorSettings {
+            snare_flip_every: 1,
+            ..DetectorSettings::default()
+        });
         assert_eq!(visualizer.showcase.poi_count(), 10);
         visualizer.handle_action(Action::Snare, 0.0, 0.75);
         visualizer.handle_action(Action::Snare, 0.0, 0.75);
@@ -7051,9 +7062,9 @@ mod tests {
     #[test]
     fn crease_threshold_steps_and_clamps() {
         let mut threshold = CreaseThreshold::default();
-        assert_eq!(threshold.whole_degrees(), 45);
-        assert_eq!(threshold.adjusted(Adjustment::Decrease).whole_degrees(), 43);
-        for _ in 0..20 {
+        assert_eq!(threshold.whole_degrees(), 5);
+        assert_eq!(threshold.adjusted(Adjustment::Decrease).whole_degrees(), 3);
+        for _ in 0..40 {
             threshold = threshold.adjusted(Adjustment::Increase);
         }
         assert_eq!(threshold, CreaseThreshold::MAX);
@@ -7064,7 +7075,7 @@ mod tests {
         assert!(CreaseThreshold::try_from(-1.0).is_err());
         assert!(CreaseThreshold::try_from(81.0).is_err());
         assert!(CreaseThreshold::try_from(f32::NAN).is_err());
-        assert_eq!(f32::from(CreaseThreshold::default()), 45.0);
+        assert_eq!(f32::from(CreaseThreshold::default()), 5.0);
     }
 
     #[test]
@@ -7095,8 +7106,8 @@ mod tests {
     #[test]
     fn line_width_steps_and_clamps() {
         let mut width = LineWidth::default();
-        assert_eq!(width.percent(), 100);
-        assert_eq!(width.adjusted(Adjustment::Decrease).percent(), 90);
+        assert_eq!(width.percent(), 80);
+        assert_eq!(width.adjusted(Adjustment::Decrease).percent(), 70);
         for _ in 0..40 {
             width = width.adjusted(Adjustment::Increase);
         }
@@ -7113,8 +7124,8 @@ mod tests {
     #[test]
     fn motion_opacity_steps_and_clamps() {
         let mut opacity = MotionOpacity::default();
-        assert_eq!(opacity.percent(), 35);
-        assert_eq!(opacity.adjusted(Adjustment::Decrease).percent(), 30);
+        assert_eq!(opacity.percent(), 0);
+        assert_eq!(opacity.adjusted(Adjustment::Decrease).percent(), 0);
         for _ in 0..20 {
             opacity = opacity.adjusted(Adjustment::Decrease);
         }
@@ -7131,8 +7142,8 @@ mod tests {
     #[test]
     fn motion_fade_power_steps_and_clamps() {
         let mut power = MotionFadePower::default();
-        assert!((power.adjusted(Adjustment::Decrease).power() - 0.9).abs() < 1e-6);
-        assert!((power.adjusted(Adjustment::Increase).power() - 1.1).abs() < 1e-6);
+        assert!((power.adjusted(Adjustment::Decrease).power() - 0.4).abs() < 1e-6);
+        assert!((power.adjusted(Adjustment::Increase).power() - 0.6).abs() < 1e-6);
         for _ in 0..50 {
             power = power.adjusted(Adjustment::Decrease);
         }
@@ -7447,6 +7458,7 @@ mod tests {
     fn line_width_scales_the_model_strokes() -> anyhow::Result<()> {
         let mut visualizer = Visualizer::new();
         visualizer.load_models();
+        visualizer.set_model_motion(ModelMotion::Still);
         let palette = Palette::from_theme(ThemeId::default());
         let frame = AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0));
         let step = |visualizer: &mut Visualizer| {

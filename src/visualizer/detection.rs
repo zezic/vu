@@ -58,7 +58,7 @@ pub const SEQUENCE_EVERY_MAX: u32 = 32;
 /// Allowed snare output RMS gate in dBFS.
 pub const SNARE_RMS_GATE_MIN_DB: f32 = -60.0;
 pub const SNARE_RMS_GATE_MAX_DB: f32 = 0.0;
-pub const SNARE_RMS_GATE_DEFAULT_DB: f32 = -45.0;
+pub const SNARE_RMS_GATE_DEFAULT_DB: f32 = -24.0;
 /// Allowed gap gate level in dBFS.
 pub const DROP_GAP_THRESHOLD_MIN: f32 = -60.0;
 pub const DROP_GAP_THRESHOLD_MAX: f32 = 0.0;
@@ -248,11 +248,11 @@ impl TemporalPattern {
                 [0.3042978, 0.0],
                 [0.26984897, 0.10135413],
                 [0.16267489, 0.16140662],
-                [0.07655285, 0.34862912],
-                [0.02296581, 0.5782416],
+                [0.029481063, 0.35151303],
+                [0.0, 0.5645693],
                 [0.0038275793, 0.7619316],
                 [0.034291036, 0.878736],
-                [0.038276393, 1.0],
+                [0.004243819, 0.9872462],
                 [0.0, 1.0],
             ],
             outer: vec![
@@ -280,49 +280,49 @@ impl TemporalPattern {
                 [0.040580507, 0.102450065],
                 [0.0021032926, 0.31054506],
             ],
-            effective: 0.22,
+            effective: 0.1,
         }
     }
 
     pub fn snare_initial() -> Self {
         Self {
             inner: vec![
-                [0.019887151, 0.28172547],
-                [0.144943, 0.29345784],
-                [0.15471299, 0.43893924],
-                [0.007405143, 0.48870692],
-                [0.071682416, 0.5504716],
-                [0.113679044, 0.7862174],
-                [0.064829096, 0.8730369],
+                [0.07615377, 0.31207043],
+                [0.0842307, 0.43143383],
+                [0.07615377, 0.5110094],
+                [0.07076915, 0.5574285],
+                [0.06538454, 0.6403197],
+                [0.041830614, 0.73819804],
+                [0.0049211713, 0.82108927],
                 [0.011552064, 0.9736742],
                 [0.0, 0.98968726],
-                [0.0, 0.43838012],
+                [0.0061537432, 0.268967],
             ],
             outer: vec![
-                [0.0, 0.4132167],
-                [0.0003471733, 0.24652837],
-                [0.15862098, 0.24652837],
+                [0.0, 0.5762838],
+                [0.0034614343, 0.22586356],
+                [0.09230763, 0.20596966],
                 [0.2270109, 0.43893924],
                 [0.17328197, 0.5024324],
                 [0.16706158, 0.7609291],
-                [0.0687371, 0.93169874],
+                [0.0470679, 0.90050524],
                 [0.019845905, 1.0],
                 [0.0, 1.0],
                 [0.0, 0.89132124],
             ],
             suppression_inner: vec![
-                [0.0, 0.0],
-                [0.08619663, 0.0],
-                [0.09023107, 0.20898479],
-                [0.008163164, 0.21367773],
+                [0.0, 0.053319808],
+                [0.11022358, 0.042432208],
+                [0.10742805, 0.23840904],
+                [0.0, 0.23115064],
             ],
             suppression_outer: vec![
                 [0.0, 0.0],
-                [0.16706158, 0.0],
-                [0.13321902, 0.27468607],
-                [0.0, 0.29111138],
+                [0.1325878, 0.0],
+                [0.12979227, 0.30010545],
+                [0.0, 0.26744264],
             ],
-            effective: 0.14,
+            effective: 0.13,
         }
     }
 
@@ -330,26 +330,36 @@ impl TemporalPattern {
     pub fn hat_initial() -> Self {
         Self {
             inner: vec![
-                [0.0, 0.62],
-                [0.055, 0.58],
-                [0.11, 0.64],
-                [0.15, 0.78],
-                [0.12, 0.90],
+                [0.0, 0.92790276],
+                [0.0, 0.8149811],
+                [0.048392296, 0.8399954],
+                [0.082431, 0.91789705],
+                [0.07956027, 0.96292275],
                 [0.05, 1.0],
                 [0.0, 1.0],
             ],
             outer: vec![
-                [0.0, 0.50],
-                [0.09, 0.46],
-                [0.19, 0.56],
-                [0.23, 0.76],
-                [0.20, 0.94],
+                [0.0, 0.7052756],
+                [0.022145579, 0.7302899],
+                [0.050852925, 0.7503013],
+                [0.09391394, 0.82784563],
+                [0.12235066, 0.9754299],
                 [0.09, 1.0],
                 [0.0, 1.0],
             ],
-            suppression_inner: vec![[0.0, 0.0], [0.07, 0.0], [0.09, 0.22], [0.0, 0.26]],
-            suppression_outer: vec![[0.0, 0.0], [0.12, 0.0], [0.15, 0.30], [0.0, 0.36]],
-            effective: 0.18,
+            suppression_inner: vec![
+                [0.0, 0.35471818],
+                [0.088582575, 0.41475248],
+                [0.085711844, 0.50980675],
+                [0.0, 0.5623368],
+            ],
+            suppression_outer: vec![
+                [0.0, 0.29968673],
+                [0.11154845, 0.38973817],
+                [0.120160654, 0.52731675],
+                [0.0, 0.6173682],
+            ],
+            effective: 0.1,
         }
     }
 
@@ -678,44 +688,44 @@ impl Default for DetectorSettings {
             band_onset: [BandOnsetSettings::default(); BAND_COUNT],
             excess: RelativeExcessSettings::default(),
             kick_pattern: TemporalPattern::kick_initial(),
-            kick_onset_pre_gain: 0.49823883,
-            kick_onset_attack: 0.001,
+            kick_onset_pre_gain: 0.2977303,
+            kick_onset_attack: 0.004782859,
             kick_onset_release: 0.010084573,
-            kick_onset_average: 2.0,
+            kick_onset_average: 1.2069348,
             kick_onset_sensitivity: 0.5,
-            kick_onset_min_threshold: 0.01,
-            kick_onset_min_interval: 0.09514833,
-            kick_onset_suppression: 0.5,
+            kick_onset_min_threshold: 0.027,
+            kick_onset_min_interval: 0.15654644,
+            kick_onset_suppression: 0.0,
             kick_snare_choke: 0.099999994,
             kick_drop_choke: 0.099999994,
-            kick_quake_factor: 40.0,
+            kick_quake_factor: 26.09,
             kick_sequence_every: 1,
             snare_pattern: TemporalPattern::snare_initial(),
             snare_onset_pre_gain: 1.0054638,
             snare_onset_attack: 0.001,
             snare_onset_release: 0.005,
-            snare_onset_average: 2.0,
-            snare_onset_sensitivity: 0.5,
-            snare_onset_min_threshold: 0.01,
-            snare_onset_min_interval: 0.100148335,
-            snare_onset_suppression: 0.32999998,
+            snare_onset_average: 0.90220815,
+            snare_onset_sensitivity: 1.2,
+            snare_onset_min_threshold: 0.019000001,
+            snare_onset_min_interval: 0.14992328,
+            snare_onset_suppression: 0.099999994,
             snare_min_rms_db: SNARE_RMS_GATE_DEFAULT_DB,
-            snare_flip_every: 1,
-            snare_poi_switches: 3,
+            snare_flip_every: 8,
+            snare_poi_switches: 16,
             snare_choke: 0.099999994,
             flip_stiffness: 349.5,
             flip_damping: 18.5,
             hat_pattern: TemporalPattern::hat_initial(),
-            hat_onset_pre_gain: 1.0054638,
+            hat_onset_pre_gain: 4.0,
             hat_onset_attack: 0.001,
             hat_onset_release: 0.005,
-            hat_onset_average: 1.5,
+            hat_onset_average: 1.4821466,
             hat_onset_sensitivity: 0.5,
-            hat_onset_min_threshold: 0.01,
-            hat_onset_min_interval: 0.06,
-            hat_onset_suppression: 0.32999998,
+            hat_onset_min_threshold: 0.020000001,
+            hat_onset_min_interval: 0.030284878,
+            hat_onset_suppression: 0.0,
             drop_kernels: DropKernels::default(),
-            drop_gap_threshold: -18.0,
+            drop_gap_threshold: -21.0,
             drop_onset_pre_gain: 1.0054638,
             drop_onset_attack: 0.024582442,
             drop_onset_release: 0.05,
@@ -724,9 +734,9 @@ impl Default for DetectorSettings {
             drop_onset_min_threshold: 0.125,
             drop_onset_min_interval: 0.14,
             drop_onset_suppression: 0.5,
-            drop_quake_factor: 20.0,
-            quake_stiffness: 200.0,
-            quake_damping: 2.5,
+            drop_quake_factor: 22.13,
+            quake_stiffness: 190.5,
+            quake_damping: 4.5,
         }
     }
 }
@@ -2708,7 +2718,7 @@ mod tests {
         assert!(settings.kick_contains(0));
         assert!(settings.kick_contains(15));
         assert!(settings.snare_contains(4));
-        assert!(settings.snare_contains(15));
+        assert!(!settings.snare_contains(15));
         assert!(!settings.snare_contains(1));
         assert!(settings.hat_contains(15));
         assert!(!settings.hat_contains(0));

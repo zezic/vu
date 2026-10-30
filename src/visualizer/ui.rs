@@ -1905,7 +1905,7 @@ mod tests {
                 MotionOpacity::default(),
                 MotionFadePower::default(),
             ),
-            "MODEL [\\] 2/3   BLUR [T] ON   WIDTH [;] ['] 100%   FLOOR [L] [R]  35%   POWER [Y] 1.0"
+            "MODEL [\\] 2/3   BLUR [T] ON   WIDTH [;] [']  80%   FLOOR [L] [R]   0%   POWER [Y] 0.5"
         );
     }
 

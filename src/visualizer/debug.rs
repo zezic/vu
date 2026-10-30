@@ -6036,7 +6036,7 @@ mod tests {
         assert_eq!(heading, "DROP TRIGGER  IDLE");
         assert!(description.contains("RMS"));
         assert!(description.contains("ENV"));
-        assert!(description.contains("GATE -18 dB"));
+        assert!(description.contains("GATE -21 dB"));
         assert!(dependencies.contains("OPEN"));
         assert!(dependencies.contains("ONSET"));
     }
@@ -6218,7 +6218,7 @@ mod tests {
         assert_eq!(band_route(Property::Spin, 2, &visualizer), "V");
         assert_eq!(band_route(Property::Spin, 5, &visualizer), "");
         assert!(Property::Kick.depends_on_band(5, routing, &detectors));
-        assert!(!Property::Flip.depends_on_band(3, routing, &detectors));
+        assert!(!Property::Flip.depends_on_band(1, routing, &detectors));
     }
 
     #[test]

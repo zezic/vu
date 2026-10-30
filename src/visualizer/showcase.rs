@@ -32,28 +32,28 @@ pub const SELECTOR_GAP_TIMEOUT_MAX: f32 = 60.0;
 const FOCUS_FILL: f32 = 0.70;
 /// Maximum random yaw or pitch kick step.
 pub const POI_ORBIT_STEP_MAX: f32 = std::f32::consts::FRAC_PI_2;
-pub const POI_ORBIT_STEP_DEFAULT: f32 = std::f32::consts::FRAC_PI_4;
-pub const POI_ORBIT_STEP_MIN_DEFAULT: f32 = std::f32::consts::PI / 9.0;
+pub const POI_ORBIT_STEP_DEFAULT: f32 = 0.5235988;
+pub const POI_ORBIT_STEP_MIN_DEFAULT: f32 = 0.17453292;
 /// Maximum signed yaw or pitch step for POI entry and switch.
 pub const POI_SWITCH_STEP_MAX: f32 = std::f32::consts::PI;
-pub const POI_SWITCH_STEP_DEFAULT: f32 = std::f32::consts::FRAC_PI_4;
+pub const POI_SWITCH_STEP_DEFAULT: f32 = 0.5235988;
 pub const POI_SWITCH_STEP_MIN_DEFAULT: f32 = 0.0;
 pub const POI_FOV_STEP_MAX: f32 = std::f32::consts::FRAC_PI_2;
-pub const POI_FOV_STEP_DEFAULT: f32 = std::f32::consts::PI / 9.0;
-pub const POI_FOV_STEP_MIN_DEFAULT: f32 = std::f32::consts::PI / 18.0;
-pub const POI_ORBIT_SPEED_DEFAULT: f32 = std::f32::consts::PI / 30.0;
+pub const POI_FOV_STEP_DEFAULT: f32 = 0.5235988;
+pub const POI_FOV_STEP_MIN_DEFAULT: f32 = 0.17453292;
+pub const POI_ORBIT_SPEED_DEFAULT: f32 = 0.27925268;
 pub const POI_ORBIT_SPEED_MAX: f32 = std::f32::consts::PI / 6.0;
-pub const POI_DOLLY_DEPTH_DEFAULT: f32 = 0.15;
+pub const POI_DOLLY_DEPTH_DEFAULT: f32 = 0.25;
 pub const POI_DOLLY_DEPTH_MAX: f32 = 0.5;
-pub const POI_DOLLY_PERIOD_DEFAULT: f32 = 12.0;
+pub const POI_DOLLY_PERIOD_DEFAULT: f32 = 10.0;
 pub const POI_DOLLY_PERIOD_MIN: f32 = 2.0;
 pub const POI_DOLLY_PERIOD_MAX: f32 = 60.0;
 pub const POI_SWITCH_GAP_MIN: f32 = 0.0;
 pub const POI_SWITCH_GAP_MAX: f32 = 10.0;
-pub const POI_SWITCH_GAP_DEFAULT: f32 = 1.0;
+pub const POI_SWITCH_GAP_DEFAULT: f32 = 0.5;
 pub const KICK_ATTACK_MIN: f32 = 0.0;
 pub const KICK_ATTACK_MAX: f32 = 100.0;
-pub const KICK_ATTACK_DEFAULT: f32 = 4.0;
+pub const KICK_ATTACK_DEFAULT: f32 = 0.0;
 const POI_FOV_MIN: f32 = 30.0_f32.to_radians();
 const POI_FOV_MAX: f32 = 120.0_f32.to_radians();
 const RECENT_POIS: usize = 2;
@@ -135,9 +135,9 @@ pub struct ShowcaseSettings {
 impl Default for ShowcaseSettings {
     fn default() -> Self {
         Self {
-            focus_stiffness: 90.0,
-            focus_damping: 18.0,
-            motion_stiffness: 12.0,
+            focus_stiffness: 160.0,
+            focus_damping: 13.0,
+            motion_stiffness: 262.5,
             motion_damping: 7.0,
             kick_attack: KICK_ATTACK_DEFAULT,
             orbit_step_min: POI_ORBIT_STEP_MIN_DEFAULT,
@@ -150,18 +150,18 @@ impl Default for ShowcaseSettings {
             dolly_depth: POI_DOLLY_DEPTH_DEFAULT,
             dolly_period: POI_DOLLY_PERIOD_DEFAULT,
             poi_switch_gap: POI_SWITCH_GAP_DEFAULT,
-            orbit_stiffness: 70.0,
-            orbit_damping: 16.0,
-            dolly_stiffness: 55.0,
-            dolly_damping: 14.0,
+            orbit_stiffness: 265.5,
+            orbit_damping: 16.5,
+            dolly_stiffness: 272.5,
+            dolly_damping: 13.5,
             selector_attenuation: 0.12,
-            poi_attenuation: 0.12,
-            selector_fade_in: 0.30,
-            selector_fade_out: 0.045,
+            poi_attenuation: 0.25,
+            selector_fade_in: 1.01,
+            selector_fade_out: 0.49999997,
             selector_color_chance: 0.25,
             selector_entry_kicks: 4,
-            selector_exit_triggers: 20,
-            selector_gap_timeout: 10.0,
+            selector_exit_triggers: 16,
+            selector_gap_timeout: 7.825,
         }
     }
 }
@@ -1982,7 +1982,7 @@ mod tests {
         assert!((frame.mesh_attenuation - 0.2).abs() < 1e-3);
 
         showcase.exit_focus();
-        for _ in 0..10 {
+        for _ in 0..60 {
             showcase.advance(1.0 / 60.0);
         }
         assert!((showcase.frame().mesh_attenuation - 1.0).abs() < 1e-3);
@@ -2397,6 +2397,8 @@ mod tests {
     #[test]
     fn selector_fades_out_slowly_and_returns_quickly() {
         let mut showcase = Showcase::new(ShowcaseSettings {
+            selector_fade_in: 0.30,
+            selector_fade_out: 0.045,
             selector_entry_kicks: 1,
             selector_exit_triggers: 1,
             ..ShowcaseSettings::default()

@@ -13,8 +13,8 @@ impl Default for ThemeId {
         Self(
             registry()
                 .iter()
-                .position(|entry| entry.name == "Grape")
-                .expect("Grape is bundled"),
+                .position(|entry| entry.name == "Twilight")
+                .expect("Twilight is bundled"),
         )
     }
 }
