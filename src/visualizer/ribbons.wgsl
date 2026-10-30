@@ -4,14 +4,17 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
-struct Instance {
-    @location(0) start: vec4<f32>,
-    @location(1) end: vec2<f32>,
-    @location(2) start_color: vec4<f32>,
-    @location(3) end_color: vec4<f32>,
-    @location(4) third_color: vec4<f32>,
-    @location(5) style: vec2<f32>,
+// Keep the field order and stride in sync with RibbonInstance.
+struct Ribbon {
+    start: vec4<f32>,
+    start_color: vec4<f32>,
+    end_color: vec4<f32>,
+    third_color: vec4<f32>,
+    end: vec2<f32>,
+    style: vec2<f32>,
 }
+
+@group(0) @binding(1) var<storage, read> ribbons: array<Ribbon>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -29,15 +32,16 @@ struct VertexOutput {
 @vertex
 fn ribbon_vertex(
     @builtin(vertex_index) vertex_index: u32,
-    instance: Instance,
 ) -> VertexOutput {
+    let instance = ribbons[vertex_index / 3u];
+    let corner = vertex_index % 3u;
     let points = array<vec2<f32>, 3>(
         instance.start.xy, instance.start.zw, instance.end.xy,
     );
     let colors = array<vec4<f32>, 3>(
         instance.start_color, instance.end_color, instance.third_color,
     );
-    let point = points[vertex_index];
+    let point = points[corner];
     let clip = vec2(
         point.x / uniforms.viewport.x * 2.0 - 1.0,
         1.0 - point.y / uniforms.viewport.y * 2.0,
@@ -51,7 +55,7 @@ fn ribbon_vertex(
         instance.start.xy,
         instance.start.zw,
         instance.end.xy,
-        colors[vertex_index],
+        colors[corner],
         instance.style.y,
     );
 }

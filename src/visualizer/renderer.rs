@@ -60,6 +60,8 @@ pub struct Renderer {
     uploaded_viewport: Option<[f32; 4]>,
     line_buffer: wgpu::Buffer,
     line_capacity: usize,
+    ribbon_layout: wgpu::BindGroupLayout,
+    ribbon_bindings: wgpu::BindGroup,
     ribbon_buffer: wgpu::Buffer,
     ribbon_capacity: usize,
 }
@@ -215,7 +217,12 @@ impl Renderer {
                 shader_location: 3,
             },
         ];
-        let line_pipeline = instance_pipeline(
+        let line_vertex_buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<LineInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &line_attributes,
+        })];
+        let line_pipeline = geometry_pipeline(
             device,
             format,
             "Visualizer lines",
@@ -223,12 +230,11 @@ impl Renderer {
             "line_vertex",
             "line_fragment",
             &uniform_layout,
-            std::mem::size_of::<LineInstance>() as u64,
-            &line_attributes,
+            &line_vertex_buffers,
             wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
             wgpu::ColorWrites::ALL,
         );
-        let model_additive_pipeline = instance_pipeline(
+        let model_additive_pipeline = geometry_pipeline(
             device,
             format,
             "Visualizer model additive",
@@ -236,12 +242,11 @@ impl Renderer {
             "line_vertex",
             "line_additive_fragment",
             &uniform_layout,
-            std::mem::size_of::<LineInstance>() as u64,
-            &line_attributes,
+            &line_vertex_buffers,
             additive_blend(),
             wgpu::ColorWrites::COLOR,
         );
-        let model_multiplicative_pipeline = instance_pipeline(
+        let model_multiplicative_pipeline = geometry_pipeline(
             device,
             format,
             "Visualizer model multiplicative",
@@ -249,8 +254,7 @@ impl Renderer {
             "line_vertex",
             "line_multiply_fragment",
             &uniform_layout,
-            std::mem::size_of::<LineInstance>() as u64,
-            &line_attributes,
+            &line_vertex_buffers,
             multiplicative_blend(),
             wgpu::ColorWrites::COLOR,
         );
@@ -259,33 +263,56 @@ impl Renderer {
             label: Some("Visualizer ribbons"),
             source: wgpu::ShaderSource::Wgsl(include_str!("ribbons.wgsl").into()),
         });
-        let ribbon_attributes = wgpu::vertex_attr_array![
-            0 => Float32x4, 1 => Float32x2, 2 => Float32x4,
-            3 => Float32x4, 4 => Float32x4, 5 => Float32x2
-        ];
-        let model_additive_ribbon_pipeline = instance_pipeline(
+        let ribbon_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Visualizer ribbon data"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<Uniforms>() as u64
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<RibbonInstance>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let model_additive_ribbon_pipeline = geometry_pipeline(
             device,
             format,
             "Visualizer model additive ribbons",
             &ribbon_shader,
             "ribbon_vertex",
             "ribbon_additive_fragment",
-            &uniform_layout,
-            std::mem::size_of::<RibbonInstance>() as u64,
-            &ribbon_attributes,
+            &ribbon_layout,
+            &[],
             additive_blend(),
             wgpu::ColorWrites::COLOR,
         );
-        let model_multiplicative_ribbon_pipeline = instance_pipeline(
+        let model_multiplicative_ribbon_pipeline = geometry_pipeline(
             device,
             format,
             "Visualizer model multiplicative ribbons",
             &ribbon_shader,
             "ribbon_vertex",
             "ribbon_multiply_fragment",
-            &uniform_layout,
-            std::mem::size_of::<RibbonInstance>() as u64,
-            &ribbon_attributes,
+            &ribbon_layout,
+            &[],
             multiplicative_blend(),
             wgpu::ColorWrites::COLOR,
         );
@@ -293,7 +320,8 @@ impl Renderer {
         let line_capacity = 256;
         let line_buffer = create_instance_buffer::<LineInstance>(device, line_capacity);
         let ribbon_capacity = 256;
-        let ribbon_buffer = create_instance_buffer::<RibbonInstance>(device, ribbon_capacity);
+        let (ribbon_buffer, ribbon_bindings) =
+            create_ribbon_buffer(device, &ribbon_layout, &uniforms, ribbon_capacity);
         Self {
             background_pipeline,
             overlay_layout,
@@ -313,6 +341,8 @@ impl Renderer {
             uploaded_viewport: None,
             line_buffer,
             line_capacity,
+            ribbon_layout,
+            ribbon_bindings,
             ribbon_buffer,
             ribbon_capacity,
         }
@@ -331,7 +361,12 @@ impl Renderer {
             return;
         }
         self.ribbon_capacity = count.next_power_of_two();
-        self.ribbon_buffer = create_instance_buffer::<RibbonInstance>(device, self.ribbon_capacity);
+        (self.ribbon_buffer, self.ribbon_bindings) = create_ribbon_buffer(
+            device,
+            &self.ribbon_layout,
+            &self.uniforms,
+            self.ribbon_capacity,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -368,7 +403,6 @@ impl Renderer {
             self.uploaded_viewport = Some(viewport);
         }
         let ribbon_count = frame.ribbons.len();
-        let ribbon_bytes = ribbon_count as u64 * std::mem::size_of::<RibbonInstance>() as u64;
         if ribbon_count > 0 {
             self.ensure_ribbon_capacity(&device.device, ribbon_count);
             device
@@ -462,9 +496,8 @@ impl Renderer {
                 ModelComposite::Multiplicative => &self.model_multiplicative_ribbon_pipeline,
             };
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &self.uniform_bindings, &[]);
-            pass.set_vertex_buffer(0, self.ribbon_buffer.slice(0..ribbon_bytes));
-            pass.draw(0..3, 0..ribbon_count as u32);
+            pass.set_bind_group(0, &self.ribbon_bindings, &[]);
+            pass.draw(0..3 * ribbon_count as u32, 0..1);
         }
         if line_count > 0 {
             pass.set_pipeline(&self.line_pipeline);
@@ -560,7 +593,7 @@ fn multiplicative_blend() -> wgpu::BlendState {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn instance_pipeline(
+fn geometry_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     label: &str,
@@ -568,8 +601,7 @@ fn instance_pipeline(
     vertex_entry: &str,
     fragment_entry: &str,
     uniform_layout: &wgpu::BindGroupLayout,
-    stride: u64,
-    attributes: &[wgpu::VertexAttribute],
+    vertex_buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
     blend: wgpu::BlendState,
     write_mask: wgpu::ColorWrites,
 ) -> wgpu::RenderPipeline {
@@ -587,11 +619,7 @@ fn instance_pipeline(
             module: shader,
             entry_point: Some(vertex_entry),
             compilation_options: Default::default(),
-            buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: stride,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes,
-            })],
+            buffers: vertex_buffers,
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
@@ -609,6 +637,35 @@ fn instance_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+fn create_ribbon_buffer(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniforms: &wgpu::Buffer,
+    capacity: usize,
+) -> (wgpu::Buffer, wgpu::BindGroup) {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Visualizer ribbons"),
+        size: capacity as u64 * std::mem::size_of::<RibbonInstance>() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Visualizer ribbons"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buffer.as_entire_binding(),
+            },
+        ],
+    });
+    (buffer, bindings)
 }
 
 fn create_instance_buffer<T>(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -633,6 +690,19 @@ mod tests {
         theme::Theme,
         visualizer::{ModelMotion, Visualizer},
     };
+
+    #[test]
+    fn ribbon_storage_matches_the_shader_layout() {
+        use std::mem::{offset_of, size_of};
+
+        assert_eq!(size_of::<RibbonInstance>(), 80);
+        assert_eq!(offset_of!(RibbonInstance, start), 0);
+        assert_eq!(offset_of!(RibbonInstance, start_color), 16);
+        assert_eq!(offset_of!(RibbonInstance, end_color), 32);
+        assert_eq!(offset_of!(RibbonInstance, third_color), 48);
+        assert_eq!(offset_of!(RibbonInstance, end), 64);
+        assert_eq!(offset_of!(RibbonInstance, style), 72);
+    }
 
     #[test]
     #[ignore = "requires a compute-capable GPU"]

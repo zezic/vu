@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use vello::{
     kurbo::{Affine, Line, Point, Rect},
-    peniko::Fill,
+    peniko::{Color, Fill},
     Scene,
 };
 
@@ -219,6 +219,13 @@ struct AmmoTally {
     columns: usize,
     cell: f64,
     caption: AnimatedText,
+    strokes: Option<AmmoStrokes>,
+}
+
+struct AmmoStrokes {
+    accent: Color,
+    muted: Color,
+    scene: Scene,
 }
 
 impl Default for NormalScene {
@@ -557,7 +564,7 @@ impl NormalScene {
     }
 
     pub fn draw(
-        &self,
+        &mut self,
         scene: &mut Scene,
         stage: &Stage,
         palette: ScenePalette,
@@ -568,7 +575,7 @@ impl NormalScene {
             item.draw(scene, stage, palette, alpha, time);
         }
         if !self.ammo_suppressed {
-            if let Some(ammo) = &self.ammo {
+            if let Some(ammo) = &mut self.ammo {
                 draw_ammo(scene, stage, palette, ammo, alpha);
             }
         }
@@ -836,6 +843,7 @@ fn build_ammo(
         columns,
         cell,
         caption,
+        strokes: None,
     })
 }
 
@@ -843,7 +851,7 @@ fn draw_ammo(
     scene: &mut Scene,
     stage: &Stage,
     palette: ScenePalette,
-    ammo: &AmmoTally,
+    ammo: &mut AmmoTally,
     alpha: f32,
 ) {
     let caption_origin = Point::new(ammo.grid.x0, ammo.bounds.y0);
@@ -855,38 +863,52 @@ fn draw_ammo(
         0.65 * alpha,
         0.0,
     );
-    let line_width = (ammo.cell * 0.06).max(0.6);
-    let scale = ammo.cell * 0.82;
-    for index in 0..ammo.capacity as usize {
-        let column = index % ammo.columns;
-        let row = index / ammo.columns;
-        let center = Point::new(
-            ammo.grid.x0 + (column as f64 + 0.5) * ammo.cell,
-            ammo.grid.y0 + (row as f64 + 0.5) * ammo.cell,
-        );
-        let color = if index % 10 == 0 {
-            palette.accent.with_alpha(0.7 * alpha)
-        } else {
-            palette.muted.with_alpha(0.55 * alpha)
-        };
-        for line in &ammo.icon {
-            let a = Point::new(
-                center.x + f64::from(line[0]) * scale,
-                center.y + f64::from(line[1]) * scale,
-            );
-            let b = Point::new(
-                center.x + f64::from(line[2]) * scale,
-                center.y + f64::from(line[3]) * scale,
-            );
-            scene.stroke(
-                &vello::kurbo::Stroke::new(line_width),
-                Affine::IDENTITY,
-                color,
-                None,
-                &Line::new(a, b),
-            );
+    let accent = palette.accent.with_alpha(0.7 * alpha);
+    let muted = palette.muted.with_alpha(0.55 * alpha);
+    let cached = match ammo.strokes.take() {
+        Some(cached) if cached.accent == accent && cached.muted == muted => cached,
+        previous => {
+            let mut cached = previous.unwrap_or_else(|| AmmoStrokes {
+                accent,
+                muted,
+                scene: Scene::new(),
+            });
+            cached.accent = accent;
+            cached.muted = muted;
+            cached.scene.reset();
+            let line_width = (ammo.cell * 0.06).max(0.6);
+            let scale = ammo.cell * 0.82;
+            for index in 0..ammo.capacity as usize {
+                let column = index % ammo.columns;
+                let row = index / ammo.columns;
+                let center = Point::new(
+                    ammo.grid.x0 + (column as f64 + 0.5) * ammo.cell,
+                    ammo.grid.y0 + (row as f64 + 0.5) * ammo.cell,
+                );
+                let color = if index % 10 == 0 { accent } else { muted };
+                for line in &ammo.icon {
+                    let a = Point::new(
+                        center.x + f64::from(line[0]) * scale,
+                        center.y + f64::from(line[1]) * scale,
+                    );
+                    let b = Point::new(
+                        center.x + f64::from(line[2]) * scale,
+                        center.y + f64::from(line[3]) * scale,
+                    );
+                    cached.scene.stroke(
+                        &vello::kurbo::Stroke::new(line_width),
+                        Affine::IDENTITY,
+                        color,
+                        None,
+                        &Line::new(a, b),
+                    );
+                }
+            }
+            cached
         }
-    }
+    };
+    scene.append(&cached.scene, None);
+    ammo.strokes = Some(cached);
 }
 
 fn build_plan(
@@ -1152,6 +1174,59 @@ fn build_plan(
 mod tests {
     use super::*;
     use vello::kurbo::Size;
+
+    #[test]
+    fn cached_ammunition_matches_fresh_draws_after_ink_changes() {
+        let fixture = || AmmoTally {
+            capacity: 2,
+            icon: vec![[-0.5, -0.5, 0.5, 0.5], [-0.5, 0.5, 0.5, -0.5]],
+            grid: Rect::new(0.0, 0.0, 20.0, 10.0),
+            bounds: Rect::new(0.0, 0.0, 20.0, 10.0),
+            columns: 2,
+            cell: 10.0,
+            caption: AnimatedText::new(
+                "",
+                12.0,
+                UiFace::Light,
+                BlockAlign::Left,
+                None,
+                1.0,
+                PaintStyle::Fill,
+            ),
+            strokes: None,
+        };
+        let stage = Stage::new(Size::new(1920.0, 1080.0));
+        let initial = ScenePalette {
+            accent: Color::from_rgb8(240, 30, 20),
+            muted: Color::from_rgb8(70, 80, 90),
+            ..ScenePalette::placeholder()
+        };
+        let muted = ScenePalette {
+            muted: Color::from_rgb8(20, 180, 80),
+            ..initial
+        };
+        let accent = ScenePalette {
+            accent: Color::from_rgb8(30, 40, 240),
+            ..muted
+        };
+        let mut cached = fixture();
+        for (palette, alpha) in [
+            (initial, 1.0),
+            (initial, 1.0),
+            (muted, 1.0),
+            (accent, 1.0),
+            (accent, 0.55),
+        ] {
+            let mut actual = Scene::new();
+            draw_ammo(&mut actual, &stage, palette, &mut cached, alpha);
+            let mut fresh = Scene::new();
+            draw_ammo(&mut fresh, &stage, palette, &mut fixture(), alpha);
+            assert!(!actual.encoding().draw_data.is_empty());
+            assert_eq!(actual.encoding().draw_data, fresh.encoding().draw_data);
+            assert!(actual.encoding().path_tags == fresh.encoding().path_tags);
+            assert_eq!(actual.encoding().path_data, fresh.encoding().path_data);
+        }
+    }
 
     #[test]
     fn a_restored_item_does_not_spin_again() -> anyhow::Result<()> {

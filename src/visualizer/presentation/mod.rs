@@ -251,7 +251,7 @@ impl Presentation {
     }
 
     pub fn draw(
-        &self,
+        &mut self,
         scene: &mut Scene,
         stage: &Stage,
         palette: ScenePalette,

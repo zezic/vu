@@ -455,7 +455,12 @@ struct MotionFade {
 impl MotionFade {
     fn factor(self, distance: f32, width: f32) -> f32 {
         let speed = distance / (width + distance);
-        let keep = (1.0 - speed).powf(self.power.power());
+        let remaining = 1.0 - speed;
+        let keep = if self.power.power() == 0.5 {
+            remaining.sqrt()
+        } else {
+            remaining.powf(self.power.power())
+        };
         self.opacity.value() + (1.0 - self.opacity.value()) * keep
     }
 }
@@ -1216,20 +1221,20 @@ pub struct DebugSnapshot {
 }
 
 /// One triangle of analytical swept-line motion blur, with independent color
-/// and opacity at each vertex.
+/// and opacity at each vertex. Field order matches the storage buffer in ribbons.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RibbonInstance {
     /// First two triangle vertices: a.xy, b.xy.
     pub start: [f32; 4],
-    /// Third triangle vertex: c.xy.
-    pub end: [f32; 2],
     /// Tint and opacity at the first vertex.
     pub start_color: [f32; 4],
     /// Tint and opacity at the second vertex.
     pub end_color: [f32; 4],
     /// Tint and opacity at the third vertex.
     pub third_color: [f32; 4],
+    /// Third triangle vertex: c.xy.
+    pub end: [f32; 2],
     /// Wing-mask flag and coverage edge mask.
     pub style: [f32; 2],
 }
@@ -7021,6 +7026,14 @@ mod tests {
     #[test]
     fn higher_fade_power_lowers_the_mid_speed_opacity() -> anyhow::Result<()> {
         let opacity = MotionOpacity::try_from(0.35)?;
+        let default = MotionFade {
+            opacity,
+            power: MotionFadePower::default(),
+        };
+        for distance in [0.0, 0.01, 0.5, 1.0, 10.0, 1_000_000.0] {
+            let expected = 0.35 + 0.65 * (1.0_f32 - distance / (1.0 + distance)).powf(0.5);
+            assert!((default.factor(distance, 1.0) - expected).abs() < 1e-6);
+        }
         let base = MotionFade {
             opacity,
             power: MotionFadePower::try_from(1.0)?,
