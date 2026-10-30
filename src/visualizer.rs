@@ -1644,7 +1644,7 @@ impl Visualizer {
             }
         };
         let accent = self.accent();
-        match model::ModelSet::load() {
+        match model::ModelSet::load(&mut self.rng) {
             Ok(models) => {
                 let (_, total) = models.position();
                 log::info!("model visualizer: {total} models");
@@ -1708,7 +1708,7 @@ impl Visualizer {
         let Models::Ready(models) = &mut self.models else {
             return;
         };
-        if !models.advance() {
+        if !models.advance(&mut self.rng) {
             return;
         }
         self.scene.switch(
@@ -4900,23 +4900,31 @@ mod tests {
         visualizer
     }
 
-    /// Loads a visualizer on a model whose successor has resolvable POIs, so
-    /// a drop advances into POI mode regardless of the bundled model order.
+    /// Loads a visualizer on the model before a model with resolvable POIs,
+    /// so a drop advances into POI mode. The model bag is deterministic, so a
+    /// second fresh visualizer reaches the predecessor by replaying the same
+    /// number of advances.
     fn visualizer_before_a_poi_successor() -> Option<Visualizer> {
-        let mut visualizer = loaded_visualizer();
-        let (_, total) = visualizer
+        let mut probe = loaded_visualizer();
+        let (_, total) = probe
             .model_position()
             .expect("the loaded model set has a position");
-        let mut has_pois = Vec::with_capacity(total);
-        for _ in 0..total {
-            has_pois.push(visualizer.showcase_poi_count() > 0);
-            visualizer.next_model();
+        if total < 2 {
+            return None;
         }
-        let start = has_pois
-            .iter()
-            .enumerate()
-            .position(|(index, has)| *has && has_pois[(index + 1) % total])?;
-        for _ in 0..start {
+        let mut steps = 0;
+        loop {
+            probe.next_model();
+            steps += 1;
+            if probe.showcase_poi_count() > 0 {
+                break;
+            }
+            if steps == total {
+                return None;
+            }
+        }
+        let mut visualizer = loaded_visualizer();
+        for _ in 1..steps {
             visualizer.next_model();
         }
         Some(visualizer)
@@ -7073,11 +7081,15 @@ mod tests {
         visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
         assert_ne!(visualizer.scene_name(), first);
         assert!(visualizer.scene.outgoing.is_some());
-        // Step through the rest of the set so the hotkey wraps to the first.
-        for _ in 1..total {
+        // Step through the rest of the bag cycle: every model appears once.
+        let mut seen = vec![first, visualizer.scene_name().to_owned()];
+        for _ in 2..total {
             visualizer.next_model();
+            seen.push(visualizer.scene_name().to_owned());
         }
-        assert_eq!(visualizer.scene_name(), first);
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), total, "a cycle must visit every model once");
     }
 
     #[test]

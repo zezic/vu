@@ -5,7 +5,7 @@
 //! typewriter entrances without relaying out every frame.
 
 use vello::{
-    kurbo::{Affine, BezPath, Point, Rect, Stroke},
+    kurbo::{Affine, BezPath, Point, Rect},
     peniko::{BlendMode, Color, Compose, Fill, Mix},
     Scene,
 };
@@ -14,6 +14,9 @@ use crate::text::{BlockAlign, Fonts, GlyphAtlas, TextPaint, TextPlan, UiFace};
 
 use super::super::Rng;
 use super::{color::ScenePalette, stage::Stage};
+
+/// Fraction of the line height a hole text runs past a flush plate edge.
+const FLUSH_OVERHANG: f64 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextPhase {
@@ -58,9 +61,6 @@ pub struct Backdrop {
     pub cut: [bool; 4],
     pub cut_size: f64,
     pub fill_alpha: f32,
-    /// Border opacity. Flush plates leave it at zero so the stroke never
-    /// crosses the edge the text opens through.
-    pub border_alpha: f32,
 }
 
 impl Backdrop {
@@ -71,10 +71,10 @@ impl Backdrop {
         let vertical = side(rng);
         // An uneven gap above and below makes the plate look misaligned, so an
         // off-center plate is flush with the text instead.
-        let (padding, centered) = match rng.range(3) {
-            0 => ([left, vertical, right, vertical], true),
-            1 => ([left, 0.0, right, vertical], false),
-            _ => ([left, vertical, right, 0.0], false),
+        let padding = match rng.range(3) {
+            0 => [left, vertical, right, vertical],
+            1 => [left, 0.0, right, vertical],
+            _ => [left, vertical, right, 0.0],
         };
         let mut cut = [false; 4];
         let count = rng.range(5);
@@ -91,11 +91,6 @@ impl Backdrop {
             cut,
             cut_size: text_size * (0.08 + rng.unit() as f64 * 0.22),
             fill_alpha: 0.72 + rng.unit() * 0.2,
-            border_alpha: if centered && rng.unit() < 0.6 {
-                0.3 + rng.unit() * 0.5
-            } else {
-                0.0
-            },
         }
     }
 }
@@ -463,7 +458,7 @@ impl AnimatedText {
         if let (Some([_, top, _, bottom]), Some(plan)) = (padding, &self.plan) {
             // A flush edge lets the hole run slightly past the plate so no
             // antialiasing sliver is left between the text and the surface.
-            let overhang = plan.line_height * 0.025;
+            let overhang = plan.line_height * FLUSH_OVERHANG;
             if top == 0.0 {
                 y -= overhang;
             } else if bottom == 0.0 {
@@ -648,15 +643,6 @@ impl AnimatedText {
             });
         }
         scene.pop_layer();
-        if backdrop.border_alpha > 0.0 {
-            scene.stroke(
-                &Stroke::new((stage.unit * 1.1).max(0.7)),
-                transform,
-                palette.accent.with_alpha(backdrop.border_alpha * alpha),
-                None,
-                &path,
-            );
-        }
     }
 
     fn glyph_style(
@@ -852,12 +838,6 @@ mod tests {
                 top == bottom || top == 0.0 || bottom == 0.0,
                 "vertical padding {top}/{bottom} leaves the text floating"
             );
-            if top == 0.0 || bottom == 0.0 {
-                assert_eq!(
-                    backdrop.border_alpha, 0.0,
-                    "a flush plate must not draw a border"
-                );
-            }
         }
     }
 
@@ -881,7 +861,6 @@ mod tests {
                 cut: [false; 4],
                 cut_size: 0.0,
                 fill_alpha: 0.8,
-                border_alpha: 0.0,
             })
         };
 
@@ -889,7 +868,7 @@ mod tests {
         top_flush.layout(&mut fonts, &stage, &mut rng);
         let plan = top_flush.plan().expect("the text has been laid out");
         let origin = top_flush.text_origin(&stage);
-        let overhang = plan.line_height * 0.025;
+        let overhang = plan.line_height * FLUSH_OVERHANG;
         assert!(
             (origin.y + plan.ink_top + overhang).abs() < 1e-9,
             "the top edge is {} away from the glyph ink",
@@ -901,7 +880,7 @@ mod tests {
         let plan = bottom_flush.plan().expect("the text has been laid out");
         let origin = bottom_flush.text_origin(&stage);
         let bounds = bottom_flush.bounds(&stage);
-        let overhang = plan.line_height * 0.025;
+        let overhang = plan.line_height * FLUSH_OVERHANG;
         assert!(
             (origin.y + plan.ink_bottom - bounds.height() - overhang).abs() < 1e-9,
             "the bottom edge is {} away from the glyph ink",

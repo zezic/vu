@@ -1,9 +1,9 @@
 //! Selector FX infographic: a parts/POI loading grid and its event log.
 //!
-//! The grid mirrors selector focus changes exactly. A mesh that resolves to a
-//! catalog POI focuses that POI row; any other selected mesh gets a dedicated
-//! row labelled with the mesh name. Rows are never fabricated for meshes the
-//! selector did not visit.
+//! The grid mirrors selector focus changes. A mesh that resolves to a catalog
+//! POI focuses that POI row; any other selected mesh gets a dedicated row
+//! labelled with the mesh name. Without an authored POI mapping the grid lists
+//! every mesh up front.
 
 use std::collections::VecDeque;
 
@@ -60,15 +60,15 @@ enum GridSide {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ItemKind {
-    Poi,
-    Mesh,
+enum GridTarget {
+    /// Index into the resolved showcase POIs.
+    Poi(usize),
+    /// Mesh part of the current model.
+    Mesh(u16),
 }
 
 struct GridItem {
-    kind: ItemKind,
-    /// Index into the resolved showcase POIs for a POI row.
-    poi_index: Option<usize>,
+    target: GridTarget,
     label: String,
     id: Option<String>,
     fact: Option<String>,
@@ -217,26 +217,50 @@ impl SelectorOverlay {
             GridSide::Right => false,
             GridSide::Bottom => rng.unit() < 0.5,
         };
-        let weapon = visualizer.weapon();
-        for (poi_index, poi) in visualizer.showcase_pois().iter().enumerate() {
-            let fact = weapon
-                .and_then(|weapon| weapon.poi.iter().find(|catalog| catalog.id == poi.id))
-                .map(|catalog| catalog.fact.clone());
-            self.items.push(GridItem {
-                kind: ItemKind::Poi,
-                poi_index: Some(poi_index),
-                label: poi.label.to_uppercase(),
-                id: Some(poi.id.clone()),
-                fact,
-                status: Status::Wait,
-                progress: 0.0,
-                catching: false,
-                focus_elapsed: 0.0,
-                fill_time: 1.2,
-                appear_at: 0.0,
-                label_text: None,
-                status_text: None,
-            });
+        let pois = visualizer.showcase_pois();
+        if pois.is_empty() {
+            // No authored POI mapping: list every mesh so the grid can still
+            // track a part each time the selector focuses one.
+            for part in 0..visualizer.part_count().unwrap_or(0) {
+                let label = visualizer
+                    .part_name(part)
+                    .map_or_else(|| format!("PART {part}"), grid_mesh_label);
+                self.items.push(GridItem {
+                    target: GridTarget::Mesh(part),
+                    label,
+                    id: None,
+                    fact: None,
+                    status: Status::Wait,
+                    progress: 0.0,
+                    catching: false,
+                    focus_elapsed: 0.0,
+                    fill_time: 1.2,
+                    appear_at: 0.0,
+                    label_text: None,
+                    status_text: None,
+                });
+            }
+        } else {
+            let weapon = visualizer.weapon();
+            for (poi_index, poi) in pois.iter().enumerate() {
+                let fact = weapon
+                    .and_then(|weapon| weapon.poi.iter().find(|catalog| catalog.id == poi.id))
+                    .map(|catalog| catalog.fact.clone());
+                self.items.push(GridItem {
+                    target: GridTarget::Poi(poi_index),
+                    label: poi.label.to_uppercase(),
+                    id: Some(poi.id.clone()),
+                    fact,
+                    status: Status::Wait,
+                    progress: 0.0,
+                    catching: false,
+                    focus_elapsed: 0.0,
+                    fill_time: 1.2,
+                    appear_at: 0.0,
+                    label_text: None,
+                    status_text: None,
+                });
+            }
         }
         for (index, item) in self.items.iter_mut().enumerate() {
             item.appear_at = index as f32 * 0.035;
@@ -259,26 +283,23 @@ impl SelectorOverlay {
         stage: &Stage,
         rng: &mut Rng,
     ) {
-        let poi_index = visualizer.showcase_poi_index_for_part(part);
+        let target = match visualizer.showcase_poi_index_for_part(part) {
+            Some(poi_index) => GridTarget::Poi(poi_index),
+            None => GridTarget::Mesh(part),
+        };
         let mesh_name = visualizer
             .part_name(part)
             .map_or_else(|| format!("PART {part}"), str::to_owned);
-        let index = if let Some(poi_index) = poi_index {
-            self.items
-                .iter()
-                .position(|item| item.poi_index == Some(poi_index))
-        } else {
-            None
-        }
-        .or_else(|| self.mesh_item_index());
-        let index = match index {
+        let index = match self.items.iter().position(|item| item.target == target) {
             Some(index) => index,
             None => {
-                let label = mesh_name.to_uppercase();
+                assert!(
+                    matches!(target, GridTarget::Mesh(_)),
+                    "the POI grid is built when the selector starts"
+                );
                 self.items.push(GridItem {
-                    kind: ItemKind::Mesh,
-                    poi_index: None,
-                    label,
+                    target,
+                    label: grid_mesh_label(&mesh_name),
                     id: None,
                     fact: None,
                     status: Status::Wait,
@@ -293,13 +314,6 @@ impl SelectorOverlay {
                 self.items.len() - 1
             }
         };
-        if self.items[index].kind == ItemKind::Mesh {
-            let label = grid_mesh_label(&mesh_name);
-            if self.items[index].label != label {
-                self.items[index].label = label;
-                self.items[index].label_text = None;
-            }
-        }
         if let Some(previous) = self.selected {
             if previous != index {
                 self.items[previous].status = Status::Ok;
@@ -314,8 +328,8 @@ impl SelectorOverlay {
         item.catching = false;
         item.fill_time = fill_time;
         self.selected = Some(index);
-        let line = match (&item.kind, &item.id, &item.fact) {
-            (ItemKind::Poi, Some(id), Some(fact)) => format!(
+        let line = match (item.target, item.id.as_deref(), item.fact.as_deref()) {
+            (GridTarget::Poi(_), Some(id), Some(fact)) => format!(
                 "[+{clock:06.2}] POI {id} :: MESH {mesh_name} :: {}",
                 first_sentence(fact)
             ),
@@ -323,12 +337,6 @@ impl SelectorOverlay {
         };
         self.push_log(line, fonts, stage, rng);
         self.layout(fonts, stage, rng);
-    }
-
-    fn mesh_item_index(&self) -> Option<usize> {
-        self.items
-            .iter()
-            .position(|item| item.kind == ItemKind::Mesh)
     }
 
     fn count(&self, status: Status) -> usize {
@@ -423,8 +431,8 @@ impl SelectorOverlay {
             }
             GridSide::Bottom => {
                 let width = (stage.width * 0.68).min(stage.width - 2.0 * stage.margin);
-                let columns = count.div_ceil(2);
-                let rows = 2;
+                let columns = count.div_ceil(2).clamp(2, 6);
+                let rows = count.div_ceil(columns);
                 let height = header_height + rows as f64 * item_height + (rows - 1) as f64 * gap;
                 let x = (stage.width - width) * 0.5;
                 let y = stage.height - stage.margin - height;
@@ -606,7 +614,7 @@ impl SelectorOverlay {
                 scene.fill(
                     Fill::NonZero,
                     Affine::IDENTITY,
-                    palette.accent.with_alpha(0.28 * alpha),
+                    palette.accent.with_alpha(0.14 * alpha),
                     None,
                     &Rect::new(rect.x0, rect.y0, rect.x0 + fill_width, rect.y1),
                 );
@@ -616,7 +624,7 @@ impl SelectorOverlay {
             scene.fill(
                 Fill::NonZero,
                 Affine::IDENTITY,
-                palette.muted.with_alpha(0.16 * alpha),
+                palette.muted.with_alpha(0.08 * alpha),
                 None,
                 &status_rect,
             );

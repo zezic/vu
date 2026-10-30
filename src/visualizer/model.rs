@@ -1,7 +1,7 @@
 //! Loads the binary glTF meshes backing the model visualizer.
 
 use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet, VecDeque},
     fs,
     path::Path,
 };
@@ -10,7 +10,7 @@ use anyhow::{ensure, Context};
 
 use super::{
     geometry::{Vec3, Wireframe},
-    CreaseThreshold,
+    CreaseThreshold, Rng,
 };
 
 /// Directory scanned for the models. Binary glTF keeps the geometry
@@ -278,10 +278,12 @@ impl EdgeKind {
 pub struct ModelSet {
     models: Vec<Model>,
     current: usize,
+    /// Model indices left in the current no-repeat cycle.
+    bag: VecDeque<usize>,
 }
 
 impl ModelSet {
-    pub fn load() -> anyhow::Result<Self> {
+    pub fn load(rng: &mut Rng) -> anyhow::Result<Self> {
         let paths = model_paths()?;
         ensure!(
             !paths.is_empty(),
@@ -293,26 +295,57 @@ impl ModelSet {
                 Model::load_file(path).with_context(|| format!("could not load {}", path.display()))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
-        Ok(Self { models, current: 0 })
+        let mut bag: VecDeque<usize> = (0..models.len()).collect();
+        shuffle(&mut bag, rng);
+        let current = bag.pop_front().expect("the model directory is not empty");
+        Ok(Self {
+            models,
+            current,
+            bag,
+        })
     }
 
     pub fn current(&self) -> &Model {
         &self.models[self.current]
     }
 
-    /// Advances to the next model. Returns false when there is nothing to
-    /// advance to, so a one-model set stays put.
-    pub fn advance(&mut self) -> bool {
+    /// Advances to the next model in the shuffled bag. Returns false when
+    /// there is nothing to advance to, so a one-model set stays put.
+    pub fn advance(&mut self, rng: &mut Rng) -> bool {
         if self.models.len() < 2 {
             return false;
         }
-        self.current = (self.current + 1) % self.models.len();
+        if self.bag.is_empty() {
+            self.refill(rng);
+        }
+        self.current = self
+            .bag
+            .pop_front()
+            .expect("a refilled bag holds every model but the current one");
         true
     }
 
     /// One-based position and total count for the HUD.
     pub fn position(&self) -> (usize, usize) {
         (self.current + 1, self.models.len())
+    }
+
+    fn refill(&mut self, rng: &mut Rng) {
+        self.bag.clear();
+        self.bag.extend(0..self.models.len());
+        shuffle(&mut self.bag, rng);
+        // A cycle boundary must not repeat the model that is showing.
+        let current = self.current;
+        if let Some(position) = self.bag.iter().position(|index| *index == current) {
+            self.bag.remove(position);
+        }
+    }
+}
+
+fn shuffle(bag: &mut VecDeque<usize>, rng: &mut Rng) {
+    for index in (1..bag.len()).rev() {
+        let swap = rng.range(index + 1);
+        bag.swap(index, swap);
     }
 }
 
@@ -709,7 +742,8 @@ mod tests {
 
     #[test]
     fn empty_anchor_radius_uses_the_full_scaled_diagonal() -> anyhow::Result<()> {
-        let models = ModelSet::load()?;
+        let mut rng = Rng::new(2);
+        let models = ModelSet::load(&mut rng)?;
         let empty = models
             .models
             .iter()
@@ -722,7 +756,8 @@ mod tests {
 
     #[test]
     fn bundled_models_load_as_lean_wireframes() -> anyhow::Result<()> {
-        let models = ModelSet::load()?;
+        let mut rng = Rng::new(3);
+        let models = ModelSet::load(&mut rng)?;
         let model = models.current();
         assert!(!model.name.is_empty());
         let wireframe = model.wireframe(CreaseThreshold::default());
@@ -751,21 +786,31 @@ mod tests {
     }
 
     #[test]
-    fn model_set_advances_and_wraps() -> anyhow::Result<()> {
-        let mut set = ModelSet::load()?;
+    fn model_set_covers_every_model_before_repeating() -> anyhow::Result<()> {
+        let mut rng = Rng::new(7);
+        let mut set = ModelSet::load(&mut rng)?;
         let (_, total) = set.position();
         assert!(total >= 1);
-        let first = set.current().name.clone();
         if total == 1 {
-            assert!(!set.advance());
+            assert!(!set.advance(&mut rng));
             return Ok(());
         }
-        assert!(set.advance());
-        assert_ne!(set.current().name, first);
+        let mut seen = vec![set.current().id.clone()];
         for _ in 1..total {
-            assert!(set.advance());
+            assert!(set.advance(&mut rng));
+            seen.push(set.current().id.clone());
         }
-        assert_eq!(set.current().name, first);
+        let count = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), count, "one cycle must visit every model");
+        let last = set.current().id.clone();
+        assert!(set.advance(&mut rng));
+        assert_ne!(
+            set.current().id,
+            last,
+            "a cycle boundary must not repeat the same model"
+        );
         Ok(())
     }
 
@@ -787,7 +832,8 @@ mod tests {
     #[test]
     fn every_catalog_poi_resolves_to_a_bundled_model_anchor() -> anyhow::Result<()> {
         let catalog = crate::weapon::Catalog::load()?;
-        let models = ModelSet::load()?;
+        let mut rng = Rng::new(5);
+        let models = ModelSet::load(&mut rng)?;
         for (id, weapon) in &catalog.weapons {
             let model = models
                 .models

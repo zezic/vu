@@ -1116,12 +1116,18 @@ struct SelectorState {
     entry_kicks: u32,
     exit_triggers: u32,
     gap_elapsed: f32,
+    /// Parts left in the current no-repeat cycle.
+    bag: VecDeque<u16>,
+    /// Part count the bag was filled for.
+    bag_parts: u16,
 }
 
 impl SelectorState {
     fn activate(&mut self, rng: &mut Rng, part_count: u16, settings: &ShowcaseSettings) {
         if self.selected.is_none_or(|part| part >= part_count) {
-            self.selected = pick_mesh(rng, None, part_count);
+            self.selected = self.next_mesh(rng, part_count);
+        } else {
+            self.refill_mesh_bag(rng, part_count);
         }
         self.active = true;
         self.entry_pending = false;
@@ -1164,7 +1170,37 @@ impl SelectorState {
     }
 
     fn select_mesh(&mut self, rng: &mut Rng, part_count: u16) {
-        self.selected = pick_mesh(rng, self.selected, part_count);
+        self.selected = self.next_mesh(rng, part_count);
+    }
+
+    /// Draws the next part from a shuffled bag, so every part is focused once
+    /// before any repeats.
+    fn next_mesh(&mut self, rng: &mut Rng, part_count: u16) -> Option<u16> {
+        match part_count {
+            0 => return None,
+            1 => return Some(0),
+            _ => {}
+        }
+        if self.bag_parts != part_count || self.bag.is_empty() {
+            self.refill_mesh_bag(rng, part_count);
+        }
+        self.bag.pop_front()
+    }
+
+    fn refill_mesh_bag(&mut self, rng: &mut Rng, part_count: u16) {
+        self.bag_parts = part_count;
+        self.bag.clear();
+        self.bag.extend(0..part_count);
+        for index in (1..self.bag.len()).rev() {
+            let swap = rng.range(index + 1);
+            self.bag.swap(index, swap);
+        }
+        // A cycle boundary must not refocus the part that is already selected.
+        if let Some(current) = self.selected.filter(|part| *part < part_count) {
+            if let Some(position) = self.bag.iter().position(|part| *part == current) {
+                self.bag.remove(position);
+            }
+        }
     }
 
     fn roll_color(&mut self, rng: &mut Rng, settings: &ShowcaseSettings) {
@@ -1211,21 +1247,6 @@ impl SelectorState {
             alternate_color: self.active && self.alternate_color,
         }
     }
-}
-
-fn pick_mesh(rng: &mut Rng, current: Option<u16>, part_count: u16) -> Option<u16> {
-    if part_count == 0 {
-        return None;
-    }
-    if part_count == 1 {
-        return Some(0);
-    }
-    let current = current.filter(|part| *part < part_count);
-    let offset = 1 + rng.range(usize::from(part_count) - 1);
-    Some(match current {
-        Some(current) => (current + offset as u16) % part_count,
-        None => rng.range(usize::from(part_count)) as u16,
-    })
 }
 
 fn smoothstep(value: f32) -> f32 {
@@ -1472,6 +1493,28 @@ mod tests {
         assert!(first.is_some());
         showcase.hat(&mut rng);
         assert_ne!(showcase.selected_mesh(), first);
+    }
+
+    #[test]
+    fn selector_bag_covers_every_part_before_repeating() {
+        let mut showcase = Showcase::new(ShowcaseSettings::default());
+        showcase.set_model(Vec::new(), 6);
+        let mut rng = Rng::new(7);
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            showcase.hat(&mut rng);
+            seen.push(showcase.selected_mesh().expect("the bag selects a part"));
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 6, "the first cycle must visit every part");
+        let last = showcase.selected_mesh();
+        showcase.hat(&mut rng);
+        assert_ne!(
+            showcase.selected_mesh(),
+            last,
+            "a cycle boundary must not refocus the same part"
+        );
     }
 
     #[test]
