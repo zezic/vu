@@ -2,7 +2,9 @@
 //!
 //! Text is laid out once per stage size, then every glyph is drawn with its own
 //! alpha and substituted glyph id. This supports fade, neon flicker, glitch and
-//! typewriter entrances without relaying out every frame.
+//! typewriter entrances without relaying out every frame. Numeric blocks can
+//! instead use the odometer: one spring per number drives coupled digit wheels,
+//! and each wheel is drawn as an analytical motion sweep.
 
 use vello::{
     kurbo::{Affine, BezPath, Point, Rect},
@@ -10,13 +12,44 @@ use vello::{
     Scene,
 };
 
-use crate::text::{BlockAlign, Fonts, GlyphAtlas, TextPaint, TextPlan, UiFace};
+use crate::text::{BlockAlign, Fonts, GlyphAtlas, TextGlyph, TextPaint, TextPlan, UiFace};
 
+use super::super::detection::Spring;
 use super::super::Rng;
 use super::{color::ScenePalette, stage::Stage};
 
 /// Fraction of the line height a hole text runs past a flush plate edge.
 const FLUSH_OVERHANG: f64 = 0.05;
+
+/// First overshoot of a stopped register, in cells of its fastest wheel. This
+/// is kept absolute rather than relative to the travel, so a long spin does not
+/// kick a whole revolution past its stop.
+const STOP_OVERSCROLL_CELLS: f64 = 0.24;
+
+/// Damping ratio of the stop spring. The wheel crosses its target with speed,
+/// and the detent absorbs the travel beyond it, which is what gives the stop
+/// its small kick instead of a proportional bounce.
+const STOP_DAMPING_RATIO: f64 = 0.82;
+
+/// Time from release to the first stop crossing. The stiffness is derived from
+/// this, so every register stops at the same pace however far it has to turn.
+const STOP_CROSSING_SECONDS: f64 = 0.75;
+
+/// Nominal time after the stop crossing for the entrance clock. The wheels keep
+/// being drawn until they actually come to rest, so this only needs to be close.
+const STOP_RING_SECONDS: f64 = 0.42;
+
+/// Longest delay added before a register starts, which staggers the numbers of
+/// one text block without staggering the wheels inside a number.
+const MAX_REGISTER_DELAY: f32 = 0.16;
+
+/// Below this sweep length a digit is drawn as a plain glyph.
+const PLAIN_SMEAR_PIXELS: f64 = 0.6;
+
+/// Longest sweep that is drawn, in line heights. The digit strip repeats every
+/// ten cells, so a sweep of one period already averages over the whole digit
+/// set; stretching further only costs glyphs without changing the result.
+const MAX_SWEEP_CELLS: f64 = 10.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextPhase {
@@ -103,11 +136,256 @@ struct GlyphMotion {
     swaps: u8,
 }
 
+/// One wheel of a numeric register.
 #[derive(Clone, Copy, Debug)]
-struct OdometerMotion {
-    start_cycles: f32,
+struct Dial {
+    /// Index into the laid-out glyphs.
+    glyph: usize,
+    /// Digit the wheel stops on.
+    target: u32,
+    /// Whole cells the wheel turns during the spin.
+    travel: f64,
+}
+
+/// Distance and spring constants of one spinning register.
+#[derive(Clone, Copy, Debug)]
+struct Spin {
+    /// Cells the lowest wheel turns, which is also its own travel.
+    travel: f64,
+    stiffness: f32,
+    damping: f32,
+    /// Scale applied to the spring's overshoot so the detent always kicks by a
+    /// fraction of a cell, whatever the travel was.
+    overshoot_scale: f64,
+}
+
+/// One number: its wheels move together, driven by one damped spring.
+struct Register {
+    spring: Spring,
+    /// Progress actually drawn, with the overshoot held to the detent travel.
+    shown: f32,
+    /// `None` when the register does not move, for example a zero value.
+    spin: Option<Spin>,
+    /// Progress covered during the previous display frame, signed.
+    exposure: f32,
     delay: f32,
+    dials: Vec<Dial>,
+}
+
+impl Register {
+    fn advance(&mut self, dt: f32, elapsed: f32) {
+        let Some(spin) = self.spin else {
+            self.exposure = 0.0;
+            return;
+        };
+        // A delay that falls inside one frame only starts the spring for the
+        // remainder of that frame.
+        let step = elapsed - (elapsed - dt).max(self.delay);
+        if step <= 0.0 {
+            self.exposure = 0.0;
+            return;
+        }
+        self.spring.advance(step, spin.stiffness, spin.damping);
+        let before = self.shown;
+        self.shown = shown_progress(f64::from(self.spring.value()), spin.overshoot_scale);
+        self.exposure = self.shown - before;
+    }
+
+    fn settled(&self) -> bool {
+        let Some(spin) = self.spin else {
+            return true;
+        };
+        // Judge the rest on the drawn position, not on the spring's raw
+        // overshoot: the detent compresses that, so the visible wheel is still
+        // long after the raw value has stopped looking settled.
+        let offset = (f64::from(self.shown) - 1.0).abs() * spin.travel;
+        let speed = f64::from(self.spring.velocity()) * spin.overshoot_scale * spin.travel;
+        offset <= 0.01 && speed <= 0.2
+    }
+}
+
+/// The spinning digits of one text block.
+struct Odometer {
+    atlas: GlyphAtlas,
+    registers: Vec<Register>,
+    /// Delay plus stop time of the slowest register.
     duration: f32,
+}
+
+impl Odometer {
+    /// Reads digit runs out of a laid-out plan. A decimal point between two
+    /// digits joins the run, so `2.3` is one register instead of two.
+    fn new(atlas: GlyphAtlas, plan: &TextPlan) -> Self {
+        let decimal = atlas.glyph('.');
+        let mut runs: Vec<Vec<usize>> = Vec::new();
+        let mut run: Vec<usize> = Vec::new();
+        for (index, glyph) in plan.glyphs.iter().enumerate() {
+            if atlas.digit(glyph.id).is_some() {
+                run.push(index);
+                continue;
+            }
+            let joined = decimal == Some(glyph.id)
+                && !run.is_empty()
+                && plan
+                    .glyphs
+                    .get(index + 1)
+                    .is_some_and(|next| atlas.digit(next.id).is_some());
+            if !joined && !run.is_empty() {
+                runs.push(std::mem::take(&mut run));
+            }
+        }
+        if !run.is_empty() {
+            runs.push(run);
+        }
+        let registers = runs
+            .iter()
+            .map(|run| build_register(&atlas, plan, run))
+            .collect();
+        let mut odometer = Self {
+            atlas,
+            registers,
+            duration: 0.0,
+        };
+        odometer.finish();
+        odometer
+    }
+
+    /// Starts one spin with fresh delays. The wheels of a register unwind
+    /// together; only whole numbers are staggered against each other.
+    fn rewind(&mut self, rng: &mut Rng) {
+        let mut duration = 0.0f32;
+        for register in &mut self.registers {
+            register.exposure = 0.0;
+            register.shown = if register.spin.is_none() { 1.0 } else { 0.0 };
+            if register.spin.is_none() {
+                register.delay = 0.0;
+                register.spring.reset(1.0);
+                continue;
+            }
+            register.delay = rng.unit() * MAX_REGISTER_DELAY;
+            register.spring.reset(0.0);
+            register.spring.set_target(1.0);
+            duration = duration
+                .max(register.delay + STOP_CROSSING_SECONDS as f32 + STOP_RING_SECONDS as f32);
+        }
+        self.duration = duration;
+    }
+
+    /// Puts every wheel on its stop digit without animating.
+    fn finish(&mut self) {
+        for register in &mut self.registers {
+            register.exposure = 0.0;
+            register.shown = 1.0;
+            register.spring.reset(1.0);
+        }
+        self.duration = 0.0;
+    }
+
+    fn advance(&mut self, dt: f32, elapsed: f32) {
+        for register in &mut self.registers {
+            register.advance(dt, elapsed);
+        }
+    }
+
+    fn settled(&self) -> bool {
+        self.registers.iter().all(Register::settled)
+    }
+}
+
+/// Builds one register from a digit run: wheels share one spring, and each
+/// wheel turns ten times less than the wheel to its right.
+fn build_register(atlas: &GlyphAtlas, plan: &TextPlan, run: &[usize]) -> Register {
+    let digits: Vec<u32> = run
+        .iter()
+        .map(|&index| {
+            atlas
+                .digit(plan.glyphs[index].id)
+                .expect("a register run holds digits")
+        })
+        .collect();
+    let mut value = 0u64;
+    for &digit in &digits {
+        value = value * 10 + u64::from(digit);
+    }
+    // Wind back by the smallest number of lowest-wheel cells that still turns
+    // the most significant wheel at least one digit, and never below zero.
+    let places = digits.len() - 1;
+    let travel = if places == 0 {
+        value
+    } else {
+        let top = 10u64.pow(places as u32);
+        (top + value % top).min(value)
+    };
+    let start = value - travel;
+    let spin = (travel > 0).then(|| {
+        let (stiffness, damping, overshoot_scale) = spring_params(travel as f64);
+        Spin {
+            travel: travel as f64,
+            stiffness,
+            damping,
+            overshoot_scale,
+        }
+    });
+    let dials = digits
+        .iter()
+        .enumerate()
+        .map(|(index, &target)| {
+            let place = u32::try_from(digits.len() - 1 - index).expect("few digits");
+            let step = 10u64.pow(place);
+            Dial {
+                glyph: run[index],
+                target,
+                travel: (value / step - start / step) as f64,
+            }
+        })
+        .collect();
+    Register {
+        spring: Spring::default(),
+        shown: 1.0,
+        spin,
+        exposure: 0.0,
+        delay: 0.0,
+        dials,
+    }
+}
+
+/// Spring constants for a register that turns `travel` cells before it stops.
+///
+/// The damping ratio is fixed so every register has the same stop response and
+/// crosses its target after the same time. The overshoot scale then holds the
+/// distance the spring runs past the detent to a fraction of a cell, so a long
+/// spin does not kick a whole revolution past its stop.
+fn spring_params(travel: f64) -> (f32, f32, f64) {
+    assert!(travel > 0.0, "a spinning register needs positive travel");
+    let zeta = STOP_DAMPING_RATIO;
+    let phase = (1.0 - zeta * zeta).sqrt().atan2(zeta);
+    let omega_damped = (std::f64::consts::PI - phase) / STOP_CROSSING_SECONDS;
+    let omega = omega_damped / (1.0 - zeta * zeta).sqrt();
+    let raw_overshoot = (-std::f64::consts::PI * zeta / (1.0 - zeta * zeta).sqrt()).exp();
+    let overshoot_scale = STOP_OVERSCROLL_CELLS / (travel * raw_overshoot);
+    (
+        (omega * omega) as f32,
+        (2.0 * zeta * omega) as f32,
+        overshoot_scale,
+    )
+}
+
+/// Progress as drawn. The spring's overshoot past the target is compressed to
+/// the detent travel, which keeps the kick on the fastest wheel small while the
+/// shared progress keeps every wheel in the same gear relation.
+fn shown_progress(progress: f64, overshoot_scale: f64) -> f32 {
+    if progress <= 1.0 {
+        progress as f32
+    } else {
+        (1.0 + (progress - 1.0) * overshoot_scale) as f32
+    }
+}
+
+/// Sweep length actually drawn for one wheel, in its own cells. A wheel that
+/// turns more than a full digit period per exposure looks the same as one that
+/// turns exactly a period, so the range is capped there.
+fn drawn_sweep_cells(exposure: f32, travel: f64) -> f64 {
+    (f64::from(exposure.abs()) * travel).min(MAX_SWEEP_CELLS)
 }
 
 pub struct AnimatedText {
@@ -134,8 +412,7 @@ pub struct AnimatedText {
     glyphs: Vec<GlyphMotion>,
     glitch: Vec<u32>,
     odometer: bool,
-    odometer_atlas: Option<GlyphAtlas>,
-    odometer_motions: Vec<OdometerMotion>,
+    odometer_state: Option<Odometer>,
 }
 
 impl AnimatedText {
@@ -175,8 +452,7 @@ impl AnimatedText {
             glyphs: Vec::new(),
             glitch: Vec::new(),
             odometer: false,
-            odometer_atlas: None,
-            odometer_motions: Vec::new(),
+            odometer_state: None,
         }
     }
 
@@ -191,8 +467,8 @@ impl AnimatedText {
         self
     }
 
-    /// Uses the odometer reveal for numeric values. The paint is forced to a
-    /// fill because the spinning digit windows need a solid ink color.
+    /// Uses the odometer reveal for numeric values. The paint must be a fill
+    /// because the spinning digit windows need a solid ink color.
     pub fn with_odometer(mut self, odometer: bool) -> Self {
         self.odometer = odometer;
         self
@@ -208,6 +484,10 @@ impl AnimatedText {
         if self.plan.is_some() && (self.stage_unit - stage.unit).abs() <= f64::EPSILON {
             return;
         }
+        assert!(
+            !self.odometer || self.paint == PaintStyle::Fill,
+            "an odometer needs a fill paint because its digit windows are solid ink"
+        );
         let size = (self.size * stage.unit).max(1.0) as f32;
         let wrap = self.wrap.map(|wrap| (wrap * stage.unit).max(1.0) as f32);
         let text = fonts.layout_wrapped(
@@ -222,11 +502,9 @@ impl AnimatedText {
         let glyph_count = plan.glyph_count();
         let previous_count = self.plan.as_ref().map_or(0, TextPlan::glyph_count);
         self.glitch = fonts.glitch_ids(self.face).to_vec();
-        self.odometer_atlas = if self.odometer {
-            Some(fonts.glyph_atlas(self.face, size))
-        } else {
-            None
-        };
+        self.odometer_state = self
+            .odometer
+            .then(|| Odometer::new(fonts.glyph_atlas(self.face, size), &plan));
         self.plan = Some(plan);
         self.stage_unit = stage.unit;
         if glyph_count != previous_count || self.glyphs.len() != glyph_count {
@@ -237,6 +515,17 @@ impl AnimatedText {
                 self.phase = TextPhase::Visible;
             }
         }
+        match (&mut self.odometer_state, self.phase) {
+            (Some(odometer), TextPhase::Appear) => {
+                // A stage change rebuilt the wheels, so the entrance restarts
+                // on the new layout instead of freezing mid-spin.
+                odometer.rewind(rng);
+                self.duration = odometer.duration;
+                self.elapsed = 0.0;
+            }
+            (Some(odometer), _) => odometer.finish(),
+            (None, _) => {}
+        }
     }
 
     fn init_motions(&mut self, rng: &mut Rng) {
@@ -245,22 +534,9 @@ impl AnimatedText {
         };
         let count = plan.glyph_count();
         self.glyphs.clear();
-        if self.odometer {
-            self.odometer_motions.clear();
-            self.odometer_motions.reserve(count);
-            let mut total = 0.0f32;
-            for _ in 0..count {
-                let start_cycles = 2.0 + rng.unit() * 3.0;
-                let delay = rng.unit() * 0.12;
-                let duration = 0.7 + rng.unit() * 0.75;
-                total = total.max(delay + duration);
-                self.odometer_motions.push(OdometerMotion {
-                    start_cycles,
-                    delay,
-                    duration,
-                });
-            }
-            self.duration = total + 0.08;
+        if let Some(odometer) = &mut self.odometer_state {
+            odometer.rewind(rng);
+            self.duration = odometer.duration;
             return;
         }
         match self.effect {
@@ -340,6 +616,11 @@ impl AnimatedText {
         self.exit_effect = effect;
         self.phase = TextPhase::Disappear;
         self.elapsed = 0.0;
+        // An exit always starts from the settled digits, even when it
+        // interrupts a spin.
+        if let Some(odometer) = &mut self.odometer_state {
+            odometer.finish();
+        }
         self.init_exit_motions(rng);
     }
 
@@ -380,13 +661,27 @@ impl AnimatedText {
     pub fn set_visible(&mut self) {
         self.phase = TextPhase::Visible;
         self.elapsed = self.duration;
+        if let Some(odometer) = &mut self.odometer_state {
+            odometer.finish();
+        }
     }
 
     pub fn advance(&mut self, dt: f32) {
-        if !matches!(self.phase, TextPhase::Appear | TextPhase::Disappear) {
+        if self.phase == TextPhase::Hidden {
             return;
         }
-        self.elapsed += dt;
+        if self.phase != TextPhase::Visible {
+            self.elapsed += dt;
+        }
+        // The wheels keep ringing out after the phase turns visible; the
+        // odometer stays the drawing path until they are at rest.
+        if matches!(self.phase, TextPhase::Appear | TextPhase::Visible) {
+            if let Some(odometer) = &mut self.odometer_state {
+                if !odometer.settled() {
+                    odometer.advance(dt, self.elapsed);
+                }
+            }
+        }
         match self.phase {
             TextPhase::Appear if self.elapsed >= self.duration => {
                 self.phase = TextPhase::Visible;
@@ -488,10 +783,14 @@ impl AnimatedText {
                 let origin = self.text_origin(stage);
                 (origin.x, origin.y)
             });
-        if self.odometer && self.phase == TextPhase::Appear {
-            self.draw_odometer(scene, text_transform, palette, alpha, plan);
-            self.draw_caret(scene, text_transform, stage, palette, alpha, time);
-            return;
+        if let Some(odometer) = &self.odometer_state {
+            let appearing = self.phase == TextPhase::Appear;
+            let settling = self.phase == TextPhase::Visible && !odometer.settled();
+            if appearing || settling {
+                self.draw_odometer(scene, text_transform, palette, alpha, plan, odometer);
+                self.draw_caret(scene, text_transform, stage, palette, alpha, time);
+                return;
+            }
         }
         match self.paint {
             PaintStyle::Fill => {
@@ -534,56 +833,14 @@ impl AnimatedText {
         palette: ScenePalette,
         alpha: f32,
         plan: &TextPlan,
+        odometer: &Odometer,
     ) {
-        let Some(atlas) = &self.odometer_atlas else {
-            return;
-        };
+        let atlas = &odometer.atlas;
         let line_height = plan.line_height.max(1.0);
-        for (index, glyph) in plan.glyphs.iter().enumerate() {
-            if let Some(target) = atlas.digit(glyph.id) {
-                let motion = self
-                    .odometer_motions
-                    .get(index)
-                    .copied()
-                    .unwrap_or(OdometerMotion {
-                        start_cycles: 3.0,
-                        delay: 0.0,
-                        duration: 1.0,
-                    });
-                let progress = if self.phase == TextPhase::Visible {
-                    1.0
-                } else {
-                    smoothstep(((self.elapsed - motion.delay) / motion.duration).clamp(0.0, 1.0))
-                };
-                let shift =
-                    f64::from(1.0 - progress) * f64::from(motion.start_cycles) * 10.0 * line_height;
-                let line = plan.lines.get(usize::from(glyph.line));
-                let top = line.map_or(glyph.y - plan.cap_height, |line| line.top);
-                let bottom = line.map_or(glyph.y + line_height, |line| line.top + line.line_height);
-                let clip = Rect::new(glyph.x, top, glyph.x + glyph.advance, bottom);
-                scene.push_clip_layer(Fill::NonZero, transform, &clip);
-                let center = f64::from(target) - shift / line_height;
-                let first = center.floor() as i32 - 12;
-                let last = center.ceil() as i32 + 12;
-                for value in first..=last {
-                    let digit = value.rem_euclid(10) as usize;
-                    let Some(id) = atlas.digit_id(digit) else {
-                        continue;
-                    };
-                    let offset = (f64::from(value) - f64::from(target)) * line_height + shift;
-                    if offset.abs() > line_height * 3.0 {
-                        continue;
-                    }
-                    atlas.draw(
-                        scene,
-                        transform * Affine::translate((glyph.x, glyph.y + offset)),
-                        id,
-                        palette.ink,
-                        alpha,
-                    );
-                }
-                scene.pop_layer();
-            } else {
+        // Punctuation, units and spaces do not move; every digit belongs to a
+        // register and is drawn as a wheel below.
+        for glyph in &plan.glyphs {
+            if atlas.digit(glyph.id).is_none() {
                 atlas.draw(
                     scene,
                     transform * Affine::translate((glyph.x, glyph.y)),
@@ -591,6 +848,45 @@ impl AnimatedText {
                     palette.ink,
                     alpha,
                 );
+            }
+        }
+        for register in &odometer.registers {
+            let progress = f64::from(register.shown);
+            let settled = register.settled();
+            for dial in &register.dials {
+                let glyph = &plan.glyphs[dial.glyph];
+                // The displacement of this wheel during the exposure, in its
+                // own cells and in stage units.
+                let smear = drawn_sweep_cells(register.exposure, dial.travel) * line_height;
+                if settled && smear < PLAIN_SMEAR_PIXELS {
+                    atlas.draw(
+                        scene,
+                        transform * Affine::translate((glyph.x, glyph.y)),
+                        glyph.id,
+                        palette.ink,
+                        alpha,
+                    );
+                    continue;
+                }
+                let line = plan.lines.get(usize::from(glyph.line));
+                let top = line.map_or(glyph.y - plan.cap_height, |line| line.top);
+                let bottom = line.map_or(glyph.y + line_height, |line| line.top + line.line_height);
+                let clip = Rect::new(glyph.x, top, glyph.x + glyph.advance, bottom);
+                scene.push_clip_layer(Fill::NonZero, transform, &clip);
+                draw_wheel(
+                    scene,
+                    transform,
+                    atlas,
+                    plan,
+                    glyph,
+                    *dial,
+                    progress,
+                    smear,
+                    line_height,
+                    palette.ink,
+                    alpha,
+                );
+                scene.pop_layer();
             }
         }
     }
@@ -772,6 +1068,58 @@ impl AnimatedText {
     }
 }
 
+/// Continuous position of a wheel in its periodic digit strip. It starts one
+/// travel behind the target digit and lands exactly on it at full progress.
+fn wheel_center(dial: Dial, progress: f64) -> f64 {
+    // The strip is periodic in ten cells; keeping the center in one period
+    // keeps the drawn range small for registers that turn many revolutions.
+    (f64::from(dial.target) - (1.0 - progress) * dial.travel).rem_euclid(10.0)
+}
+
+/// Draws one wheel of an odometer cell: the digit strip around the current
+/// position, with every cell swept by the exposure displacement.
+#[allow(clippy::too_many_arguments)]
+fn draw_wheel(
+    scene: &mut Scene,
+    transform: Affine,
+    atlas: &GlyphAtlas,
+    plan: &TextPlan,
+    glyph: &TextGlyph,
+    dial: Dial,
+    progress: f64,
+    smear: f64,
+    line_height: f64,
+    color: Color,
+    alpha: f32,
+) {
+    let line = plan.lines.get(usize::from(glyph.line));
+    let top = line.map_or(glyph.y - plan.cap_height, |line| line.top);
+    let bottom = line.map_or(glyph.y + line_height, |line| line.top + line.line_height);
+    let center = wheel_center(dial, progress);
+    let half = (smear / line_height * 0.5).ceil() as i64 + 2;
+    for value in (center.floor() as i64 - half)..=(center.ceil() as i64 + half) {
+        let digit = value.rem_euclid(10) as usize;
+        let Some(id) = atlas.digit_id(digit) else {
+            continue;
+        };
+        let Some(ink) = atlas.digit_ink(digit) else {
+            continue;
+        };
+        let offset = (value as f64 - center) * line_height;
+        let ink_center = glyph.y + offset - f64::from(ink.center());
+        let reach = f64::from(ink.height()) * 0.5 + smear * 0.5;
+        if ink_center + reach < top || ink_center - reach > bottom {
+            continue;
+        }
+        let position = transform * Affine::translate((glyph.x, glyph.y + offset));
+        if smear < PLAIN_SMEAR_PIXELS {
+            atlas.draw(scene, position, id, color, alpha);
+        } else {
+            atlas.draw_swept(scene, position, id, ink, smear as f32, color, alpha);
+        }
+    }
+}
+
 fn backdrop_path(bounds: Rect, cut: [bool; 4], cut_size: f64) -> BezPath {
     let mut path = BezPath::new();
     let x0 = bounds.x0;
@@ -910,6 +1258,269 @@ mod tests {
         assert_eq!(text.phase(), TextPhase::Appear);
         text.advance(text.duration);
         assert_eq!(text.phase(), TextPhase::Visible);
+        Ok(())
+    }
+
+    fn laid_out(source: &str, rng: &mut Rng) -> anyhow::Result<AnimatedText> {
+        let mut fonts = Fonts::new()?;
+        let mut text = AnimatedText::new(
+            source,
+            96.0,
+            UiFace::SemiBold,
+            BlockAlign::Left,
+            None,
+            1.02,
+            PaintStyle::Fill,
+        )
+        .with_odometer(true);
+        text.layout(&mut fonts, &stage(), rng);
+        Ok(text)
+    }
+
+    fn dials(text: &AnimatedText) -> Vec<(u32, f64)> {
+        let odometer = text
+            .odometer_state
+            .as_ref()
+            .expect("the text has an odometer");
+        assert_eq!(odometer.registers.len(), 1, "expected one register");
+        odometer.registers[0]
+            .dials
+            .iter()
+            .map(|dial| (dial.target, dial.travel))
+            .collect()
+    }
+
+    #[test]
+    fn odometer_registers_wind_back_by_whole_digits_of_every_place() -> anyhow::Result<()> {
+        let mut rng = Rng::new(3);
+        let cases: [(&str, &[(u32, f64)]); 7] = [
+            ("8 RND", &[(8, 8.0)]),
+            ("43 RND", &[(4, 1.0), (3, 13.0)]),
+            ("100 RND", &[(1, 1.0), (0, 10.0), (0, 100.0)]),
+            ("$499 USD", &[(4, 1.0), (9, 19.0), (9, 199.0)]),
+            ("4299 MM", &[(4, 1.0), (2, 12.0), (9, 129.0), (9, 1299.0)]),
+            ("2.3 KG", &[(2, 1.0), (3, 13.0)]),
+            ("0.7 KG", &[(0, 0.0), (7, 7.0)]),
+        ];
+        for (source, expected) in cases {
+            let text = laid_out(source, &mut rng)?;
+            assert_eq!(dials(&text), expected, "{source}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn odometer_start_and_stop_read_the_wound_back_number() -> anyhow::Result<()> {
+        let mut rng = Rng::new(9);
+        for (source, start, stop) in [
+            ("$499 USD", 300u32, 499u32),
+            ("4299 MM", 3000, 4299),
+            ("2.3 KG", 10, 23),
+            ("0.7 KG", 0, 7),
+        ] {
+            let text = laid_out(source, &mut rng)?;
+            let odometer = text.odometer_state.as_ref().expect("odometer");
+            let register = &odometer.registers[0];
+            let read = |progress: f64| {
+                register.dials.iter().fold(0u32, |value, dial| {
+                    value * 10 + wheel_center(*dial, progress).floor() as u32
+                })
+            };
+            assert_eq!(read(0.0), start, "{source} at rest before the spin");
+            assert_eq!(read(1.0), stop, "{source} on its target");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn odometer_stops_on_its_target_with_a_small_kick() -> anyhow::Result<()> {
+        let mut rng = Rng::new(5);
+        for source in ["4299 MM", "2.3 KG", "43 RND"] {
+            let mut text = laid_out(source, &mut rng)?;
+            text.enter(CharEffect::Fade, &mut rng);
+            let travel = text.odometer_state.as_ref().expect("odometer").registers[0]
+                .spin
+                .expect("the register spins")
+                .travel;
+            let mut peak: f64 = 0.0;
+            let mut elapsed = 0.0f32;
+            let dt = 1.0 / 120.0;
+            loop {
+                text.advance(dt);
+                elapsed += dt;
+                let odometer = text.odometer_state.as_ref().expect("odometer");
+                let value = f64::from(odometer.registers[0].shown);
+                peak = peak.max((value - 1.0) * travel);
+                if text.phase() == TextPhase::Visible && odometer.settled() {
+                    break;
+                }
+                assert!(elapsed < 2.2, "{source} did not settle");
+            }
+            let odometer = text.odometer_state.as_ref().expect("odometer");
+            let value = f64::from(odometer.registers[0].shown);
+            assert!(
+                (value - 1.0).abs() * travel < 0.02,
+                "{source} stops {} cells off target",
+                (value - 1.0).abs() * travel
+            );
+            assert!(
+                peak > STOP_OVERSCROLL_CELLS * 0.6 && peak < STOP_OVERSCROLL_CELLS * 1.25,
+                "{source} kicks {peak} cells past the stop"
+            );
+            assert!(
+                elapsed > STOP_CROSSING_SECONDS as f32,
+                "{source} stopped before it crossed its target"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn drawn_sweep_caps_at_one_digit_period() {
+        assert_eq!(drawn_sweep_cells(0.0, 1299.0), 0.0);
+        assert!((drawn_sweep_cells(0.001, 1299.0) - 1.299).abs() < 1e-4);
+        assert_eq!(drawn_sweep_cells(1.0, 1299.0), MAX_SWEEP_CELLS);
+        // A slow wheel is not capped and keeps its exact displacement.
+        assert!((drawn_sweep_cells(0.01, 13.0) - 0.13).abs() < 1e-4);
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_odometer_spin_preview() -> anyhow::Result<()> {
+        use vello::{util::RenderContext, wgpu, RenderParams};
+
+        let width = 1280u32;
+        let height = 1024u32;
+        let stage = Stage::new(Size::new(f64::from(width), f64::from(height)));
+        let mut fonts = Fonts::new()?;
+        let mut rng = Rng::new(7);
+        let mut texts = Vec::new();
+        for (source, x) in [("4299 MM", 60.0), ("2.3 KG", 560.0), ("43 RND", 960.0)] {
+            let mut text = AnimatedText::new(
+                source,
+                96.0,
+                UiFace::SemiBold,
+                BlockAlign::Left,
+                None,
+                1.02,
+                PaintStyle::Fill,
+            )
+            .with_odometer(true);
+            text.layout(&mut fonts, &stage, &mut rng);
+            text.enter(CharEffect::Fade, &mut rng);
+            if let Some(odometer) = &mut text.odometer_state {
+                for register in &mut odometer.registers {
+                    register.delay = 0.0;
+                }
+            }
+            texts.push((text, x));
+        }
+        let mut palette = ScenePalette::placeholder();
+        palette.ink = Color::from_rgb8(240, 240, 244);
+        let frames = [12usize, 24, 40, 56, 72, 88, 104, 120];
+        let mut scene = Scene::new();
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::from_rgb8(10, 11, 16),
+            None,
+            &Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+        );
+        let row_height = (f64::from(height) - 48.0) / frames.len() as f64;
+        let dt = 1.0f32 / 120.0;
+        let mut row = 0;
+        for frame in 0..=*frames.last().expect("the preview shows frames") {
+            if frames.contains(&frame) {
+                let top = 24.0 + row as f64 * row_height;
+                for (text, x) in &texts {
+                    text.draw(
+                        &mut scene,
+                        Affine::translate((*x, top)),
+                        &stage,
+                        palette,
+                        1.0,
+                        0.0,
+                    );
+                }
+                row += 1;
+            }
+            for (text, _) in &mut texts {
+                text.advance(dt);
+            }
+        }
+
+        let mut context = RenderContext::new();
+        let id = pollster::block_on(crate::render::prepare_device(
+            &mut context,
+            None,
+            wgpu::DeviceDescriptor::default(),
+        ))?;
+        let device = &context.devices[id];
+        let texture = device.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Odometer preview"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let params = RenderParams {
+            base_color: Color::TRANSPARENT,
+            width,
+            height,
+            antialiasing_method: crate::render::ANTIALIASING,
+        };
+        let mut renderer = crate::render::renderer(&device.device)?;
+        renderer.render_to_texture(&device.device, &device.queue, &scene, &view, &params)?;
+        let row_bytes = width * 4;
+        assert_eq!(row_bytes % 256, 0, "the readback row must be copy aligned");
+        let readback = device.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Odometer preview readback"),
+            size: u64::from(row_bytes * height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(height),
+                },
+            },
+            texture.size(),
+        );
+        device.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+        device.device.poll(wgpu::PollType::wait_indefinitely())?;
+        rx.recv()??;
+        let pixels = readback.slice(..).get_mapped_range()?.to_vec();
+        readback.unmap();
+        if let Some(path) = std::env::var_os("VU_ODOMETER_PREVIEW_PATH") {
+            let file = std::fs::File::create(std::path::PathBuf::from(path))?;
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header()?.write_image_data(&pixels)?;
+        }
         Ok(())
     }
 

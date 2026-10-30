@@ -8,8 +8,8 @@ use parley::{
 };
 use skrifa::prelude::*;
 use vello::{
-    kurbo::{Affine, Stroke},
-    peniko::{Blob, Brush, Color, Fill},
+    kurbo::{Affine, Point, Stroke},
+    peniko::{Blob, Brush, Color, Fill, Gradient},
     Glyph, Scene,
 };
 
@@ -216,6 +216,38 @@ fn ascii_glyph_ids(font: &FontData) -> Vec<u32> {
         .collect()
 }
 
+/// Vertical ink extents of a digit glyph, in font units above the baseline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DigitInk {
+    min_y: f32,
+    max_y: f32,
+}
+
+impl DigitInk {
+    /// Ink height used by the odometer smear; at least one font unit so a
+    /// degenerate glyph cannot divide by zero.
+    pub fn height(self) -> f32 {
+        (self.max_y - self.min_y).max(1.0)
+    }
+
+    pub fn center(self) -> f32 {
+        (self.min_y + self.max_y) * 0.5
+    }
+}
+
+/// Box-filter profile of a filled band of `height` swept over `smear`:
+/// the ramp length as a fraction of the sweep, and the alpha on the plateau.
+///
+/// This is the convolution of two boxes, divided by the exposure length, so it
+/// keeps the band's ink: `(plateau + ramp) * peak == height`.
+fn sweep_profile(height: f32, smear: f32) -> (f32, f32) {
+    assert!(smear > 0.0, "a sweep needs a positive length");
+    (
+        height.min(smear) / (height + smear),
+        (height / smear).min(1.0),
+    )
+}
+
 /// A font face at one size, with ASCII glyph ids and advances.
 pub struct GlyphAtlas {
     font: FontData,
@@ -224,6 +256,7 @@ pub struct GlyphAtlas {
     advances: BTreeMap<char, f32>,
     glitch: Vec<u32>,
     digits: [Option<u32>; 10],
+    digit_ink: [Option<DigitInk>; 10],
 }
 
 impl GlyphAtlas {
@@ -250,6 +283,13 @@ impl GlyphAtlas {
         let digits = std::array::from_fn(|index| {
             char::from_digit(index as u32, 10).and_then(|character| glyphs.get(&character).copied())
         });
+        let digit_ink = digits.map(|id| {
+            let bounds = metrics.bounds(GlyphId::new(id?))?;
+            Some(DigitInk {
+                min_y: bounds.y_min,
+                max_y: bounds.y_max,
+            })
+        });
         Self {
             font: font.clone(),
             size,
@@ -257,6 +297,7 @@ impl GlyphAtlas {
             advances,
             glitch,
             digits,
+            digit_ink,
         }
     }
 
@@ -288,12 +329,73 @@ impl GlyphAtlas {
         self.digits.get(digit).copied().flatten()
     }
 
+    /// Ink extents of a decimal digit, when this face has one.
+    pub fn digit_ink(&self, digit: usize) -> Option<DigitInk> {
+        self.digit_ink.get(digit).copied().flatten()
+    }
+
     pub fn draw(&self, scene: &mut Scene, transform: Affine, glyph: u32, color: Color, alpha: f32) {
         scene
             .draw_glyphs(&self.font)
             .font_size(self.size)
             .transform(transform)
             .brush(color)
+            .brush_alpha(alpha)
+            .draw(
+                Fill::NonZero,
+                std::iter::once(Glyph {
+                    id: glyph,
+                    x: 0.0,
+                    y: 0.0,
+                }),
+            );
+    }
+
+    /// Draws a digit as an analytical exposure sweep.
+    ///
+    /// The glyph is stretched vertically to the swept extent, and shaded with a
+    /// gradient whose stops are the box-filter profile of its ink: clear at
+    /// both sweep ends, full over the plateau, and `min(1, height / smear)` at
+    /// the peak when the smear is longer than the ink. The brush transform
+    /// mirrors the glyph transform so the gradient rides the same stretch.
+    ///
+    /// `smear` is the sweep length in glyph units and must be positive.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_swept(
+        &self,
+        scene: &mut Scene,
+        transform: Affine,
+        glyph: u32,
+        ink: DigitInk,
+        smear: f32,
+        color: Color,
+        alpha: f32,
+    ) {
+        assert!(smear > 0.0, "a swept digit needs a positive smear");
+        let height = ink.height();
+        let center = f64::from(ink.center());
+        let stretch = f64::from((height + smear) / height);
+        let glyph_transform = Affine::translate((0.0, center))
+            * Affine::scale_non_uniform(1.0, stretch)
+            * Affine::translate((0.0, -center));
+        let (ramp, peak) = sweep_profile(height, smear);
+        let gradient = Gradient::new_linear(
+            Point::new(0.0, center - f64::from(height) * 0.5),
+            Point::new(0.0, center + f64::from(height) * 0.5),
+        )
+        .with_stops([
+            (0.0, color.with_alpha(0.0)),
+            (ramp, color.with_alpha(peak)),
+            (1.0 - ramp, color.with_alpha(peak)),
+            (1.0, color.with_alpha(0.0)),
+        ]);
+        scene
+            .draw_glyphs(&self.font)
+            .font_size(self.size)
+            .transform(transform)
+            .glyph_transform(Some(glyph_transform))
+            .brush_transform(Some(Affine::FLIP_Y * glyph_transform))
+            .brush(&gradient)
             .brush_alpha(alpha)
             .draw(
                 Fill::NonZero,
@@ -791,5 +893,61 @@ mod tests {
         assert!(!atlas.glitch_ids().is_empty());
         assert!(!fonts.glitch_ids(UiFace::SemiBold).is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn digit_ink_rises_above_the_baseline() -> anyhow::Result<()> {
+        let fonts = Fonts::new()?;
+        for size in [40.0, 96.0] {
+            let atlas = fonts.glyph_atlas(UiFace::SemiBold, size);
+            for digit in 0..10 {
+                let ink = atlas
+                    .digit_ink(digit)
+                    .unwrap_or_else(|| panic!("digit {digit} has no ink"));
+                assert!(
+                    ink.center() > 0.0,
+                    "digit {digit} ink is not above the baseline"
+                );
+                assert!(
+                    ink.height() > size * 0.5 && ink.height() < size,
+                    "digit {digit} ink height {} is not near the font size",
+                    ink.height()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sweep_profile_is_the_box_filter_of_the_ink_band() {
+        // A short sweep keeps a full-height plateau and ramps over its own
+        // length.
+        let (ramp, peak) = sweep_profile(10.0, 2.0);
+        assert!((ramp - 2.0 / 12.0).abs() < 1e-6);
+        assert_eq!(peak, 1.0);
+        // A sweep longer than the ink has no plateau and loses peak opacity.
+        let (ramp, peak) = sweep_profile(10.0, 20.0);
+        assert!((ramp - 10.0 / 30.0).abs() < 1e-6);
+        assert!((peak - 0.5).abs() < 1e-6);
+        let (ramp, peak) = sweep_profile(10.0, 10.0);
+        assert!((ramp - 0.5).abs() < 1e-6);
+        assert_eq!(peak, 1.0);
+        // The trapezoid keeps the ink area of the unswept band.
+        for smear in [1.0, 2.0, 5.0, 10.0, 20.0, 100.0] {
+            let height = 10.0;
+            let (ramp, peak) = sweep_profile(height, smear);
+            let plateau = 1.0 - 2.0 * ramp;
+            let area = (plateau + ramp) * (height + smear) * peak;
+            assert!(
+                (area - height).abs() < 1e-3,
+                "sweep {smear} keeps {area} of {height} ink"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "positive length")]
+    fn sweep_profile_rejects_a_zero_sweep() {
+        let _ = sweep_profile(10.0, 0.0);
     }
 }

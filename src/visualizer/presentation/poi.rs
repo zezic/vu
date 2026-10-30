@@ -282,8 +282,8 @@ impl PoiScene {
         let anchor = self.anchor_point(visualizer, stage);
         self.anchor = anchor;
         let air = stage.px(112.0);
-        let stiffness = 18.0;
-        let damping = 7.0;
+        let stiffness = 3.0;
+        let damping = 3.0;
         let time = f64::from(self.time);
         for card in &mut self.cards {
             let (base_x, base_y) = card_target(stage, anchor, card, air);
