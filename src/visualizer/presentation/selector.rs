@@ -657,7 +657,7 @@ impl SelectorOverlay {
             scene.fill(
                 Fill::NonZero,
                 Affine::IDENTITY,
-                palette.muted.with_alpha(0.06 * log_alpha),
+                palette.muted.with_alpha(0.006 * log_alpha),
                 None,
                 &self.log_rect,
             );
