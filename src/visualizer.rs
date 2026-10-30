@@ -5,6 +5,7 @@ mod debug;
 mod detection;
 mod geometry;
 mod model;
+mod presentation;
 mod renderer;
 mod showcase;
 mod spectrum;
@@ -1488,6 +1489,16 @@ pub struct Frame<'a> {
     pub model_composite: ModelComposite,
 }
 
+/// Monotonic detector hit counters. Presentation compares these across frames
+/// to emit discrete trigger moments without subscribing to another channel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TriggerCounts {
+    pub kick: u32,
+    pub snare: u32,
+    pub hat: u32,
+    pub drop: u32,
+}
+
 /// Lazily loaded model set. The loaded copy is retained for the whole run.
 enum Models {
     Unloaded,
@@ -1673,7 +1684,8 @@ impl Visualizer {
                         poi.anchor.name.clone(),
                         anchor,
                         poi.id == "ejection_port" && anchor.part.is_none(),
-                    );
+                    )
+                    .with_identity(poi.id.clone(), poi.label.clone());
                     if anchor.part.is_some() {
                         let children = model
                             .node_parts(&poi.anchor.name)
@@ -1957,6 +1969,30 @@ impl Visualizer {
         self.showcase.target_name()
     }
 
+    pub fn showcase_target_id(&self) -> Option<&str> {
+        self.showcase.target_id()
+    }
+
+    pub fn showcase_target_index(&self) -> Option<usize> {
+        self.showcase.target_index()
+    }
+
+    pub(crate) fn showcase_pois(&self) -> &[showcase::FocusPoi] {
+        self.showcase.pois()
+    }
+
+    pub(crate) fn showcase_poi_index_for_part(&self, part: u16) -> Option<usize> {
+        self.showcase.poi_index_for_part(part)
+    }
+
+    pub(crate) fn showcase_mode(&self) -> showcase::ShowcaseMode {
+        self.showcase.mode()
+    }
+
+    pub fn showcase_focus_blend(&self) -> f32 {
+        self.showcase.focus_blend()
+    }
+
     pub fn showcase_poi_count(&self) -> usize {
         self.showcase.poi_count()
     }
@@ -1975,12 +2011,177 @@ impl Visualizer {
 
     pub fn showcase_selected_mesh(&self) -> Option<&str> {
         let part = self.showcase.selected_mesh()?;
+        self.part_name(part)
+    }
+
+    pub fn showcase_selected_part(&self) -> Option<u16> {
+        self.showcase.selected_mesh()
+    }
+
+    pub fn model_id(&self) -> Option<&str> {
+        match &self.models {
+            Models::Ready(models) => Some(&models.current().id),
+            _ => None,
+        }
+    }
+
+    /// The authored weapon for the model currently shown, if the catalog has one.
+    pub fn weapon(&self) -> Option<&crate::weapon::Weapon> {
+        let id = self.model_id()?;
+        self.catalog.as_ref()?.weapons.get(id)
+    }
+
+    pub fn comedy_spec(&self) -> Option<&crate::weapon::ComedySpec> {
+        self.catalog.as_ref().map(|catalog| &catalog.comedy_spec)
+    }
+
+    pub fn part_count(&self) -> Option<u16> {
+        match &self.models {
+            Models::Ready(models) => Some(models.current().part_count()),
+            _ => None,
+        }
+    }
+
+    pub fn part_name(&self, part: u16) -> Option<&str> {
         match &self.models {
             Models::Ready(models) if part < models.current().part_count() => {
                 Some(models.current().part_name(part))
             }
             _ => None,
         }
+    }
+
+    pub fn trigger_counts(&self) -> TriggerCounts {
+        TriggerCounts {
+            kick: self.kick_hits,
+            snare: self.snare_hits,
+            hat: self.hat_hits,
+            drop: self.drop_hits,
+        }
+    }
+
+    /// Screen position of a model vertex selected once for a POI callout.
+    pub fn vertex_screen(&self, vertex: u16) -> Option<[f32; 2]> {
+        let projected = self
+            .scene
+            .current
+            .as_ref()?
+            .vertices
+            .get(usize::from(vertex))?;
+        Some([projected.screen.x, projected.screen.y])
+    }
+
+    /// Normalized 2D wireframe of the first magazine child when the magazine
+    /// has at least three modelled children. The presentation repeats it for
+    /// every round of capacity.
+    pub fn magazine_ammo_icon(&self) -> Option<Vec<[f32; 4]>> {
+        let Models::Ready(models) = &self.models else {
+            return None;
+        };
+        let model = models.current();
+        let parts = model.node_parts("magazine");
+        let parent = model.anchor("magazine").and_then(|anchor| anchor.part);
+        let children: Vec<u16> = parts
+            .iter()
+            .copied()
+            .filter(|part| Some(*part) != parent)
+            .collect();
+        if children.len() < 3 {
+            return None;
+        }
+        let part = children[0];
+        let wireframe = &self.scene.current.as_ref()?.wireframe;
+        let mut low = [f32::INFINITY; 3];
+        let mut high = [f32::NEG_INFINITY; 3];
+        for index in 0..wireframe.vertex_count() {
+            if wireframe.vertex_part(index) != part {
+                continue;
+            }
+            let vertex = wireframe.vertex(index);
+            for (axis, value) in [vertex.x, vertex.y, vertex.z].into_iter().enumerate() {
+                low[axis] = low[axis].min(value);
+                high[axis] = high[axis].max(value);
+            }
+        }
+        if !low[0].is_finite() {
+            return None;
+        }
+        let spans = [high[0] - low[0], high[1] - low[1], high[2] - low[2]];
+        let (u, v) = [(0, 1), (0, 2), (1, 2)]
+            .into_iter()
+            .max_by(|a, b| (spans[a.0] * spans[a.1]).total_cmp(&(spans[b.0] * spans[b.1])))
+            .expect("axis pairs exist");
+        let center_u = (low[u] + high[u]) * 0.5;
+        let center_v = (low[v] + high[v]) * 0.5;
+        let scale = 1.0 / spans[u].max(spans[v]).max(1e-5);
+        let mut projected = vec![None; wireframe.vertex_count()];
+        for index in 0..wireframe.vertex_count() {
+            if wireframe.vertex_part(index) != part {
+                continue;
+            }
+            let vertex = wireframe.vertex(index);
+            let coordinates = [vertex.x, vertex.y, vertex.z];
+            projected[index] = Some([
+                (coordinates[u] - center_u) * scale,
+                (coordinates[v] - center_v) * scale,
+            ]);
+        }
+        let mut lines = Vec::new();
+        for (index, edge) in wireframe.edges().iter().enumerate() {
+            if wireframe.edge_part(index) != part {
+                continue;
+            }
+            let (Some(a), Some(b)) = (
+                projected[usize::from(edge[0])],
+                projected[usize::from(edge[1])],
+            ) else {
+                continue;
+            };
+            lines.push([a[0], a[1], b[0], b[1]]);
+        }
+        (!lines.is_empty()).then_some(lines)
+    }
+
+    /// Vertices that may represent the POI. Mesh POIs use every vertex below
+    /// the anchor node; marker POIs use the mesh vertex nearest the marker.
+    pub fn poi_vertices(&self, poi_id: &str) -> Vec<u16> {
+        let Some(weapon) = self.weapon() else {
+            return Vec::new();
+        };
+        let Some(poi) = weapon.poi.iter().find(|poi| poi.id == poi_id) else {
+            return Vec::new();
+        };
+        let Models::Ready(models) = &self.models else {
+            return Vec::new();
+        };
+        let model = models.current();
+        let Some(current) = self.scene.current.as_ref() else {
+            return Vec::new();
+        };
+        let Some(anchor) = model.anchor(&poi.anchor.name) else {
+            return Vec::new();
+        };
+        if anchor.part.is_some() {
+            let parts = model.node_parts(&poi.anchor.name);
+            return (0..current.wireframe.vertex_count())
+                .filter(|index| parts.contains(&current.wireframe.vertex_part(*index)))
+                .map(|index| u16::try_from(index).expect("a model has at most u16::MAX vertices"))
+                .collect();
+        }
+        let mut nearest = None;
+        let mut nearest_distance = f32::INFINITY;
+        for index in 0..current.wireframe.vertex_count() {
+            let offset = current.wireframe.vertex(index) - anchor.center;
+            let distance = offset.length();
+            if distance < nearest_distance {
+                nearest = Some(index);
+                nearest_distance = distance;
+            }
+        }
+        nearest
+            .map(|index| u16::try_from(index).expect("a model has at most u16::MAX vertices"))
+            .into_iter()
+            .collect()
     }
 
     /// Logical wireframe line count. Model edges stay counted while motion
@@ -2969,18 +3170,28 @@ impl Visualizer {
         );
         // A selector entry and a held POI entry both wait for the flip to
         // finish upright before they can start. Every mesh-focus effect is
-        // cleared while the model is not upright; pending entries stay armed.
-        let model_upright = self.flip_is_upright();
+        // cleared while the model is actually inverted; a flip spring that is
+        // only ringing around an upright target is not an inverted model.
+        let flip_pitch = self.flip_pitch();
+        let flip_settled = self.flip_is_upright();
+        let flip_target_upright = !self.property_gates.plays(Property::Flip)
+            || wrap_angle(self.flip_target()).abs() <= SELECTOR_UPRIGHT_ANGLE;
+        let actual_upright = self.scene.current.as_ref().is_none_or(|model| {
+            !model
+                .pose
+                .with_action(flip_pitch, model.pose.shake)
+                .is_upside_down()
+        });
         // A flip must not start while the selector is active; the snare gating
         // in the showcase is responsible for that.
         assert!(
-            model_upright || !self.showcase.selector_active(),
-            "the selector must not stay active while the flip is not settled upright"
+            (flip_target_upright && actual_upright) || !self.showcase.selector_active(),
+            "the selector must not stay active while the flip target is inverted or the model is upside-down"
         );
-        if model_upright {
+        if flip_settled {
             self.showcase.release_focus_entry();
             self.showcase.activate_pending_selector(&mut self.rng);
-        } else {
+        } else if !flip_target_upright || !actual_upright {
             self.showcase.hide_effects();
         }
         self.quake_x.advance(
@@ -3009,7 +3220,6 @@ impl Visualizer {
         let width =
             (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * 1.4 * self.line_width.factor();
         let quake_scale = (viewport.0.min(viewport.1) / 440.0).clamp(0.62, 2.6) * QUAKE_PIXELS;
-        let flip_pitch = self.flip_pitch();
         let shake = if self.showcase.mode() == showcase::ShowcaseMode::Normal
             && self.property_gates.plays(Property::Quake)
         {
@@ -3030,7 +3240,7 @@ impl Visualizer {
             return;
         }
         let mut showcase = self.showcase.frame();
-        if !model_upright {
+        if !actual_upright {
             showcase.hide_mesh_effects();
         }
         self.scene.update(
@@ -4651,10 +4861,10 @@ fn accent_index(accent: f32) -> usize {
     (accent.clamp(0.0, 1.0) * (Palette::VIVID_COUNT - 1) as f32).round() as usize
 }
 
-struct Rng(u64);
+pub(crate) struct Rng(u64);
 
 impl Rng {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self(seed)
     }
 
@@ -5974,6 +6184,35 @@ mod tests {
             visualizer.showcase.frame().selector.attenuation,
             1.0,
             "the selector must be hidden while the model is not upright"
+        );
+    }
+
+    #[test]
+    fn selector_stays_active_while_the_flip_spring_rings_near_upright() {
+        let mut visualizer = loaded_visualizer();
+        visualizer.set_parameter(Parameter::SelectorEntryKicks, 1.0);
+        visualizer.handle_action(Action::Kick(0.5), 0.0, 0.75);
+        assert!(visualizer.showcase.selector_active());
+
+        // Put the spring just outside the settling window while the rendered
+        // pose is still upright; this is ringing, not a flip.
+        visualizer.flip_half_turns = 2;
+        visualizer.flip.reset(TAU + SELECTOR_UPRIGHT_ANGLE + 0.01);
+        assert!(!visualizer.flip_is_upright());
+
+        let palette = Palette::from_theme(ThemeId::default());
+        visualizer.update(
+            AudioInterval::new(AudioTime::ZERO, AudioTime::ZERO.shifted(1.0 / 60.0)),
+            ShutterFrames::try_from(1.0).unwrap(),
+            1.0 / 60.0,
+            &palette,
+            (1280.0, 440.0),
+            1.0,
+            1.0,
+        );
+        assert!(
+            visualizer.showcase.selector_active(),
+            "a flip spring ringing around upright must not hide the selector"
         );
     }
 

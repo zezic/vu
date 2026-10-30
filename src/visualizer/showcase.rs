@@ -288,6 +288,11 @@ pub enum ShowcaseMode {
 /// One catalog POI that resolves to a node in the current model.
 #[derive(Clone, Debug)]
 pub struct FocusPoi {
+    /// Stable catalog id, such as `smg_p90_j01`.
+    pub id: String,
+    /// Authored label used by presentation infographics.
+    pub label: String,
+    /// Anchor node name used to resolve model geometry.
     pub name: String,
     pub anchor: Anchor,
     pub ejection_port: bool,
@@ -298,11 +303,19 @@ pub struct FocusPoi {
 impl FocusPoi {
     pub fn new(name: String, anchor: Anchor, ejection_port: bool) -> Self {
         Self {
+            id: name.clone(),
+            label: name.clone(),
             name,
             anchor,
             ejection_port,
             children: Vec::new(),
         }
+    }
+
+    pub fn with_identity(mut self, id: String, label: String) -> Self {
+        self.id = id;
+        self.label = label;
+        self
     }
 
     pub fn with_children(mut self, children: Vec<u16>) -> Self {
@@ -476,6 +489,29 @@ impl Showcase {
 
     pub fn target_name(&self) -> Option<&str> {
         self.target.as_ref().map(|poi| poi.name.as_str())
+    }
+
+    pub fn target_id(&self) -> Option<&str> {
+        self.target.as_ref().map(|poi| poi.id.as_str())
+    }
+
+    pub fn target_index(&self) -> Option<usize> {
+        self.current
+    }
+
+    pub fn pois(&self) -> &[FocusPoi] {
+        &self.pois
+    }
+
+    /// The resolved POI whose anchor or descendant owns this mesh part.
+    pub fn poi_index_for_part(&self, part: u16) -> Option<usize> {
+        self.pois
+            .iter()
+            .position(|poi| poi.anchor.part == Some(part) || poi.children.contains(&part))
+    }
+
+    pub fn focus_blend(&self) -> f32 {
+        self.blend.value()
     }
 
     pub fn poi_count(&self) -> usize {

@@ -102,6 +102,22 @@ pub enum Category {
     Sniper,
 }
 
+impl Category {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Equipment => "EQUIPMENT",
+            Self::Grenade => "GRENADE",
+            Self::MachineGun => "MACHINE GUN",
+            Self::Objective => "OBJECTIVE",
+            Self::Pistol => "PISTOL",
+            Self::Rifle => "RIFLE",
+            Self::Shotgun => "SHOTGUN",
+            Self::Smg => "SMG",
+            Self::Sniper => "SNIPER",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Specs {
@@ -168,7 +184,15 @@ pub struct Joke {
 pub enum Style {
     Mlg,
     Surreal,
-    TrollFact,
+}
+
+impl Style {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mlg => "MLG",
+            Self::Surreal => "SURREAL",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -176,7 +200,15 @@ pub enum Style {
 pub enum Intent {
     MontageOverreaction,
     AbsurdMemeLogic,
-    CounterfeitFact,
+}
+
+impl Intent {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MontageOverreaction => "MONTAGE OVERREACTION",
+            Self::AbsurdMemeLogic => "ABSURD MEME LOGIC",
+        }
+    }
 }
 
 /// Optional suggestions for camera, overlay, audio and timing.

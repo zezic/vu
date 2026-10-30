@@ -49,6 +49,7 @@ impl ActiveWindow {
 
 enum Setting {
     Theme,
+    PresentationOpacity,
     Preamp,
     FrameRate,
     Shutter,
@@ -92,6 +93,11 @@ impl App {
             Setting::Theme => {
                 settings.theme = settings.theme.adjusted(adjustment);
                 self.ui.set_theme(settings.theme);
+            }
+            Setting::PresentationOpacity => {
+                settings.presentation_opacity = settings.presentation_opacity.adjusted(adjustment);
+                self.ui
+                    .set_presentation_opacity(settings.presentation_opacity);
             }
             Setting::Preamp => {
                 let step = if self.modifiers.shift_key() {
@@ -220,6 +226,23 @@ impl App {
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if let PhysicalKey::Code(key) = event.physical_key {
+                    if self.ui.presentation() {
+                        match key {
+                            KeyCode::KeyF if !event.repeat => self.ui.set_presentation(false),
+                            KeyCode::KeyA => {
+                                self.adjust_setting(Setting::Theme, Adjustment::Decrease)
+                            }
+                            KeyCode::KeyS => {
+                                self.adjust_setting(Setting::Theme, Adjustment::Increase)
+                            }
+                            KeyCode::BracketLeft => self
+                                .adjust_setting(Setting::PresentationOpacity, Adjustment::Decrease),
+                            KeyCode::BracketRight => self
+                                .adjust_setting(Setting::PresentationOpacity, Adjustment::Increase),
+                            _ => {}
+                        }
+                        return Ok(());
+                    }
                     match key {
                         KeyCode::Escape => self.ui.clear_debug_selection(),
                         KeyCode::KeyC => {
@@ -303,8 +326,15 @@ impl App {
                             };
                             self.adjust_setting(Setting::MotionFadePower, adjustment)
                         }
+                        KeyCode::KeyF if !event.repeat => self.ui.set_presentation(true),
                         KeyCode::KeyA => self.adjust_setting(Setting::Theme, Adjustment::Decrease),
                         KeyCode::KeyS => self.adjust_setting(Setting::Theme, Adjustment::Increase),
+                        KeyCode::BracketLeft => {
+                            self.adjust_setting(Setting::PresentationOpacity, Adjustment::Decrease)
+                        }
+                        KeyCode::BracketRight => {
+                            self.adjust_setting(Setting::PresentationOpacity, Adjustment::Increase)
+                        }
                         KeyCode::KeyZ => self.adjust_setting(Setting::Preamp, Adjustment::Decrease),
                         KeyCode::KeyX => self.adjust_setting(Setting::Preamp, Adjustment::Increase),
                         KeyCode::KeyQ => {
@@ -339,27 +369,34 @@ impl App {
                 render.scene.reset();
                 let frame = self.ui.draw(&mut render.scene, view, limit, frame_time);
                 let after_draw = Instant::now();
-                let changed = !matches!(frame.background, render::Frame::Unchanged(_));
+                let changed =
+                    matches!(frame.background, render::Frame::Rebuilt(_)) || frame.foreground;
                 let viewport = render.viewport();
-                let overlay = |device: &vello::util::DeviceHandle,
-                               encoder: &mut vello::wgpu::CommandEncoder,
-                               background: &vello::wgpu::TextureView,
-                               target: &vello::wgpu::TextureView| {
-                    visualizer_renderer.draw(
-                        device,
-                        encoder,
-                        background,
-                        target,
-                        viewport,
-                        frame.overlay,
-                    );
-                };
+                let overlay =
+                    |device: &vello::util::DeviceHandle,
+                     encoder: &mut vello::wgpu::CommandEncoder,
+                     background: &vello::wgpu::TextureView,
+                     target: &vello::wgpu::TextureView,
+                     foreground: Option<&vello::wgpu::TextureView>| {
+                        visualizer_renderer.draw(
+                            device,
+                            encoder,
+                            background,
+                            target,
+                            viewport,
+                            frame.overlay,
+                            foreground,
+                            frame.overlay_composite,
+                            frame.overlay_opacity,
+                        );
+                    };
+                let foreground = frame.foreground;
                 let presentation = if let Some(profile) = &mut self.profile {
                     profile.present(before_draw, after_draw, changed, |completed| {
-                        render.present(frame.background, completed, overlay)
+                        render.present(frame.background, foreground, completed, overlay)
                     })?
                 } else {
-                    render.present(frame.background, |_| {}, overlay)?
+                    render.present(frame.background, foreground, |_| {}, overlay)?
                 };
                 if matches!(presentation, render::Presentation::Unavailable) {
                     self.frames.surface_unavailable(Instant::now());

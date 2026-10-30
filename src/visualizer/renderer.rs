@@ -8,6 +8,12 @@ struct Uniforms {
     viewport: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct OverlayUniforms {
+    opacity: [f32; 4],
+}
+
 struct BackgroundBinding {
     source: wgpu::TextureView,
     bindings: wgpu::BindGroup,
@@ -37,6 +43,11 @@ impl BackgroundBinding {
 /// Composites the retained UI face, swept motion ribbons, and crisp lines.
 pub struct Renderer {
     background_pipeline: wgpu::RenderPipeline,
+    overlay_layout: wgpu::BindGroupLayout,
+    overlay_normal_pipeline: wgpu::RenderPipeline,
+    overlay_additive_pipeline: wgpu::RenderPipeline,
+    overlay_multiply_pipeline: wgpu::RenderPipeline,
+    overlay_opacity: wgpu::Buffer,
     background_layout: wgpu::BindGroupLayout,
     background: Option<BackgroundBinding>,
     line_pipeline: wgpu::RenderPipeline,
@@ -72,38 +83,83 @@ impl Renderer {
                 count: None,
             }],
         });
-        let background_layouts = [Some(&background_layout)];
-        let background_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Visualizer background"),
-            layout: Some(
-                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("Visualizer background"),
-                    bind_group_layouts: &background_layouts,
-                    immediate_size: 0,
-                }),
-            ),
-            vertex: wgpu::VertexState {
-                module: &background_shader,
-                entry_point: Some("background_vertex"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &background_shader,
-                entry_point: Some("background_fragment"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
+        let background_pipeline = fullscreen_pipeline(
+            device,
+            format,
+            "Visualizer background",
+            &background_shader,
+            &background_layout,
+            "background_vertex",
+            "background_fragment",
+            None,
+        );
+        let overlay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Visualizer overlay"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("overlay.wgsl").into()),
         });
+        let overlay_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Visualizer overlay"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<OverlayUniforms>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let overlay_opacity = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Visualizer overlay opacity"),
+            size: std::mem::size_of::<OverlayUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let overlay_normal_pipeline = fullscreen_pipeline(
+            device,
+            format,
+            "Visualizer overlay alpha",
+            &overlay_shader,
+            &overlay_layout,
+            "overlay_vertex",
+            "overlay_color_fragment",
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        );
+        let overlay_additive_pipeline = fullscreen_pipeline(
+            device,
+            format,
+            "Visualizer overlay additive",
+            &overlay_shader,
+            &overlay_layout,
+            "overlay_vertex",
+            "overlay_color_fragment",
+            Some(additive_blend()),
+        );
+        let overlay_multiply_pipeline = fullscreen_pipeline(
+            device,
+            format,
+            "Visualizer overlay multiplicative",
+            &overlay_shader,
+            &overlay_layout,
+            "overlay_vertex",
+            "overlay_multiply_fragment",
+            Some(multiplicative_blend()),
+        );
 
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Visualizer uniforms"),
@@ -172,30 +228,6 @@ impl Renderer {
             wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
             wgpu::ColorWrites::ALL,
         );
-        let additive_blend = wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::One,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::One,
-                operation: wgpu::BlendOperation::Add,
-            },
-        };
-        let multiplicative_blend = wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::Dst,
-                dst_factor: wgpu::BlendFactor::Zero,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::Zero,
-                operation: wgpu::BlendOperation::Add,
-            },
-        };
         let model_additive_pipeline = instance_pipeline(
             device,
             format,
@@ -206,7 +238,7 @@ impl Renderer {
             &uniform_layout,
             std::mem::size_of::<LineInstance>() as u64,
             &line_attributes,
-            additive_blend,
+            additive_blend(),
             wgpu::ColorWrites::COLOR,
         );
         let model_multiplicative_pipeline = instance_pipeline(
@@ -219,7 +251,7 @@ impl Renderer {
             &uniform_layout,
             std::mem::size_of::<LineInstance>() as u64,
             &line_attributes,
-            multiplicative_blend,
+            multiplicative_blend(),
             wgpu::ColorWrites::COLOR,
         );
 
@@ -269,7 +301,7 @@ impl Renderer {
             &uniform_layout,
             std::mem::size_of::<RibbonInstance>() as u64,
             &ribbon_attributes,
-            additive_blend,
+            additive_blend(),
             wgpu::ColorWrites::COLOR,
         );
         let model_multiplicative_ribbon_pipeline = instance_pipeline(
@@ -282,7 +314,7 @@ impl Renderer {
             &uniform_layout,
             std::mem::size_of::<RibbonInstance>() as u64,
             &ribbon_attributes,
-            multiplicative_blend,
+            multiplicative_blend(),
             wgpu::ColorWrites::COLOR,
         );
 
@@ -292,6 +324,11 @@ impl Renderer {
         let ribbon_buffer = create_instance_buffer::<RibbonInstance>(device, ribbon_capacity);
         Self {
             background_pipeline,
+            overlay_layout,
+            overlay_normal_pipeline,
+            overlay_additive_pipeline,
+            overlay_multiply_pipeline,
+            overlay_opacity,
             background_layout,
             background: None,
             line_pipeline,
@@ -325,6 +362,7 @@ impl Renderer {
         self.ribbon_buffer = create_instance_buffer::<RibbonInstance>(device, self.ribbon_capacity);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         device: &DeviceHandle,
@@ -333,6 +371,9 @@ impl Renderer {
         target: &wgpu::TextureView,
         viewport: Size,
         frame: Frame<'_>,
+        overlay: Option<&wgpu::TextureView>,
+        overlay_composite: Option<ModelComposite>,
+        overlay_opacity: f32,
     ) {
         if self
             .background
@@ -384,6 +425,31 @@ impl Renderer {
                 );
             }
         }
+        if overlay.is_some() {
+            device.queue.write_buffer(
+                &self.overlay_opacity,
+                0,
+                bytemuck::bytes_of(&OverlayUniforms {
+                    opacity: [overlay_opacity.clamp(0.0, 2.0), 0.0, 0.0, 0.0],
+                }),
+            );
+        }
+        let overlay_binding = overlay.map(|view| {
+            device.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Visualizer foreground overlay"),
+                layout: &self.overlay_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.overlay_opacity.as_entire_binding(),
+                    },
+                ],
+            })
+        });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Visualizer overlay"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -434,6 +500,90 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.line_buffer.slice(model_bytes..));
             pass.draw(0..6, 0..line_count as u32);
         }
+        if let Some(binding) = &overlay_binding {
+            let pipeline = match overlay_composite {
+                None => &self.overlay_normal_pipeline,
+                Some(ModelComposite::Additive) => &self.overlay_additive_pipeline,
+                Some(ModelComposite::Multiplicative) => &self.overlay_multiply_pipeline,
+            };
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, binding, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+}
+
+fn fullscreen_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    label: &str,
+    shader: &wgpu::ShaderModule,
+    texture_layout: &wgpu::BindGroupLayout,
+    vertex_entry: &str,
+    fragment_entry: &str,
+    blend: Option<wgpu::BlendState>,
+) -> wgpu::RenderPipeline {
+    let layouts = [Some(texture_layout)];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: &layouts,
+                immediate_size: 0,
+            }),
+        ),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(vertex_entry),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(fragment_entry),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn additive_blend() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+    }
+}
+
+fn multiplicative_blend() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Dst,
+            dst_factor: wgpu::BlendFactor::Zero,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::Zero,
+            operation: wgpu::BlendOperation::Add,
+        },
     }
 }
 
@@ -666,6 +816,9 @@ mod tests {
             &target_view,
             Size::new(f64::from(width), f64::from(height)),
             frame,
+            None,
+            None,
+            1.0,
         );
         let row_bytes = width * 4;
         let readback = device.device.create_buffer(&wgpu::BufferDescriptor {

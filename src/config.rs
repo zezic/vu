@@ -164,6 +164,60 @@ impl VisualizerTextScale {
     }
 }
 
+const PRESENTATION_OPACITY_MIN: f32 = 0.0;
+const PRESENTATION_OPACITY_MAX: f32 = 2.0;
+const PRESENTATION_OPACITY_STEP: f32 = 0.05;
+
+/// Multiplier applied to the presentation text and infographic layer before
+/// additive or multiplicative composition.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct PresentationOpacity(f32);
+
+impl Default for PresentationOpacity {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl TryFrom<f32> for PresentationOpacity {
+    type Error = anyhow::Error;
+
+    fn try_from(opacity: f32) -> Result<Self, Self::Error> {
+        ensure!(
+            opacity.is_finite()
+                && (PRESENTATION_OPACITY_MIN..=PRESENTATION_OPACITY_MAX).contains(&opacity),
+            "presentation_opacity must be finite and between {PRESENTATION_OPACITY_MIN} and {PRESENTATION_OPACITY_MAX}"
+        );
+        Ok(Self(opacity))
+    }
+}
+
+impl From<PresentationOpacity> for f32 {
+    fn from(value: PresentationOpacity) -> Self {
+        value.0
+    }
+}
+
+impl PresentationOpacity {
+    pub fn factor(self) -> f32 {
+        self.0
+    }
+
+    pub fn percent(self) -> u32 {
+        (self.0 * 100.0).round() as u32
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        let delta = match adjustment {
+            Adjustment::Decrease => -PRESENTATION_OPACITY_STEP,
+            Adjustment::Increase => PRESENTATION_OPACITY_STEP,
+        };
+        Self((self.0 + delta).clamp(PRESENTATION_OPACITY_MIN, PRESENTATION_OPACITY_MAX))
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -172,6 +226,7 @@ pub struct Config {
     pub frame_rate_limit: FrameRateLimit,
     pub shutter_frames: ShutterFrames,
     pub visualizer_text_scale: VisualizerTextScale,
+    pub presentation_opacity: PresentationOpacity,
     pub detectors: crate::visualizer::DetectorSettings,
     pub depth_fade: crate::visualizer::DepthFade,
     pub near_opacity: crate::visualizer::NearOpacity,
@@ -210,6 +265,26 @@ pub fn config_file() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_opacity_steps_between_sane_bounds() {
+        let normal = PresentationOpacity::default();
+        assert_eq!(normal.percent(), 100);
+        assert_eq!(normal.adjusted(Adjustment::Increase).percent(), 105);
+        assert_eq!(normal.adjusted(Adjustment::Decrease).percent(), 95);
+        let mut value = normal;
+        for _ in 0..100 {
+            value = value.adjusted(Adjustment::Increase);
+        }
+        assert_eq!(value.percent(), 200);
+        for _ in 0..100 {
+            value = value.adjusted(Adjustment::Decrease);
+        }
+        assert_eq!(value.percent(), 0);
+        assert!(PresentationOpacity::try_from(2.01).is_err());
+        assert!(PresentationOpacity::try_from(-0.01).is_err());
+        assert!(PresentationOpacity::try_from(f32::NAN).is_err());
+    }
 
     #[test]
     fn visualizer_text_scale_steps_between_sane_bounds() {

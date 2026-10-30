@@ -56,7 +56,6 @@ impl BackgroundCache {
         renderer: &mut Renderer,
         device: &DeviceHandle,
         background: Frame<'_>,
-        foreground: &Scene,
         params: &RenderParams,
     ) -> anyhow::Result<&Scene> {
         let rebuild = matches!(background, Frame::Rebuilt(_))
@@ -99,7 +98,6 @@ impl BackgroundCache {
                 .expect("the background has been rasterized"),
             Affine::IDENTITY,
         );
-        self.composite.append(foreground, None);
         Ok(&self.composite)
     }
 
@@ -110,6 +108,45 @@ impl BackgroundCache {
     }
 }
 
+/// The animated foreground, rasterized with a transparent base so the GPU pass
+/// can layer it over the model wireframe.
+pub struct ForegroundCache {
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
+
+impl ForegroundCache {
+    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Animated foreground"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            view,
+            width,
+            height,
+        }
+    }
+
+    fn matches(&self, width: u32, height: u32) -> bool {
+        self.width == width && self.height == height
+    }
+}
+
 pub struct RenderWindow {
     surface: RenderSurface<'static>,
     renderer: Renderer,
@@ -117,6 +154,7 @@ pub struct RenderWindow {
     pub window: Arc<Window>,
     pub scene: Scene,
     background: BackgroundCache,
+    foreground: Option<ForegroundCache>,
     target: TargetState,
 }
 
@@ -178,6 +216,7 @@ impl RenderWindow {
             window,
             scene: Scene::new(),
             background: BackgroundCache::new(),
+            foreground: None,
             target: TargetState::Dirty,
         })
     }
@@ -194,16 +233,18 @@ impl RenderWindow {
     pub fn present(
         &mut self,
         background: Frame<'_>,
+        foreground: bool,
         mut completed: impl FnMut(Stage),
         paint: impl FnOnce(
             &DeviceHandle,
             &mut wgpu::CommandEncoder,
             &wgpu::TextureView,
             &wgpu::TextureView,
+            Option<&wgpu::TextureView>,
         ),
     ) -> anyhow::Result<Presentation> {
         use wgpu::CurrentSurfaceTexture;
-        if !matches!(background, Frame::Unchanged(_)) {
+        if matches!(background, Frame::Rebuilt(_)) {
             self.target = TargetState::Dirty;
         }
         if matches!(background, Frame::Rebuilt(_)) {
@@ -238,13 +279,9 @@ impl RenderWindow {
             antialiasing_method: ANTIALIASING,
         };
         if matches!(self.target, TargetState::Dirty) {
-            let scene = self.background.compose(
-                &mut self.renderer,
-                device,
-                background,
-                &self.scene,
-                &params,
-            )?;
+            let scene = self
+                .background
+                .compose(&mut self.renderer, device, background, &params)?;
             self.renderer.render_to_texture(
                 &device.device,
                 &device.queue,
@@ -254,6 +291,39 @@ impl RenderWindow {
             )?;
             self.target = TargetState::Ready;
         }
+        let overlay = if foreground {
+            if !self
+                .foreground
+                .as_ref()
+                .is_some_and(|cache| cache.matches(params.width, params.height))
+            {
+                self.foreground = Some(ForegroundCache::new(
+                    &device.device,
+                    params.width,
+                    params.height,
+                ));
+            }
+            let overlay = self
+                .foreground
+                .as_mut()
+                .expect("the foreground cache has been created");
+            let overlay_params = RenderParams {
+                base_color: Color::TRANSPARENT,
+                width: params.width,
+                height: params.height,
+                antialiasing_method: ANTIALIASING,
+            };
+            self.renderer.render_to_texture(
+                &device.device,
+                &device.queue,
+                &self.scene,
+                &overlay.view,
+                &overlay_params,
+            )?;
+            Some(&overlay.view)
+        } else {
+            None
+        };
         completed(Stage::Rasterize);
         let view = texture
             .texture
@@ -261,7 +331,13 @@ impl RenderWindow {
         let mut encoder = device
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        paint(device, &mut encoder, &self.surface.target_view, &view);
+        paint(
+            device,
+            &mut encoder,
+            &self.surface.target_view,
+            &view,
+            overlay,
+        );
         device.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         device.queue.present(texture);

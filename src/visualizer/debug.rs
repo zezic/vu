@@ -1753,7 +1753,7 @@ fn draw_computation_tree(
         fonts,
         "+ add   × mul   ≥ switch   click badge to flip, row to tune",
         (7.0 * scale) as f32,
-        UiFace::LightItalic,
+        UiFace::Light,
         rect.width() - 16.0 * scale,
     );
     draw_left_center(
@@ -1847,7 +1847,7 @@ fn draw_computation_tree(
                 fonts,
                 &op_text,
                 (7.0 * scale) as f32,
-                UiFace::LightItalic,
+                UiFace::Light,
                 op_width,
             );
             draw_right_center(
@@ -2114,7 +2114,7 @@ fn draw_flux_analyzer(
         fonts,
         "bars select band / sliders tune / graphs show internals",
         (7.0 * scale) as f32,
-        UiFace::LightItalic,
+        UiFace::Light,
         rect.width() - 16.0 * scale,
     );
     draw_left_center(
@@ -2308,7 +2308,7 @@ fn draw_hat_analyzer(
         fonts,
         "short high-band transient / drives the selector",
         (7.0 * scale) as f32,
-        UiFace::LightItalic,
+        UiFace::Light,
         rect.width() - 16.0 * scale,
     );
     draw_left_center(
@@ -2420,7 +2420,7 @@ fn draw_scene_analyzer(
         fonts,
         &subtitle,
         (7.0 * scale) as f32,
-        UiFace::LightItalic,
+        UiFace::Light,
         rect.width() - 16.0 * scale,
     );
     draw_left_center(
@@ -2720,7 +2720,7 @@ fn draw_slider_content(
             fonts,
             "no adjustable parameters",
             (7.0 * scale) as f32,
-            UiFace::LightItalic,
+            UiFace::Light,
             panel.width(),
         );
         draw_left_center(
@@ -3664,7 +3664,7 @@ fn draw_shape_preview(
         fonts,
         shape.curve.name(),
         (7.0 * scale) as f32,
-        UiFace::LightItalic,
+        UiFace::Light,
         rect.width() * 0.4,
     );
     draw_right_center(
@@ -4668,7 +4668,7 @@ fn draw_graph(
             fonts,
             &usage,
             (6.5 * scale) as f32,
-            UiFace::LightItalic,
+            UiFace::Light,
             usage_width.max(1.0),
         );
         draw_right_center(
@@ -4684,7 +4684,7 @@ fn draw_graph(
             fonts,
             &usage,
             (7.0 * scale) as f32,
-            UiFace::LightItalic,
+            UiFace::Light,
             rect.width() - 4.0 * scale,
         );
         draw_left_center(

@@ -2921,6 +2921,7 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
+ "skrifa 0.44.0",
  "strum",
  "tempfile",
  "vello",

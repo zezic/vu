@@ -17,6 +17,14 @@ On macOS, allow system audio recording when prompted.
 
 ## Hotkeys
 
+- `F` - toggle presentation mode. While it is active only `F`, the theme
+  hotkeys `A` / `S`, and the presentation-opacity hotkeys `[` / `]` are
+  accepted; the HUD, inspector, timeline, and vertex diagnosis are hidden.
+  Presentation does not force fullscreen and does not hide the cursor.
+- `[` / `]` - decrease or increase the presentation text opacity multiplier in
+  5% steps, from 0% to 200%. The factory value is 100% and the setting persists
+  in the config file. These keys work in both modes but only affect the
+  presentation layer.
 - `B` - cycles the analyzer's refresh rate: FFT hop, 20, 10, 5, 2, and 1 Hz.
 - `D` - toggles the analyzer debug panel.
 - `Esc` - closes the analysis inspector without leaving the debug panel.
@@ -144,6 +152,70 @@ full-opacity child of a mesh POI instead. Snares do not flip the model while
 the selector is entering or active; the snare that reaches the exit threshold
 also does not add a flip. The `HAT` detector has its own pattern editor and is
 independent of the snare and drop detectors.
+
+### Presentation mode
+
+Press `F` to enter or leave presentation mode. It replaces the debug chrome
+with viewport-relative typography and infographics, keeps the selected theme,
+and leaves the model wireframe in place. The layout is designed against a
+1920x1080 (16:9) reference and adapts to the actual window: the font scale and
+all geometry are derived from the viewport, side columns widen on ultrawide
+windows, and the same composition remains readable at 16:9 and taller ratios.
+Presentation never forces fullscreen and never hides the cursor.
+
+The animated presentation layer is rasterized to a transparent texture and
+composited over the model lines, so a backdrop with text cut out of it really is
+a hole instead of a rectangle covered by wireframe. The normal HUD background is
+still cached; only the animated layer is rebuilt each frame. Like the model
+wireframe, presentation text uses additive composition on dark themes and
+multiplicative composition on light themes. The `[` / `]` hotkeys scale the
+whole text layer from 0% to 200% because a theme's background and vivid palette
+can need a different amount of ink.
+
+Normal mode always shows the model's catalog `display_name` large, then a
+rotating subset of three to five real-world fields. Each model appearance picks
+a composition template (left dossier, right dossier, split columns, or a
+rotated rail), field styles, and optional side decorations. Long notes, facts,
+actions, and fire modes wrap. Some rows carry a horizontal strip of
+line-height rectangles or a small square matrix on the aligned side. One
+numeric field can use a tick-marked comparison rail. Numeric fields can use the
+number spinner on entrance. If the model has a magazine with at least three
+modelled children, the first child wireframe is repeated once per
+`capacity_rounds` as an ammo tally; capacity values can also use the odometer.
+One `interesting_facts` sentence is typed into an edge block with a blinking
+caret. Numeric fields are never treated as zero when null; an explicitly shown
+missing price reads `NO DATA` and uses a hollow rail.
+
+Text can use a normal fill, a stroke-only treatment for huge sizes, or a
+rectangular backdrop with zero to four random 45-degree corner cuts and random
+per-side padding, where the glyphs are cut out of the backdrop. Characters
+enter and leave with independently chosen per-glyph fade, neon flicker, or
+glitch substitutions. Long jokes and facts wrap without reflowing during their
+animation.
+
+While the Selector FX is active in normal mode, a loading panel appears on a
+random side. On the left or right it uses two columns; on the bottom it uses two
+rows. Each row is a resolved catalog POI, or a mesh-name row when the selected
+mesh has no catalog POI. Rows start as `[ WAIT ]`; the focused row's backdrop
+fills asymptotically, and the next selection fast-forwards the previous row to
+`[  OK  ]` in the accent color. When the selector ends, every row that never
+reached `OK` becomes `[ FAIL ]`, and the whole panel and its event log fade out
+sequentially. The log records the POI id and the first sentence of its fact (or
+the mesh name), auto-scrolls, and is dropped once the selector overlay closes.
+Only normal-mode blocks that collide with the loading panel or log are hidden.
+
+POI focus mode attaches an infographic to one randomly chosen vertex of the
+focused POI; the vertex is chosen once per beat. The infographic randomly splits
+into one, two, or three cards around the POI. It shows the POI label and either
+the authored joke or the POI fact. Joke cards can also show the joke id, its
+style array and intent, and style keywords, each chosen independently. Cards
+have leader lines, corner brackets, corner crosses, ticks, and a joke-id
+barcode, drift slowly on top of spring-driven targets, and use one three-color
+trio for the whole POI beat. Returning to normal mode leaves the cards with
+their chosen exit effects. The normal name and a few corner fields stay visible
+at reduced opacity, and only blocks that collide with the POI airspace or cards
+are hidden. A hit marker (four diagonal lines with a center gap) appears over
+the infographic when the hi-hat detector triggers during an MLG-style joke.
 
 Edge opacity follows vertex depth: nearest vertices use the adjustable
 near-opacity floor (60% by default, brightened by line energy), farther vertices
@@ -461,8 +533,11 @@ coordinates, velocity, and acceleration.
 
 ## Typography
 
-The HUD, analyzer debug panel, and vertex diagnosis use Iosevka Tight Soft, with
-Light, Light Italic, SemiBold, and SemiBold Italic faces assigned by role. The
+The HUD, analyzer debug panel, vertex diagnosis, and presentation use Iosevka
+Tight Soft, with upright Light and SemiBold faces assigned by role. Presentation
+type is sized in 1080p-relative units and scaled
+by the viewport, so layout geometry and line breaking stay stable across window
+sizes. Presentation paragraphs use the same font engine with word wrapping. The
 bundled Iosevka files are stripped glyph subsets, so `Fonts::new` supplies their
 family, width, weight, and style metadata during registration. HUD chrome uses
 fixed logical pixel sizes: it scales with the display's DPI factor and the `-` /
@@ -502,10 +577,27 @@ Run the headless wireframe preview with
 `VU_RENDER_PREVIEW_PATH` to save the PNG). The test uses synthetic levels and
 does not initialize audio capture.
 
+The presentation previews are also headless and ignored by default:
+
+- `renders_presentation_at_sixteen_by_nine` with
+  `VU_PRESENTATION_PREVIEW_PATH`
+- `renders_presentation_entrance` with `VU_ENTRANCE_PREVIEW_PATH`
+- `renders_presentation_light_theme` with `VU_LIGHT_PREVIEW_PATH`
+- `renders_presentation_low_opacity` with `VU_OPACITY_PREVIEW_PATH`
+- `renders_presentation_aspects` with `VU_ASPECT_PREVIEW_DIR`
+- `renders_selector_presentation` with `VU_SELECTOR_PREVIEW_PATH`
+- `renders_selector_exit_presentation` with `VU_SELECTOR_EXIT_PREVIEW_PATH`
+- `renders_poi_presentation` with `VU_POI_PREVIEW_PATH`
+
+They render synthetic frames through the same retained-face and foreground
+overlay path as the application. They require a compute-capable GPU.
+
 The retained HUD face is rasterized by Vello and reused on the GPU until the
-viewport, a displayed setting, or an animated HUD value changes. A single GPU
-render pass combines that cached image with the model lines and swept motion
-ribbons.
+viewport, a displayed setting, or an animated HUD value changes. The animated
+foreground scene (diagnosis, timeline, and presentation) is rasterized to a
+transparent texture and composited above the model lines and swept motion
+ribbons. A single GPU render pass combines the cached face, the model, the
+ribbons, and that foreground overlay.
 
 ## Profiling
 

@@ -9,7 +9,7 @@ use vello::{
 
 use crate::{
     audio::AudioCursor,
-    config::{Config, PreampDb, ShutterFrames, VisualizerTextScale},
+    config::{Config, PreampDb, PresentationOpacity, ShutterFrames, VisualizerTextScale},
     frame_schedule::{FrameRateLimit, FrameTime},
     render::Frame,
     text::{Fonts, Text, UiFace},
@@ -18,10 +18,11 @@ use crate::{
 };
 
 use super::{
-    debug, Contribution, CreaseThreshold, DebugSelection, DebugSnapshot, DepthFade, Detector,
-    DetectorSettings, DropKernel, Frame as VisualizerFrame, LineWidth, ModelComposite, ModelMotion,
-    MotionFadePower, MotionOpacity, NearOpacity, Palette, Parameter, PatternKernel, PatternLayer,
-    Property, TreeTarget, Visualizer, VisualizerTuning, BAND_COUNT,
+    debug, presentation::Presentation, Contribution, CreaseThreshold, DebugSelection,
+    DebugSnapshot, DepthFade, Detector, DetectorSettings, DropKernel, Frame as VisualizerFrame,
+    LineWidth, ModelComposite, ModelMotion, MotionFadePower, MotionOpacity, NearOpacity, Palette,
+    Parameter, PatternKernel, PatternLayer, Property, TreeTarget, Visualizer, VisualizerTuning,
+    BAND_COUNT,
 };
 
 pub(super) const HUD_MARGIN: f64 = 24.0;
@@ -90,7 +91,7 @@ impl Readout {
         Self {
             caption: Some(fonts.layout_ui(caption, 8.0, UiFace::Light)),
             hints: hints
-                .map(|hint| fonts.layout_ui(hint, 10.0, UiFace::LightItalic))
+                .map(|hint| fonts.layout_ui(hint, 10.0, UiFace::Light))
                 .into(),
         }
     }
@@ -107,7 +108,7 @@ impl Readout {
         Self {
             caption: None,
             hints: hints
-                .map(|hint| fonts.layout_ui(hint, 10.0, UiFace::LightItalic))
+                .map(|hint| fonts.layout_ui(hint, 10.0, UiFace::Light))
                 .into(),
         }
     }
@@ -249,6 +250,7 @@ struct FaceSettings {
     colors: ThemeColors,
     palette: Palette,
     debug: bool,
+    presentation: bool,
     text_scale: VisualizerTextScale,
 }
 
@@ -288,6 +290,7 @@ pub struct Ui {
     debug_clock: f32,
     debug_analysis_revision: u64,
     text_scale: VisualizerTextScale,
+    presentation_opacity: PresentationOpacity,
     text_scale_readout: Readout,
     text_scale_value: Text,
     detectors: DetectorSettings,
@@ -325,6 +328,7 @@ pub struct Ui {
     frame_values: HashMap<FrameRateLimit, Text>,
     face: Scene,
     face_settings: Option<FaceSettings>,
+    presentation: Presentation,
 }
 
 impl Ui {
@@ -395,6 +399,7 @@ impl Ui {
         let timeline_value = Readout::value(&mut fonts, "Timeline Off");
         let timeline_labels = debug::TimelineLabels::new(&mut fonts);
         let text_scale = config.visualizer_text_scale;
+        let presentation_opacity = config.presentation_opacity;
         let text_scale_readout = Readout::inline(&mut fonts, ["[-]", "[+]"]);
         let text_scale_value =
             Readout::value(&mut fonts, &format!("Text {:>3}%", text_scale.percent()));
@@ -438,7 +443,7 @@ impl Ui {
         let motion_fade_power = config.motion_fade_power;
         visualizer.set_motion_fade_power(motion_fade_power);
         let scene_name = visualizer.scene_name().to_owned();
-        let scene_value = fonts.layout_ui(&scene_name, 12.0, UiFace::SemiBoldItalic);
+        let scene_value = fonts.layout_ui(&scene_name, 12.0, UiFace::SemiBold);
         let line_count = visualizer.line_count();
         let line_count_value = fonts.layout(&format!("LINES {line_count}"), 12.0);
         let model_position = visualizer.model_position();
@@ -500,6 +505,7 @@ impl Ui {
             debug_clock: 0.0,
             debug_analysis_revision: 0,
             text_scale,
+            presentation_opacity,
             text_scale_readout,
             text_scale_value,
             detectors,
@@ -537,6 +543,7 @@ impl Ui {
             frame_values,
             face: Scene::new(),
             face_settings: None,
+            presentation: Presentation::new(),
         })
     }
 
@@ -558,6 +565,21 @@ impl Ui {
 
     pub fn debug(&self) -> bool {
         self.debug
+    }
+
+    pub fn presentation(&self) -> bool {
+        self.presentation.active()
+    }
+
+    pub fn set_presentation(&mut self, presentation: bool) {
+        if self.presentation.active() == presentation {
+            return;
+        }
+        self.presentation.set_active(presentation);
+        if presentation {
+            self.clear_drag();
+        }
+        self.face_settings = None;
     }
 
     pub fn timeline(&self) -> bool {
@@ -601,6 +623,9 @@ impl Ui {
             return;
         }
         self.debug_pointer = pointer;
+        if self.presentation.active() {
+            return;
+        }
         self.update_sliders(pointer);
         self.update_kernels(pointer);
         self.update_pattern(pointer);
@@ -613,7 +638,7 @@ impl Ui {
     /// Selects or clears an analysis item under the pointer. Returns true when
     /// the panel consumed the click.
     pub fn click_debug(&mut self, view: &View, position: Point) -> bool {
-        if !self.debug || self.debug_snapshot.is_none() {
+        if self.presentation.active() || !self.debug || self.debug_snapshot.is_none() {
             return false;
         }
         let property = match self.debug_selection {
@@ -1161,6 +1186,10 @@ impl Ui {
         self.face_settings = None;
     }
 
+    pub fn set_presentation_opacity(&mut self, opacity: PresentationOpacity) {
+        self.presentation_opacity = opacity;
+    }
+
     pub fn set_text_scale(&mut self, scale: VisualizerTextScale) {
         if self.text_scale == scale {
             return;
@@ -1265,7 +1294,7 @@ impl Ui {
         let name = self.visualizer.scene_name();
         if name != self.scene_name {
             self.scene_name = name.to_owned();
-            self.scene_value = self.fonts.layout_ui(name, 12.0, UiFace::SemiBoldItalic);
+            self.scene_value = self.fonts.layout_ui(name, 12.0, UiFace::SemiBold);
             self.face_settings = None;
         }
         let line_count = self.visualizer.line_count();
@@ -1304,8 +1333,7 @@ impl Ui {
         match diagnosis {
             Some((revision, text, color)) if revision != self.diagnosis_revision => {
                 self.diagnosis_revision = revision;
-                self.diagnosis_text =
-                    Some(self.fonts.layout_ui(&text, 11.0, UiFace::SemiBoldItalic));
+                self.diagnosis_text = Some(self.fonts.layout_ui(&text, 11.0, UiFace::SemiBold));
                 self.diagnosis_color = color;
             }
             None if self.diagnosis_text.is_some() => {
@@ -1389,6 +1417,9 @@ impl Ui {
             None,
             &Rect::from_origin_size(Point::ORIGIN, viewport),
         );
+        if self.presentation.active() {
+            return;
+        }
         // HUD chrome uses fixed logical sizes, scaled by DPI and the user's
         // text-size setting but never by window size.
         let ui = ui_scale * f64::from(self.text_scale.factor());
@@ -1529,9 +1560,11 @@ impl Ui {
     ) -> UiFrame<'_> {
         let dt = frame_time.seconds();
         self.theme.advance(dt);
+        let presentation_active = self.presentation.active();
         let tree_open =
             self.debug && matches!(self.debug_selection, Some(DebugSelection::Property(_)));
-        self.visualizer.set_diagnosis_suppressed(tree_open);
+        self.visualizer
+            .set_diagnosis_suppressed(tree_open || presentation_active);
         let frame_interval = self.audio.frame(frame_time.start(), frame_time.end());
         let palette = Palette::from_theme(self.theme.selected());
         self.visualizer.update(
@@ -1543,6 +1576,14 @@ impl Ui {
             view.zoom_factor() as f32,
             view.ui_scale() as f32 * self.text_scale.factor(),
         );
+        self.presentation.update(
+            dt,
+            (view.viewport.width as f32, view.viewport.height as f32),
+            &self.visualizer,
+            &mut self.fonts,
+            &self.visualizer.palette(),
+            self.theme.colors,
+        );
         self.update_hud(dt);
         let settings = FaceSettings {
             viewport: view.viewport,
@@ -1551,6 +1592,7 @@ impl Ui {
             colors: self.theme.colors,
             palette: self.visualizer.palette(),
             debug: self.debug,
+            presentation: presentation_active,
             text_scale: self.text_scale,
         };
         let rebuild = self.face_settings != Some(settings);
@@ -1558,7 +1600,7 @@ impl Ui {
             self.draw_face(view, limit);
             self.face_settings = Some(settings);
         }
-        if self.timeline {
+        if self.timeline && !presentation_active {
             debug::draw_timeline(
                 scene,
                 view,
@@ -1571,7 +1613,7 @@ impl Ui {
                 &self.timeline_labels,
             );
         }
-        if !tree_open {
+        if !tree_open && !presentation_active {
             if let Some(text) = &self.diagnosis_text {
                 Self::draw_diagnosis(
                     scene,
@@ -1583,9 +1625,24 @@ impl Ui {
                 );
             }
         }
-        let diagnosis_visible = !tree_open && self.diagnosis_text.is_some();
-        let foreground_changed =
-            diagnosis_visible || self.diagnosis_visible_last_frame || self.timeline;
+        if presentation_active {
+            if let Some(stage) = self.presentation.stage() {
+                self.presentation
+                    .draw(scene, &stage, self.presentation.colors());
+            }
+        }
+        let overlay_composite =
+            presentation_active.then_some(Self::model_composite(self.theme.selected()));
+        let overlay_opacity = if presentation_active {
+            self.presentation_opacity.factor()
+        } else {
+            1.0
+        };
+        let diagnosis_visible = !tree_open && !presentation_active && self.diagnosis_text.is_some();
+        let foreground_changed = diagnosis_visible
+            || self.diagnosis_visible_last_frame
+            || (self.timeline && !presentation_active)
+            || presentation_active;
         self.diagnosis_visible_last_frame = diagnosis_visible;
         let background = if rebuild {
             Frame::Rebuilt(&self.face)
@@ -1597,6 +1654,11 @@ impl Ui {
         UiFrame {
             background,
             overlay: self.visualizer.frame(),
+            foreground: diagnosis_visible
+                || (self.timeline && !presentation_active)
+                || presentation_active,
+            overlay_composite,
+            overlay_opacity,
         }
     }
 }
@@ -1605,6 +1667,12 @@ impl Ui {
 pub struct UiFrame<'a> {
     pub background: Frame<'a>,
     pub overlay: VisualizerFrame<'a>,
+    /// Whether the foreground scene carries anything to rasterize.
+    pub foreground: bool,
+    /// Composition mode for presentation text; `None` keeps normal blending.
+    pub overlay_composite: Option<ModelComposite>,
+    /// Multiplier applied to the presentation text layer.
+    pub overlay_opacity: f32,
 }
 
 #[cfg(test)]
@@ -1614,6 +1682,175 @@ mod tests {
         Contribution, EnvelopeTarget, Input, MixPoint, StyleInput, TreeTarget,
     };
     use std::time::Duration;
+
+    fn write_preview(
+        path: &std::path::Path,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> anyhow::Result<()> {
+        use std::{fs::File, io::BufWriter};
+        let mut encoder = png::Encoder::new(BufWriter::new(File::create(path)?), width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header()?.write_image_data(pixels)?;
+        Ok(())
+    }
+
+    fn presentation_pixels(
+        ui: &mut Ui,
+        view: &View,
+        width: u32,
+        height: u32,
+        frames: usize,
+        feed_audio: bool,
+        mut before_frame: impl FnMut(usize, &mut Ui),
+    ) -> anyhow::Result<Vec<u8>> {
+        use vello::{kurbo::Size, util::RenderContext, wgpu, RenderParams};
+
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut context = RenderContext::new();
+        let id = pollster::block_on(crate::render::prepare_device(
+            &mut context,
+            None,
+            wgpu::DeviceDescriptor::default(),
+        ))?;
+        let device = &context.devices[id];
+        let make_texture = |label: &str, usage: wgpu::TextureUsages| {
+            device.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let background = make_texture(
+            "Presentation background",
+            wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let foreground = make_texture(
+            "Presentation foreground",
+            wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let target = make_texture(
+            "Presentation target",
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let background_view = background.create_view(&wgpu::TextureViewDescriptor::default());
+        let foreground_view = foreground.create_view(&wgpu::TextureViewDescriptor::default());
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let mut last = None;
+        for frame in 0..frames {
+            let mut input = Vec::with_capacity(800);
+            let start = frame * 800;
+            for index in 0..800 {
+                let sample = start + index;
+                let time = sample as f32 / 48_000.0;
+                let kick = if (0..10).contains(&(sample % 9_600)) {
+                    0.8
+                } else {
+                    0.0
+                };
+                let tone = 0.2 * (std::f32::consts::TAU * 220.0 * time).sin()
+                    + 0.1 * (std::f32::consts::TAU * 900.0 * time).sin();
+                input.push([tone + kick * (std::f32::consts::TAU * 64.0 * time).sin(); 2]);
+            }
+            before_frame(frame, ui);
+            if feed_audio {
+                ui.consume_buf(&input, now + Duration::from_millis((frame as u64) * 16));
+            }
+            scene.reset();
+            let frame_time = FrameTime::new(
+                now + Duration::from_millis((frame as u64) * 16),
+                now + Duration::from_millis(((frame + 1) as u64) * 16),
+            );
+            last = Some(ui.draw(&mut scene, view, FrameRateLimit::Fps120, frame_time));
+        }
+        let frame = last.expect("the presentation produced a frame");
+        let background_scene = match frame.background {
+            Frame::Rebuilt(scene) | Frame::Retained(scene) | Frame::Unchanged(scene) => scene,
+        };
+        let params = RenderParams {
+            base_color: vello::peniko::Color::TRANSPARENT,
+            width,
+            height,
+            antialiasing_method: crate::render::ANTIALIASING,
+        };
+        let mut renderer = crate::render::renderer(&device.device)?;
+        renderer.render_to_texture(
+            &device.device,
+            &device.queue,
+            background_scene,
+            &background_view,
+            &params,
+        )?;
+        renderer.render_to_texture(
+            &device.device,
+            &device.queue,
+            &scene,
+            &foreground_view,
+            &params,
+        )?;
+        let mut visualizer_renderer = crate::visualizer::Renderer::new(&device.device, format);
+        let mut encoder = device
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        visualizer_renderer.draw(
+            device,
+            &mut encoder,
+            &background_view,
+            &target_view,
+            Size::new(f64::from(width), f64::from(height)),
+            frame.overlay,
+            Some(&foreground_view),
+            frame.overlay_composite,
+            frame.overlay_opacity,
+        );
+        let row_bytes = width * 4;
+        let readback = device.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Presentation readback"),
+            size: u64::from(row_bytes * height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(height),
+                },
+            },
+            target.size(),
+        );
+        device.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+        device.device.poll(wgpu::PollType::wait_indefinitely())?;
+        rx.recv()??;
+        let pixels = readback.slice(..).get_mapped_range()?.to_vec();
+        readback.unmap();
+        Ok(pixels)
+    }
 
     fn drawn_ui() -> (Ui, View) {
         let mut ui = Ui::new(&Config::default()).expect("the bundled fonts and models load");
@@ -1671,6 +1908,340 @@ mod tests {
             let frame = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
             assert!(matches!(frame.background, Frame::Unchanged(_)));
         }
+    }
+
+    #[test]
+    fn presentation_draws_an_animated_foreground_without_the_hud() {
+        let mut ui = Ui::new(&Config::default()).expect("the bundled fonts and models load");
+        let view = View::fit(Size::new(1280.0, 720.0));
+        let now = Instant::now();
+        let frame_time = FrameTime::new(now, now + Duration::from_millis(16));
+        let mut scene = Scene::new();
+
+        ui.set_presentation(true);
+        let expected_composite = Some(Ui::model_composite(ui.theme.selected()));
+        let first = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
+        assert!(matches!(first.background, Frame::Rebuilt(_)));
+        assert!(first.foreground);
+        assert_eq!(first.overlay_composite, expected_composite);
+        assert!((first.overlay_opacity - 1.0).abs() < 1e-6);
+
+        let second = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
+        assert!(second.foreground);
+        assert!(matches!(
+            second.background,
+            Frame::Retained(_) | Frame::Unchanged(_)
+        ));
+
+        ui.set_presentation(false);
+        let third = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
+        assert!(matches!(third.background, Frame::Rebuilt(_)));
+        assert!(!third.foreground || ui.timeline());
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_presentation_at_sixteen_by_nine() -> anyhow::Result<()> {
+        let width = 1920;
+        let height = 1080;
+        let mut ui = Ui::new(&Config::default())?;
+        ui.set_presentation(true);
+        let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let _ = ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps120,
+            FrameTime::new(now, now + Duration::from_millis(16)),
+        );
+        for _ in 0..64 {
+            if ui.visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            ui.visualizer.next_model();
+        }
+        let pixels = presentation_pixels(&mut ui, &view, width, height, 150, false, |_, _| {})?;
+        if let Some(path) = std::env::var_os("VU_PRESENTATION_PREVIEW_PATH") {
+            write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_presentation_entrance() -> anyhow::Result<()> {
+        let width = 1920;
+        let height = 1080;
+        let mut ui = Ui::new(&Config::default())?;
+        ui.set_presentation(true);
+        let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let _ = ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps120,
+            FrameTime::new(now, now + Duration::from_millis(16)),
+        );
+        for _ in 0..64 {
+            if ui.visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            ui.visualizer.next_model();
+        }
+        let pixels = presentation_pixels(&mut ui, &view, width, height, 22, false, |_, _| {})?;
+        if let Some(path) = std::env::var_os("VU_ENTRANCE_PREVIEW_PATH") {
+            write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_presentation_low_opacity() -> anyhow::Result<()> {
+        let width = 1920;
+        let height = 1080;
+        let mut config = Config::default();
+        config.presentation_opacity = PresentationOpacity::try_from(0.5)?;
+        let mut ui = Ui::new(&config)?;
+        ui.set_presentation(true);
+        let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let _ = ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps120,
+            FrameTime::new(now, now + Duration::from_millis(16)),
+        );
+        for _ in 0..64 {
+            if ui.visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            ui.visualizer.next_model();
+        }
+        let pixels = presentation_pixels(&mut ui, &view, width, height, 80, false, |_, _| {})?;
+        if let Some(path) = std::env::var_os("VU_OPACITY_PREVIEW_PATH") {
+            write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_presentation_light_theme() -> anyhow::Result<()> {
+        let width = 1920;
+        let height = 1080;
+        let mut ui = Ui::new(&Config::default())?;
+        let theme: ThemeId = ron::from_str("\"Tomorrow\"")?;
+        ui.set_theme(theme);
+        ui.set_presentation(true);
+        let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let _ = ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps120,
+            FrameTime::new(now, now + Duration::from_millis(16)),
+        );
+        for _ in 0..64 {
+            if ui.visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            ui.visualizer.next_model();
+        }
+        let pixels = presentation_pixels(&mut ui, &view, width, height, 80, false, |_, _| {})?;
+        if let Some(path) = std::env::var_os("VU_LIGHT_PREVIEW_PATH") {
+            write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_presentation_aspects() -> anyhow::Result<()> {
+        let Some(directory) = std::env::var_os("VU_ASPECT_PREVIEW_DIR") else {
+            return Ok(());
+        };
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory)?;
+        let mut ui = Ui::new(&Config::default())?;
+        ui.set_presentation(true);
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let load_view = View::fit(Size::new(1920.0, 1080.0));
+        let _ = ui.draw(
+            &mut scene,
+            &load_view,
+            FrameRateLimit::Fps120,
+            FrameTime::new(now, now + Duration::from_millis(16)),
+        );
+        for _ in 0..64 {
+            if ui.visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            ui.visualizer.next_model();
+        }
+        for (width, height) in [(1280, 720), (1280, 440), (1024, 768)] {
+            let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+            let pixels = presentation_pixels(&mut ui, &view, width, height, 70, false, |_, _| {})?;
+            write_preview(
+                &directory.join(format!("presentation-{width}x{height}.png")),
+                width,
+                height,
+                &pixels,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_selector_presentation() -> anyhow::Result<()> {
+        use crate::visualizer::Action;
+
+        let width = 1920;
+        let height = 1080;
+        let mut ui = Ui::new(&Config::default())?;
+        ui.set_presentation(true);
+        let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let _ = ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps120,
+            FrameTime::new(now, now + Duration::from_millis(16)),
+        );
+        for _ in 0..64 {
+            if ui.visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            ui.visualizer.next_model();
+        }
+        let pixels = presentation_pixels(&mut ui, &view, width, height, 90, false, |frame, ui| {
+            if frame == 0 {
+                ui.visualizer
+                    .set_parameter(Parameter::SelectorEntryKicks, 1.0);
+                ui.visualizer.handle_action(Action::Kick(0.6), 0.0, 0.75);
+            }
+            if frame == 30 || frame == 55 {
+                ui.visualizer.handle_action(Action::Hat, 0.0, 0.75);
+            }
+        })?;
+        if let Some(path) = std::env::var_os("VU_SELECTOR_PREVIEW_PATH") {
+            write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_selector_exit_presentation() -> anyhow::Result<()> {
+        use crate::visualizer::Action;
+
+        let width = 1920;
+        let height = 1080;
+        let mut ui = Ui::new(&Config::default())?;
+        ui.set_presentation(true);
+        let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let _ = ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps120,
+            FrameTime::new(now, now + Duration::from_millis(16)),
+        );
+        for _ in 0..64 {
+            if ui.visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            ui.visualizer.next_model();
+        }
+        let pixels = presentation_pixels(&mut ui, &view, width, height, 38, false, |frame, ui| {
+            if frame == 0 {
+                ui.visualizer
+                    .set_parameter(Parameter::SelectorEntryKicks, 1.0);
+                ui.visualizer
+                    .set_parameter(Parameter::SelectorExitTriggers, 1.0);
+                ui.visualizer.handle_action(Action::Kick(0.6), 0.0, 0.75);
+            }
+            if frame == 30 {
+                ui.visualizer.handle_action(Action::Kick(0.6), 0.0, 0.75);
+            }
+        })?;
+        if let Some(path) = std::env::var_os("VU_SELECTOR_EXIT_PREVIEW_PATH") {
+            write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_poi_presentation() -> anyhow::Result<()> {
+        use crate::visualizer::{Action, Rng};
+
+        let width = 1920;
+        let height = 1080;
+        let mut ui = Ui::new(&Config::default())?;
+        ui.set_presentation(true);
+        let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let _ = ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps120,
+            FrameTime::new(now, now + Duration::from_millis(16)),
+        );
+        for _ in 0..64 {
+            if ui.visualizer.model_id() == Some("rif_ak47") {
+                break;
+            }
+            ui.visualizer.next_model();
+        }
+        ui.visualizer
+            .set_parameter(Parameter::SnarePoiSwitches, 10.0);
+        let mut rng = Rng::new(7);
+        ui.visualizer.showcase.enter_focus(&mut rng, 1.1);
+        let pixels = presentation_pixels(&mut ui, &view, width, height, 80, false, |frame, ui| {
+            if frame == 35 {
+                ui.visualizer.handle_action(Action::Snare, 0.0, 1.1);
+            }
+            if frame == 74 {
+                ui.visualizer.handle_action(Action::Hat, 0.0, 1.1);
+                ui.presentation.debug_hit_marker();
+            }
+        })?;
+        if let Some(path) = std::env::var_os("VU_POI_PREVIEW_PATH") {
+            write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn presentation_overlay_tracks_theme_composition_and_opacity() {
+        let mut ui = Ui::new(&Config::default()).expect("the bundled fonts and models load");
+        ui.set_presentation(true);
+        let view = View::fit(Size::new(1280.0, 720.0));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        let frame_time = FrameTime::new(now, now + Duration::from_millis(16));
+        let dark = Ui::model_composite(ui.theme.selected());
+        let _ = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
+
+        let light: ThemeId = ron::from_str("\"Tomorrow\"").expect("the bundled light theme loads");
+        ui.set_theme(light);
+        ui.set_presentation_opacity(
+            PresentationOpacity::try_from(0.5).expect("the opacity is inside its bounds"),
+        );
+        let frame = ui.draw(&mut scene, &view, FrameRateLimit::Fps120, frame_time);
+        assert_ne!(dark, Ui::model_composite(light));
+        assert_eq!(frame.overlay_composite, Some(Ui::model_composite(light)));
+        assert!((frame.overlay_opacity - 0.5).abs() < 1e-6);
     }
 
     #[test]
