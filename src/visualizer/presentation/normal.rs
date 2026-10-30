@@ -253,7 +253,6 @@ impl NormalScene {
             self.layout(fonts, stage, rng, true);
             self.ammo = build_ammo(weapon, visualizer, self.plan.as_ref(), stage, fonts, rng);
             self.ammo_suppressed = false;
-            return;
         }
         if (self.layout_unit - stage.unit).abs() > f64::EPSILON
             || (self.layout_size.0 - stage.width).abs() > f64::EPSILON

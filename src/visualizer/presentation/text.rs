@@ -3,8 +3,9 @@
 //! Text is laid out once per stage size, then every glyph is drawn with its own
 //! alpha and substituted glyph id. This supports fade, neon flicker, glitch and
 //! typewriter entrances without relaying out every frame. Numeric blocks can
-//! instead use the odometer: one spring per number drives coupled digit wheels,
-//! and each wheel is drawn as an analytical motion sweep.
+//! instead use the odometer: coupled digit wheels turn from a wound-back number
+//! and bounce onto their stop on a virtual damped spring, and each wheel is
+//! drawn as an analytical motion sweep.
 
 use vello::{
     kurbo::{Affine, BezPath, Point, Rect},
@@ -21,27 +22,32 @@ use super::{color::ScenePalette, stage::Stage};
 /// Fraction of the line height a hole text runs past a flush plate edge.
 const FLUSH_OVERHANG: f64 = 0.05;
 
-/// First overshoot of a stopped register, in cells of its fastest wheel. This
-/// is kept absolute rather than relative to the travel, so a long spin does not
-/// kick a whole revolution past its stop.
-const STOP_OVERSCROLL_CELLS: f64 = 0.24;
+/// Largest bounce of the fastest wheel past its stop, in its own cells.
+const STOP_BOUNCE_CELLS: f64 = 0.28;
 
-/// Damping ratio of the stop spring. The wheel crosses its target with speed,
-/// and the detent absorbs the travel beyond it, which is what gives the stop
-/// its small kick instead of a proportional bounce.
-const STOP_DAMPING_RATIO: f64 = 0.82;
+/// Frequency of the stop bounce, in hertz.
+const STOP_BOUNCE_HZ: f64 = 2.6;
 
-/// Time from release to the first stop crossing. The stiffness is derived from
-/// this, so every register stops at the same pace however far it has to turn.
-const STOP_CROSSING_SECONDS: f64 = 0.75;
+/// Damping ratio of the stop bounce. Low enough for two or three visible
+/// wobbles before the wheel comes to rest.
+const STOP_BOUNCE_DAMPING: f64 = 0.16;
 
-/// Nominal time after the stop crossing for the entrance clock. The wheels keep
-/// being drawn until they actually come to rest, so this only needs to be close.
-const STOP_RING_SECONDS: f64 = 0.42;
+/// Fraction of the spin's starting speed the stop bounce may start with. A
+/// register that only turns a few cells would otherwise start the bounce
+/// faster than it spins.
+const STOP_BOUNCE_ENTRY: f64 = 0.25;
 
-/// Longest delay added before a register starts, which staggers the numbers of
-/// one text block without staggering the wheels inside a number.
-const MAX_REGISTER_DELAY: f32 = 0.16;
+/// Slope of the normalized drive at the spawn. The wheels appear already at
+/// full speed, so the drive only ever decelerates.
+const DRIVE_START_SLOPE: f64 = 3.0;
+
+/// Spin seconds, chosen per register and per entrance.
+const SPIN_SECONDS_MIN: f32 = 0.85;
+const SPIN_SECONDS_SPAN: f32 = 0.3;
+
+/// Nominal time after the stop for the entrance clock. The wheels keep being
+/// drawn until the spring comes to rest, so this only has to be close.
+const STOP_CLOCK_TAIL: f32 = 0.25;
 
 /// Below this sweep length a digit is drawn as a plain glyph.
 const PLAIN_SMEAR_PIXELS: f64 = 0.6;
@@ -147,60 +153,97 @@ struct Dial {
     travel: f64,
 }
 
-/// Distance and spring constants of one spinning register.
+/// The virtual stop spring. It runs on the register progress with zero as its
+/// rest value, so its value is the small bounce the wheels make at the stop.
+/// The shared progress keeps the gear relation through the bounce.
 #[derive(Clone, Copy, Debug)]
-struct Spin {
-    /// Cells the lowest wheel turns, which is also its own travel.
-    travel: f64,
+struct Bounce {
+    spring: Spring,
     stiffness: f32,
     damping: f32,
-    /// Scale applied to the spring's overshoot so the detent always kicks by a
-    /// fraction of a cell, whatever the travel was.
-    overshoot_scale: f64,
 }
 
-/// One number: its wheels move together, driven by one damped spring.
+/// Damped angular frequency of the stop bounce, in radians per second.
+fn bounce_radians() -> f64 {
+    std::f64::consts::TAU * STOP_BOUNCE_HZ
+}
+
+impl Bounce {
+    fn new() -> Self {
+        let zeta = STOP_BOUNCE_DAMPING;
+        let omega = bounce_radians() / (1.0 - zeta * zeta).sqrt();
+        Self {
+            spring: Spring::default(),
+            stiffness: (omega * omega) as f32,
+            damping: (2.0 * zeta * omega) as f32,
+        }
+    }
+
+    /// Gives the spring the speed the spin still has when it reaches the stop.
+    fn release(&mut self, speed: f32) {
+        self.spring.reset(0.0);
+        self.spring.impulse(speed);
+    }
+
+    fn advance(&mut self, dt: f32) {
+        self.spring.advance(dt, self.stiffness, self.damping);
+    }
+
+    fn value(&self) -> f32 {
+        self.spring.value()
+    }
+
+    fn rest(&mut self) {
+        self.spring.reset(0.0);
+    }
+
+    fn settled(&self, travel: f64) -> bool {
+        self.spring
+            .is_settled((0.02 / travel) as f32, (0.5 / travel) as f32)
+    }
+}
+
+/// One number: its wheels share one drive and stop together on one bounce.
 struct Register {
-    spring: Spring,
-    /// Progress actually drawn, with the overshoot held to the detent travel.
-    shown: f32,
-    /// `None` when the register does not move, for example a zero value.
-    spin: Option<Spin>,
-    /// Progress covered during the previous display frame, signed.
-    exposure: f32,
-    delay: f32,
+    /// Cells the lowest wheel turns; zero when the register does not move.
+    travel: f64,
     dials: Vec<Dial>,
+    bounce: Bounce,
+    /// Seconds from release to the stop.
+    seconds: f32,
+    /// Drive slope at the stop, progress per unit of normalized time.
+    entry_slope: f64,
+    released: bool,
+    /// Progress drawn after the previous frame, and its change over the frame.
+    shown: f32,
+    exposure: f32,
 }
 
 impl Register {
     fn advance(&mut self, dt: f32, elapsed: f32) {
-        let Some(spin) = self.spin else {
+        if self.travel <= 0.0 {
             self.exposure = 0.0;
-            return;
-        };
-        // A delay that falls inside one frame only starts the spring for the
-        // remainder of that frame.
-        let step = elapsed - (elapsed - dt).max(self.delay);
-        if step <= 0.0 {
-            self.exposure = 0.0;
+            self.shown = 1.0;
             return;
         }
-        self.spring.advance(step, spin.stiffness, spin.damping);
-        let before = self.shown;
-        self.shown = shown_progress(f64::from(self.spring.value()), spin.overshoot_scale);
-        self.exposure = self.shown - before;
+        let previous = self.shown;
+        let shown = if elapsed >= self.seconds {
+            if !self.released {
+                self.released = true;
+                self.bounce
+                    .release((self.entry_slope / f64::from(self.seconds)) as f32);
+            }
+            self.bounce.advance(dt);
+            1.0 + self.bounce.value()
+        } else {
+            drive_progress(f64::from(elapsed / self.seconds), self.entry_slope) as f32
+        };
+        self.shown = shown;
+        self.exposure = shown - previous;
     }
 
     fn settled(&self) -> bool {
-        let Some(spin) = self.spin else {
-            return true;
-        };
-        // Judge the rest on the drawn position, not on the spring's raw
-        // overshoot: the detent compresses that, so the visible wheel is still
-        // long after the raw value has stopped looking settled.
-        let offset = (f64::from(self.shown) - 1.0).abs() * spin.travel;
-        let speed = f64::from(self.spring.velocity()) * spin.overshoot_scale * spin.travel;
-        offset <= 0.01 && speed <= 0.2
+        self.travel <= 0.0 || (self.released && self.bounce.settled(self.travel))
     }
 }
 
@@ -208,7 +251,7 @@ impl Register {
 struct Odometer {
     atlas: GlyphAtlas,
     registers: Vec<Register>,
-    /// Delay plus stop time of the slowest register.
+    /// Spin time of the slowest register plus the clock tail.
     duration: f32,
 }
 
@@ -250,23 +293,27 @@ impl Odometer {
         odometer
     }
 
-    /// Starts one spin with fresh delays. The wheels of a register unwind
-    /// together; only whole numbers are staggered against each other.
+    /// Starts one spin with a fresh length. The wheels of a register unwind
+    /// together.
     fn rewind(&mut self, rng: &mut Rng) {
         let mut duration = 0.0f32;
         for register in &mut self.registers {
             register.exposure = 0.0;
-            register.shown = if register.spin.is_none() { 1.0 } else { 0.0 };
-            if register.spin.is_none() {
-                register.delay = 0.0;
-                register.spring.reset(1.0);
+            register.released = false;
+            register.bounce.rest();
+            register.shown = if register.travel > 0.0 { 0.0 } else { 1.0 };
+            if register.travel <= 0.0 {
+                register.seconds = 0.0;
+                register.entry_slope = 0.0;
                 continue;
             }
-            register.delay = rng.unit() * MAX_REGISTER_DELAY;
-            register.spring.reset(0.0);
-            register.spring.set_target(1.0);
-            duration = duration
-                .max(register.delay + STOP_CROSSING_SECONDS as f32 + STOP_RING_SECONDS as f32);
+            register.seconds = SPIN_SECONDS_MIN + rng.unit() * SPIN_SECONDS_SPAN;
+            // The stop spring's amplitude is the bounce in cells, so the spin
+            // only has to hand it the matching speed.
+            let entry_speed = (STOP_BOUNCE_CELLS * bounce_radians() / register.travel)
+                .min(STOP_BOUNCE_ENTRY * DRIVE_START_SLOPE / f64::from(register.seconds));
+            register.entry_slope = entry_speed * f64::from(register.seconds);
+            duration = duration.max(register.seconds + STOP_CLOCK_TAIL);
         }
         self.duration = duration;
     }
@@ -276,7 +323,8 @@ impl Odometer {
         for register in &mut self.registers {
             register.exposure = 0.0;
             register.shown = 1.0;
-            register.spring.reset(1.0);
+            register.released = true;
+            register.bounce.rest();
         }
         self.duration = 0.0;
     }
@@ -292,7 +340,7 @@ impl Odometer {
     }
 }
 
-/// Builds one register from a digit run: wheels share one spring, and each
+/// Builds one register from a digit run: wheels share one drive, and each
 /// wheel turns ten times less than the wheel to its right.
 fn build_register(atlas: &GlyphAtlas, plan: &TextPlan, run: &[usize]) -> Register {
     let digits: Vec<u32> = run
@@ -317,15 +365,6 @@ fn build_register(atlas: &GlyphAtlas, plan: &TextPlan, run: &[usize]) -> Registe
         (top + value % top).min(value)
     };
     let start = value - travel;
-    let spin = (travel > 0).then(|| {
-        let (stiffness, damping, overshoot_scale) = spring_params(travel as f64);
-        Spin {
-            travel: travel as f64,
-            stiffness,
-            damping,
-            overshoot_scale,
-        }
-    });
     let dials = digits
         .iter()
         .enumerate()
@@ -340,45 +379,24 @@ fn build_register(atlas: &GlyphAtlas, plan: &TextPlan, run: &[usize]) -> Registe
         })
         .collect();
     Register {
-        spring: Spring::default(),
-        shown: 1.0,
-        spin,
-        exposure: 0.0,
-        delay: 0.0,
+        travel: travel as f64,
         dials,
+        bounce: Bounce::new(),
+        seconds: 0.0,
+        entry_slope: 0.0,
+        released: false,
+        shown: 1.0,
+        exposure: 0.0,
     }
 }
 
-/// Spring constants for a register that turns `travel` cells before it stops.
-///
-/// The damping ratio is fixed so every register has the same stop response and
-/// crosses its target after the same time. The overshoot scale then holds the
-/// distance the spring runs past the detent to a fraction of a cell, so a long
-/// spin does not kick a whole revolution past its stop.
-fn spring_params(travel: f64) -> (f32, f32, f64) {
-    assert!(travel > 0.0, "a spinning register needs positive travel");
-    let zeta = STOP_DAMPING_RATIO;
-    let phase = (1.0 - zeta * zeta).sqrt().atan2(zeta);
-    let omega_damped = (std::f64::consts::PI - phase) / STOP_CROSSING_SECONDS;
-    let omega = omega_damped / (1.0 - zeta * zeta).sqrt();
-    let raw_overshoot = (-std::f64::consts::PI * zeta / (1.0 - zeta * zeta).sqrt()).exp();
-    let overshoot_scale = STOP_OVERSCROLL_CELLS / (travel * raw_overshoot);
-    (
-        (omega * omega) as f32,
-        (2.0 * zeta * omega) as f32,
-        overshoot_scale,
-    )
-}
-
-/// Progress as drawn. The spring's overshoot past the target is compressed to
-/// the detent travel, which keeps the kick on the fastest wheel small while the
-/// shared progress keeps every wheel in the same gear relation.
-fn shown_progress(progress: f64, overshoot_scale: f64) -> f32 {
-    if progress <= 1.0 {
-        progress as f32
-    } else {
-        (1.0 + (progress - 1.0) * overshoot_scale) as f32
-    }
+/// Normalized spin drive. It spawns at `DRIVE_START_SLOPE` and decelerates to
+/// `entry_slope` when it reaches one, so the wheel is already spinning on its
+/// first frame and the stop spring takes over without a velocity jump.
+fn drive_progress(u: f64, entry_slope: f64) -> f64 {
+    let u2 = u * u;
+    let u3 = u2 * u;
+    (1.0 + entry_slope) * u3 - (3.0 + entry_slope) * u2 + DRIVE_START_SLOPE * u
 }
 
 /// Sweep length actually drawn for one wheel, in its own cells. A wheel that
@@ -1333,16 +1351,15 @@ mod tests {
     }
 
     #[test]
-    fn odometer_stops_on_its_target_with_a_small_kick() -> anyhow::Result<()> {
+    fn odometer_stops_on_its_target_with_a_damped_bounce() -> anyhow::Result<()> {
         let mut rng = Rng::new(5);
         for source in ["4299 MM", "2.3 KG", "43 RND"] {
             let mut text = laid_out(source, &mut rng)?;
             text.enter(CharEffect::Fade, &mut rng);
-            let travel = text.odometer_state.as_ref().expect("odometer").registers[0]
-                .spin
-                .expect("the register spins")
-                .travel;
+            let travel = text.odometer_state.as_ref().expect("odometer").registers[0].travel;
             let mut peak: f64 = 0.0;
+            let mut swings = 0;
+            let mut signed = 0i32;
             let mut elapsed = 0.0f32;
             let dt = 1.0 / 120.0;
             loop {
@@ -1351,10 +1368,23 @@ mod tests {
                 let odometer = text.odometer_state.as_ref().expect("odometer");
                 let value = f64::from(odometer.registers[0].shown);
                 peak = peak.max((value - 1.0) * travel);
+                let sign = if value > 1.0 {
+                    1
+                } else if value < 1.0 {
+                    -1
+                } else {
+                    0
+                };
+                if sign != 0 && signed != 0 && sign != signed {
+                    swings += 1;
+                }
+                if sign != 0 {
+                    signed = sign;
+                }
                 if text.phase() == TextPhase::Visible && odometer.settled() {
                     break;
                 }
-                assert!(elapsed < 2.2, "{source} did not settle");
+                assert!(elapsed < 2.6, "{source} did not settle");
             }
             let odometer = text.odometer_state.as_ref().expect("odometer");
             let value = f64::from(odometer.registers[0].shown);
@@ -1364,15 +1394,46 @@ mod tests {
                 (value - 1.0).abs() * travel
             );
             assert!(
-                peak > STOP_OVERSCROLL_CELLS * 0.6 && peak < STOP_OVERSCROLL_CELLS * 1.25,
-                "{source} kicks {peak} cells past the stop"
+                peak > 0.15 && peak < STOP_BOUNCE_CELLS * 1.2,
+                "{source} bounces {peak} cells past the stop"
             );
             assert!(
-                elapsed > STOP_CROSSING_SECONDS as f32,
-                "{source} stopped before it crossed its target"
+                swings >= 3,
+                "{source} makes only {swings} swings, not a damped spring"
+            );
+            assert!(
+                elapsed > SPIN_SECONDS_MIN,
+                "{source} stopped before the spin finished"
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn drive_spawns_at_full_speed_and_only_decelerates() {
+        let entry = 0.004;
+        assert_eq!(drive_progress(0.0, entry), 0.0);
+        assert!((drive_progress(1.0, entry) - 1.0).abs() < 1e-12);
+        let probe = 1e-7;
+        let start = (drive_progress(probe, entry) - drive_progress(0.0, entry)) / probe;
+        assert!(
+            (start - DRIVE_START_SLOPE).abs() < 1e-4,
+            "the drive spawns at {start}, not at full speed"
+        );
+        let step = 1e-3;
+        let mut previous = start;
+        let mut u = step;
+        while u < 1.0 {
+            let slope = (drive_progress(u, entry) - drive_progress(u - step, entry)) / step;
+            assert!(slope <= previous + 1e-5, "the drive speeds up at {u}");
+            assert!(slope > 0.0, "the drive runs backwards at {u}");
+            previous = slope;
+            u += step;
+        }
+        assert!(
+            (previous - entry).abs() < 1e-3,
+            "the drive lands at {previous}, not at the entry speed"
+        );
     }
 
     #[test]
@@ -1408,16 +1469,11 @@ mod tests {
             .with_odometer(true);
             text.layout(&mut fonts, &stage, &mut rng);
             text.enter(CharEffect::Fade, &mut rng);
-            if let Some(odometer) = &mut text.odometer_state {
-                for register in &mut odometer.registers {
-                    register.delay = 0.0;
-                }
-            }
             texts.push((text, x));
         }
         let mut palette = ScenePalette::placeholder();
         palette.ink = Color::from_rgb8(240, 240, 244);
-        let frames = [12usize, 24, 40, 56, 72, 88, 104, 120];
+        let frames = [1usize, 3, 8, 20, 60, 96, 108, 124];
         let mut scene = Scene::new();
         scene.fill(
             Fill::NonZero,
