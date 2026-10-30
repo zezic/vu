@@ -155,13 +155,13 @@ independent of the snare and drop detectors.
 
 ### Presentation mode
 
-Press `F` to enter or leave presentation mode. It replaces the debug chrome
-with viewport-relative typography and infographics, keeps the selected theme,
-and leaves the model wireframe in place. The layout is designed against a
-1920x1080 (16:9) reference and adapts to the actual window: the font scale and
-all geometry are derived from the viewport, side columns widen on ultrawide
-windows, and the same composition remains readable at 16:9 and taller ratios.
-Presentation never forces fullscreen and never hides the cursor.
+Presentation mode starts active. Press `F` to leave or enter it. It replaces
+the debug chrome with viewport-relative typography and infographics, keeps the
+selected theme, and leaves the model wireframe in place. The layout is designed
+against a 1920x1080 (16:9) reference and adapts to the actual window: the font
+scale and all geometry are derived from the viewport, side columns widen on
+ultrawide windows, and the same composition remains readable at 16:9 and taller
+ratios. Presentation never forces fullscreen and never hides the cursor.
 
 The animated presentation layer is rasterized to a transparent texture and
 composited over the model lines, so a backdrop with text cut out of it really is
@@ -212,11 +212,14 @@ the authored joke or the POI fact. Joke cards can also show the joke id, its
 style array and intent, and style keywords, each chosen independently. Cards
 have leader lines, corner brackets, corner crosses, ticks, and a joke-id
 barcode, drift slowly on top of spring-driven targets, and use one three-color
-trio for the whole POI beat. Returning to normal mode leaves the cards with
-their chosen exit effects. The normal name and a few corner fields stay visible
-at reduced opacity, and only blocks that collide with the POI airspace or cards
-are hidden. A hit marker (four diagonal lines with a center gap) appears over
-the infographic when the hi-hat detector triggers during an MLG-style joke.
+trio for the whole POI beat. A hole-style label's contrast plate is swept by
+the card velocity over a 1/60 s exposure with a GPU coverage shader, so the
+backdrop smears with the card while the cut-out glyphs stay sharp. Returning to
+normal mode leaves the cards with their chosen exit effects. The normal name and
+a few corner fields stay visible at reduced opacity, and only blocks that
+collide with the POI airspace or cards are hidden. A hit marker (four diagonal
+lines with a center gap) appears over the infographic when the hi-hat detector
+triggers during an MLG-style joke.
 
 Edge opacity follows vertex depth: nearest vertices use the adjustable
 near-opacity floor (60% by default, brightened by line energy), farther vertices

@@ -11,7 +11,7 @@ use crate::{
     audio::AudioCursor,
     config::{Config, PreampDb, PresentationOpacity, ShutterFrames, VisualizerTextScale},
     frame_schedule::{FrameRateLimit, FrameTime},
-    render::Frame,
+    render::{Frame, PlateInstance, PlateMaskImage},
     text::{Fonts, Text, UiFace},
     theme::{Theme, ThemeColors, ThemeId},
     AudioEvent,
@@ -329,6 +329,7 @@ pub struct Ui {
     face: Scene,
     face_settings: Option<FaceSettings>,
     presentation: Presentation,
+    plate_mask: Option<PlateMaskImage>,
 }
 
 impl Ui {
@@ -544,6 +545,7 @@ impl Ui {
             face: Scene::new(),
             face_settings: None,
             presentation: Presentation::new(),
+            plate_mask: None,
         })
     }
 
@@ -580,6 +582,11 @@ impl Ui {
             self.clear_drag();
         }
         self.face_settings = None;
+    }
+
+    /// Supplies the GPU coverage mask used by moving contrast plates.
+    pub fn set_plate_mask(&mut self, mask: Option<PlateMaskImage>) {
+        self.plate_mask = mask;
     }
 
     pub fn timeline(&self) -> bool {
@@ -1627,8 +1634,12 @@ impl Ui {
         }
         if presentation_active {
             if let Some(stage) = self.presentation.stage() {
-                self.presentation
-                    .draw(scene, &stage, self.presentation.colors());
+                self.presentation.draw(
+                    scene,
+                    &stage,
+                    self.presentation.colors(),
+                    self.plate_mask.as_ref(),
+                );
             }
         }
         let overlay_composite =
@@ -1659,6 +1670,8 @@ impl Ui {
                 || presentation_active,
             overlay_composite,
             overlay_opacity,
+            plate_instances: self.presentation.plate_instances(),
+            plate_ink: self.presentation.colors().ink,
         }
     }
 }
@@ -1673,6 +1686,10 @@ pub struct UiFrame<'a> {
     pub overlay_composite: Option<ModelComposite>,
     /// Multiplier applied to the presentation text layer.
     pub overlay_opacity: f32,
+    /// Moving plate coverage requests for the GPU mask pass.
+    pub plate_instances: &'a [PlateInstance],
+    /// Ink color of the moving plate masks.
+    pub plate_ink: Color,
 }
 
 #[cfg(test)]
@@ -1752,6 +1769,11 @@ mod tests {
         let foreground_view = foreground.create_view(&wgpu::TextureViewDescriptor::default());
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let mut renderer = crate::render::renderer(&device.device)?;
+        let mut plate_mask =
+            crate::render::PlateMask::new(&device.device, &mut renderer, width, height);
+        ui.set_plate_mask(Some(plate_mask.image()));
+
         let now = Instant::now();
         let mut scene = Scene::new();
         let mut last = None;
@@ -1791,7 +1813,6 @@ mod tests {
             height,
             antialiasing_method: crate::render::ANTIALIASING,
         };
-        let mut renderer = crate::render::renderer(&device.device)?;
         renderer.render_to_texture(
             &device.device,
             &device.queue,
@@ -1799,6 +1820,13 @@ mod tests {
             &background_view,
             &params,
         )?;
+        plate_mask.render(
+            &device.device,
+            &device.queue,
+            frame.plate_instances,
+            frame.plate_ink,
+        );
+        renderer.mark_override_image_dirty(&plate_mask.image().image);
         renderer.render_to_texture(
             &device.device,
             &device.queue,

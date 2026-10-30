@@ -17,7 +17,7 @@ pub use stage::Stage;
 
 use vello::{kurbo::Point, Scene};
 
-use crate::{text::Fonts, theme::ThemeColors, visualizer::Palette};
+use crate::{render::PlateMaskImage, text::Fonts, theme::ThemeColors, visualizer::Palette};
 
 use super::{showcase::ShowcaseMode, Rng, TriggerCounts, Visualizer};
 
@@ -250,7 +250,13 @@ impl Presentation {
         });
     }
 
-    pub fn draw(&self, scene: &mut Scene, stage: &Stage, palette: ScenePalette) {
+    pub fn draw(
+        &self,
+        scene: &mut Scene,
+        stage: &Stage,
+        palette: ScenePalette,
+        plate_mask: Option<&PlateMaskImage>,
+    ) {
         if !self.active {
             return;
         }
@@ -258,7 +264,8 @@ impl Presentation {
         self.normal
             .draw(scene, stage, palette, normal_alpha, self.time);
         self.selector.draw(scene, stage, palette);
-        self.poi.draw(scene, stage, palette, self.focus_blend);
+        self.poi
+            .draw(scene, stage, palette, self.focus_blend, plate_mask);
         for fx in &self.micro {
             draw_micro(scene, stage, palette, fx);
         }
@@ -282,6 +289,10 @@ impl Presentation {
 
     pub fn colors(&self) -> ScenePalette {
         self.colors
+    }
+
+    pub fn plate_instances(&self) -> &[crate::render::PlateInstance] {
+        self.poi.plate_instances()
     }
 
     #[cfg(test)]

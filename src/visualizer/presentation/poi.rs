@@ -3,11 +3,14 @@
 //! Each POI beat chooses a new card split, typography, side arrangement and
 //! color trio. Every card anchors to a random vertex chosen once per beat and
 //! drifts slowly around its target, so the infographic never becomes static.
+//! A hole-style label's contrast plate is drawn as an analytical sweep of the
+//! card's screen velocity, so the plate blurs with the card while its cut-out
+//! glyphs stay sharp.
 
 use std::{collections::BTreeSet, f32::consts::TAU};
 
 use vello::{
-    kurbo::{Affine, BezPath, Point, Rect, Stroke},
+    kurbo::{Affine, BezPath, Point, Rect, Stroke, Vec2},
     peniko::Fill,
     Scene,
 };
@@ -17,12 +20,18 @@ use crate::{
     weapon::{ComedySpec, Intent, Joke, Poi, Style, Weapon},
 };
 
+use crate::render::{PlateInstance, PlateMaskImage, MAX_PLATE_EDGES, MAX_PLATE_INSTANCES};
+
 use super::super::{detection::Spring, Rng, Visualizer};
 use super::{
     color::ScenePalette,
     stage::Stage,
-    text::{AnimatedText, Backdrop, CharEffect, PaintStyle},
+    text::{plate_lines, AnimatedText, Backdrop, CharEffect, PaintStyle, PLATE_PLAIN_SWEEP_PIXELS},
 };
+
+/// Shutter length of the card backdrop smear. A card at a given speed smears
+/// the same distance however fast the display refreshes.
+const CARD_EXPOSURE_SECONDS: f64 = 1.0 / 60.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Side {
@@ -97,6 +106,28 @@ impl PoiCard {
             y + self.height * 0.5,
         )
     }
+
+    /// Screen displacement the card covers during one backdrop exposure.
+    fn exposure_motion(&self) -> Vec2 {
+        Vec2::new(
+            f64::from(self.spring_x.velocity()),
+            f64::from(self.spring_y.velocity()),
+        ) * CARD_EXPOSURE_SECONDS
+    }
+
+    /// Text draw origins, top to bottom, in screen coordinates.
+    fn text_origins<'a>(
+        &'a self,
+        stage: &'a Stage,
+    ) -> impl Iterator<Item = (&'a PoiText, Point)> + 'a {
+        let x = self.rect().x0 + self.pad;
+        let mut y = self.rect().y0 + self.pad;
+        self.texts.iter().map(move |text| {
+            let origin = Point::new(x, y);
+            y += text.text.bounds(stage).height() + text.gap;
+            (text, origin)
+        })
+    }
 }
 
 struct HitMarker {
@@ -112,6 +143,8 @@ pub struct PoiScene {
     cards: Vec<PoiCard>,
     outgoing: Vec<PoiCard>,
     outgoing_fact: bool,
+    /// Moving plate coverage requests for the GPU mask pass.
+    plate_instances: Vec<PlateInstance>,
     stage_unit: f64,
     stage_size: (f64, f64),
     time: f32,
@@ -127,6 +160,7 @@ impl Default for PoiScene {
             cards: Vec::new(),
             outgoing: Vec::new(),
             outgoing_fact: false,
+            plate_instances: Vec::new(),
             stage_unit: f64::NAN,
             stage_size: (0.0, 0.0),
             time: 0.0,
@@ -150,6 +184,7 @@ impl PoiScene {
         self.cards.clear();
         self.outgoing.clear();
         self.outgoing_fact = false;
+        self.plate_instances.clear();
         self.markers.clear();
     }
 
@@ -223,6 +258,7 @@ impl PoiScene {
             self.outgoing_fact = false;
         }
         self.update_flow(dt, visualizer, stage);
+        self.collect_plate_instances(stage);
         if hat_trigger {
             if let Some(content) = &self.content {
                 if content.has_mlg {
@@ -287,6 +323,66 @@ impl PoiScene {
         }
     }
 
+    pub fn plate_instances(&self) -> &[PlateInstance] {
+        &self.plate_instances
+    }
+
+    /// Collects the moving hole plates whose coverage the GPU mask renders.
+    fn collect_plate_instances(&mut self, stage: &Stage) {
+        self.plate_instances.clear();
+        for card in self.cards.iter().chain(&self.outgoing) {
+            let motion = card.exposure_motion();
+            if motion.length() < PLATE_PLAIN_SWEEP_PIXELS {
+                continue;
+            }
+            for (text, origin) in card.text_origins(stage) {
+                let Some(local) = text.text.plate_points(stage) else {
+                    continue;
+                };
+                let points: Vec<Point> = local
+                    .iter()
+                    .map(|point| *point + origin.to_vec2())
+                    .collect();
+                let lines = plate_lines(&points);
+                assert!(
+                    lines.len() <= MAX_PLATE_EDGES,
+                    "a plate outline has more edges than the mask shader accepts"
+                );
+                let half = motion * 0.5;
+                let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
+                let (mut x1, mut y1) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+                for point in &points {
+                    for corner in [*point - half, *point + half] {
+                        x0 = x0.min(corner.x);
+                        y0 = y0.min(corner.y);
+                        x1 = x1.max(corner.x);
+                        y1 = y1.max(corner.y);
+                    }
+                }
+                let mut edges = [[0.0f32; 4]; MAX_PLATE_EDGES];
+                for (slot, (normal, offset)) in edges.iter_mut().zip(&lines) {
+                    *slot = [normal.x as f32, normal.y as f32, *offset as f32, 0.0];
+                }
+                self.plate_instances.push(PlateInstance {
+                    bounds: [
+                        (x0 - 1.0) as f32,
+                        (y0 - 1.0) as f32,
+                        (x1 + 1.0) as f32,
+                        (y1 + 1.0) as f32,
+                    ],
+                    motion: [motion.x as f32, motion.y as f32],
+                    edge_count: lines.len() as u32,
+                    _padding: 0,
+                    edges,
+                });
+                assert!(
+                    self.plate_instances.len() <= MAX_PLATE_INSTANCES,
+                    "more moving plates than the mask pass accepts"
+                );
+            }
+        }
+    }
+
     #[cfg(test)]
     pub fn debug_spawn_hit_marker(&mut self, rng: &mut Rng) {
         self.spawn_hit_marker(rng);
@@ -339,7 +435,14 @@ impl PoiScene {
         rects
     }
 
-    pub fn draw(&self, scene: &mut Scene, stage: &Stage, palette: ScenePalette, focus_blend: f32) {
+    pub fn draw(
+        &self,
+        scene: &mut Scene,
+        stage: &Stage,
+        palette: ScenePalette,
+        focus_blend: f32,
+        plate_mask: Option<&PlateMaskImage>,
+    ) {
         if !self.is_visible() {
             return;
         }
@@ -357,12 +460,22 @@ impl PoiScene {
                     card,
                     alpha * 0.8,
                     self.time,
+                    plate_mask,
                 );
             }
         }
         for card in &self.cards {
             draw_leader(scene, stage, palette, card.anchor, card.rect(), alpha);
-            draw_card(scene, stage, palette, card.anchor, card, alpha, self.time);
+            draw_card(
+                scene,
+                stage,
+                palette,
+                card.anchor,
+                card,
+                alpha,
+                self.time,
+                plate_mask,
+            );
         }
         let mut drawn = BTreeSet::new();
         for card in self.outgoing.iter().chain(&self.cards) {
@@ -781,6 +894,7 @@ fn card_target(stage: &Stage, anchor: Point, card: &PoiCard, air: f64) -> (f64, 
     (x, y)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_card(
     scene: &mut Scene,
     stage: &Stage,
@@ -789,6 +903,7 @@ fn draw_card(
     card: &PoiCard,
     alpha: f32,
     time: f32,
+    plate_mask: Option<&PlateMaskImage>,
 ) {
     let rect = card.rect();
     let has_hole = card
@@ -805,19 +920,18 @@ fn draw_card(
         );
     }
     draw_decorations(scene, stage, palette, rect, anchor, alpha);
-    let x = rect.x0 + card.pad;
-    let mut y = rect.y0 + card.pad;
-    for text in &card.texts {
-        let bounds = text.text.bounds(stage);
-        text.text.draw(
+    let motion = card.exposure_motion();
+    for (text, origin) in card.text_origins(stage) {
+        text.text.draw_with_motion(
             scene,
-            Affine::translate((x, y)),
+            Affine::translate((origin.x, origin.y)),
             stage,
             palette,
             alpha,
             time,
+            motion,
+            plate_mask,
         );
-        y += bounds.height() + text.gap;
     }
     if let Some(seed) = card.barcode {
         let bar_rect = Rect::new(

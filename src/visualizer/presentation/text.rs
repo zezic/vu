@@ -8,12 +8,15 @@
 //! analytical motion sweep.
 
 use vello::{
-    kurbo::{Affine, BezPath, Point, Rect},
-    peniko::{BlendMode, Color, Compose, Fill, Mix},
+    kurbo::{Affine, BezPath, Point, Rect, Vec2},
+    peniko::{BlendMode, Color, Compose, Fill, ImageBrush, Mix},
     Scene,
 };
 
-use crate::text::{BlockAlign, Fonts, GlyphAtlas, TextGlyph, TextPaint, TextPlan, UiFace};
+use crate::{
+    render::PlateMaskImage,
+    text::{BlockAlign, Fonts, GlyphAtlas, TextGlyph, TextPaint, TextPlan, UiFace},
+};
 
 use super::super::detection::Spring;
 use super::super::Rng;
@@ -56,9 +59,13 @@ const SPIN_SECONDS_SPAN: f32 = 0.3;
 /// drawn until the spring comes to rest, so this only has to be close.
 const STOP_CLOCK_TAIL: f32 = 0.25;
 
-/// Below this sweep length a digit is drawn as a plain glyph. Kept small so
-/// even the slow high wheels keep their analytical exposure blur.
-const PLAIN_SMEAR_PIXELS: f64 = 0.2;
+/// Below this sweep length a shape is drawn crisp. Kept small so even the slow
+/// high wheels keep their analytical exposure blur.
+const PLAIN_SWEEP_PIXELS: f64 = 0.2;
+
+/// Below this displacement a contrast plate is drawn as one crisp fill. The
+/// remaining exposure is subpixel and would only add overdraw.
+pub(crate) const PLATE_PLAIN_SWEEP_PIXELS: f64 = 0.5;
 
 /// Longest sweep that is drawn, in line heights. The digit strip repeats every
 /// ten cells, so a sweep of one period already averages over the whole digit
@@ -781,6 +788,19 @@ impl AnimatedText {
         Point::new(left, y)
     }
 
+    /// Contrast plate outline in text-local coordinates, when this text is
+    /// drawn as a hole out of a backdrop.
+    pub fn plate_points(&self, stage: &Stage) -> Option<Vec<Point>> {
+        let backdrop = self.backdrop.as_ref()?;
+        (self.paint == PaintStyle::Hole).then(|| {
+            backdrop_points(
+                self.bounds(stage),
+                backdrop.cut,
+                stage.px(backdrop.cut_size),
+            )
+        })
+    }
+
     pub fn draw(
         &self,
         scene: &mut Scene,
@@ -789,6 +809,34 @@ impl AnimatedText {
         palette: ScenePalette,
         alpha: f32,
         time: f32,
+    ) {
+        self.draw_with_motion(
+            scene,
+            transform,
+            stage,
+            palette,
+            alpha,
+            time,
+            Vec2::ZERO,
+            None,
+        );
+    }
+
+    /// Draws the text while its origin covers `motion` screen pixels during the
+    /// exposure. A hole-style backdrop samples the GPU coverage mask when one
+    /// is supplied; its glyphs stay sharp so the text remains legible while the
+    /// plate smears.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_motion(
+        &self,
+        scene: &mut Scene,
+        transform: Affine,
+        stage: &Stage,
+        palette: ScenePalette,
+        alpha: f32,
+        time: f32,
+        motion: Vec2,
+        plate_mask: Option<&PlateMaskImage>,
     ) {
         let Some(plan) = &self.plan else {
             return;
@@ -839,7 +887,11 @@ impl AnimatedText {
                     );
                 }
             }
-            PaintStyle::Hole => self.draw_hole(scene, transform, stage, palette, alpha, time),
+            PaintStyle::Hole => {
+                self.draw_hole(
+                    scene, transform, stage, palette, alpha, time, motion, plate_mask,
+                );
+            }
         }
         self.draw_caret(scene, text_transform, stage, palette, alpha, time);
     }
@@ -898,6 +950,7 @@ impl AnimatedText {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_hole(
         &self,
         scene: &mut Scene,
@@ -906,23 +959,40 @@ impl AnimatedText {
         palette: ScenePalette,
         alpha: f32,
         time: f32,
+        motion: Vec2,
+        plate_mask: Option<&PlateMaskImage>,
     ) {
         let Some(plan) = &self.plan else {
             return;
         };
-        let Some(backdrop) = &self.backdrop else {
+        let Some(points) = self.plate_points(stage) else {
             return;
         };
-        let bounds = self.bounds(stage);
-        let cut = stage.px(backdrop.cut_size);
-        let path = backdrop_path(bounds, backdrop.cut, cut);
-        scene.fill(
-            Fill::NonZero,
-            transform,
-            palette.ink.with_alpha(alpha),
-            None,
-            &path,
-        );
+        let path = path_from_points(&points);
+        let clip = if let Some(mask) =
+            plate_mask.filter(|_| motion.length() >= PLATE_PLAIN_SWEEP_PIXELS)
+        {
+            let hull = path_from_points(&shifted_hull(&points, motion * 0.5));
+            let brush = ImageBrush::new(mask.image.clone()).with_alpha(alpha);
+            let brush_transform = transform.inverse() * Affine::scale(1.0 / mask.scale);
+            scene.fill(
+                Fill::NonZero,
+                transform,
+                &brush,
+                Some(brush_transform),
+                &hull,
+            );
+            hull
+        } else {
+            scene.fill(
+                Fill::NonZero,
+                transform,
+                palette.ink.with_alpha(alpha),
+                None,
+                &path,
+            );
+            path
+        };
         scene.push_layer(
             Fill::NonZero,
             BlendMode {
@@ -931,7 +1001,7 @@ impl AnimatedText {
             },
             1.0,
             transform,
-            &path,
+            &clip,
         );
         let text_transform = transform
             * Affine::translate({
@@ -1119,7 +1189,7 @@ fn draw_wheel(
             continue;
         }
         let position = transform * Affine::translate((glyph.x, glyph.y + offset));
-        if smear < PLAIN_SMEAR_PIXELS {
+        if smear < PLAIN_SWEEP_PIXELS {
             atlas.draw(scene, position, id, color, alpha);
         } else {
             atlas.draw_swept(scene, position, id, ink, smear as f32, color, alpha);
@@ -1127,36 +1197,128 @@ fn draw_wheel(
     }
 }
 
-fn backdrop_path(bounds: Rect, cut: [bool; 4], cut_size: f64) -> BezPath {
-    let mut path = BezPath::new();
+/// Vertices of the contrast plate in text-local coordinates. The plate is a
+/// rectangle whose chosen corners are cut at 45 degrees.
+fn backdrop_points(bounds: Rect, cut: [bool; 4], cut_size: f64) -> Vec<Point> {
     let x0 = bounds.x0;
     let y0 = bounds.y0;
     let x1 = bounds.x1;
     let y1 = bounds.y1;
     let size = cut_size.max(0.0);
-    let tl = if cut[0] { size } else { 0.0 };
-    let tr = if cut[1] { size } else { 0.0 };
-    let br = if cut[2] { size } else { 0.0 };
-    let bl = if cut[3] { size } else { 0.0 };
-    path.move_to((x0 + tl, y0));
-    path.line_to((x1 - tr, y0));
-    if tr > 0.0 {
-        path.line_to((x1, y0 + tr));
+    let mut points = Vec::with_capacity(8);
+    // Walk the plate clockwise: the top-left cut is split between the end of
+    // the left edge and the start of the top edge.
+    points.push(if cut[0] {
+        Point::new(x0 + size, y0)
+    } else {
+        Point::new(x0, y0)
+    });
+    points.push(if cut[1] {
+        Point::new(x1 - size, y0)
+    } else {
+        Point::new(x1, y0)
+    });
+    if cut[1] {
+        points.push(Point::new(x1, y0 + size));
     }
-    path.line_to((x1, y1 - br));
-    if br > 0.0 {
-        path.line_to((x1 - br, y1));
+    points.push(if cut[2] {
+        Point::new(x1, y1 - size)
+    } else {
+        Point::new(x1, y1)
+    });
+    if cut[2] {
+        points.push(Point::new(x1 - size, y1));
     }
-    path.line_to((x0 + bl, y1));
-    if bl > 0.0 {
-        path.line_to((x0, y1 - bl));
+    points.push(if cut[3] {
+        Point::new(x0 + size, y1)
+    } else {
+        Point::new(x0, y1)
+    });
+    if cut[3] {
+        points.push(Point::new(x0, y1 - size));
     }
-    path.line_to((x0, y0 + tl));
-    if tl > 0.0 {
-        path.line_to((x0 + tl, y0));
+    if cut[0] {
+        points.push(Point::new(x0, y0 + size));
+    }
+    points
+}
+
+fn path_from_points(points: &[Point]) -> BezPath {
+    let mut path = BezPath::new();
+    let mut points = points.iter();
+    let first = points.next().expect("a plate needs at least one vertex");
+    path.move_to(*first);
+    for point in points {
+        path.line_to(*point);
     }
     path.close_path();
     path
+}
+
+/// Convex hull of `points` shifted both ways along `offset`.
+fn shifted_hull(points: &[Point], offset: Vec2) -> Vec<Point> {
+    let shifted = points
+        .iter()
+        .flat_map(|point| [*point - offset, *point + offset])
+        .collect();
+    convex_hull(shifted)
+}
+
+/// Outward normals and support offsets of the plate edges.
+pub(crate) fn plate_lines(points: &[Point]) -> Vec<(Vec2, f64)> {
+    let count = points.len();
+    assert!(count >= 3, "a plate needs at least three edges");
+    let mut center = Vec2::ZERO;
+    for point in points {
+        center += Vec2::new(point.x, point.y);
+    }
+    center /= count as f64;
+    let mut lines = Vec::with_capacity(count);
+    for index in 0..count {
+        let start = points[index];
+        let end = points[(index + 1) % count];
+        let edge = end - start;
+        let length = edge.length();
+        assert!(length > 0.0, "a plate edge needs a length");
+        let mut normal = Vec2::new(edge.y, -edge.x) / length;
+        let midpoint = Vec2::new((start.x + end.x) * 0.5, (start.y + end.y) * 0.5);
+        if normal.dot(midpoint - center) < 0.0 {
+            normal = -normal;
+        }
+        lines.push((normal, normal.dot(Vec2::new(start.x, start.y))));
+    }
+    lines
+}
+
+/// Convex hull of a point set, without its collinear vertices.
+fn convex_hull(mut points: Vec<Point>) -> Vec<Point> {
+    points.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.y.total_cmp(&b.y)));
+    points.dedup();
+    if points.len() <= 2 {
+        return points;
+    }
+    let mut hull = Vec::with_capacity(points.len() * 2);
+    for &point in points.iter() {
+        while hull.len() >= 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], point) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(point);
+    }
+    let lower_len = hull.len();
+    for &point in points.iter().rev().skip(1) {
+        while hull.len() > lower_len
+            && cross(hull[hull.len() - 2], hull[hull.len() - 1], point) <= 0.0
+        {
+            hull.pop();
+        }
+        hull.push(point);
+    }
+    hull.pop();
+    hull
+}
+
+fn cross(origin: Point, a: Point, b: Point) -> f64 {
+    (a.x - origin.x) * (b.y - origin.y) - (a.y - origin.y) * (b.x - origin.x)
 }
 
 fn smoothstep(value: f32) -> f32 {
@@ -1241,6 +1403,73 @@ mod tests {
             origin.y + plan.ink_bottom - bounds.height()
         );
         Ok(())
+    }
+
+    #[test]
+    fn cut_backdrop_keeps_its_plate_area() {
+        let bounds = Rect::new(0.0, 0.0, 420.0, 96.0);
+        let cut_size = 14.0;
+        for cut in [[false; 4], [true, false, true, false], [true; 4]] {
+            let points = backdrop_points(bounds, cut, cut_size);
+            let double_area: f64 = (0..points.len())
+                .map(|index| {
+                    let a = points[index];
+                    let b = points[(index + 1) % points.len()];
+                    a.x * b.y - b.x * a.y
+                })
+                .sum();
+            let corners = cut.iter().filter(|cut| **cut).count() as f64;
+            let expected = bounds.width() * bounds.height() - corners * cut_size * cut_size * 0.5;
+            assert!(
+                (double_area.abs() * 0.5 - expected).abs() < 1e-9,
+                "the cut plate outlines {} instead of {expected}",
+                double_area.abs() * 0.5
+            );
+        }
+    }
+
+    #[test]
+    fn diagonal_motion_ramps_every_plate_edge() {
+        let bounds = Rect::new(0.0, 0.0, 120.0, 30.0);
+        let points = backdrop_points(bounds, [false; 4], 0.0);
+        let motion = Vec2::new(9.0, 7.0);
+        let probes = [
+            Point::new(bounds.width() * 0.5, 1.0),
+            Point::new(bounds.width() * 0.5, bounds.height() - 1.0),
+            Point::new(1.0, bounds.height() * 0.5),
+            Point::new(bounds.width() - 1.0, bounds.height() * 0.5),
+        ];
+        for probe in probes {
+            let coverage = exposure_coverage(&points, motion, probe);
+            assert!(
+                coverage > 0.0 && coverage < 1.0,
+                "the diagonal sweep leaves {probe:?} at coverage {coverage}"
+            );
+        }
+        assert!((exposure_coverage(&points, motion, bounds.center()) - 1.0).abs() < 1e-9);
+    }
+
+    fn exposure_coverage(points: &[Point], motion: Vec2, point: Point) -> f64 {
+        assert!(motion.length() > 0.0, "coverage needs a sweep");
+        let mut low = -0.5f64;
+        let mut high = 0.5f64;
+        for &(normal, offset) in &plate_lines(points) {
+            let along = normal.dot(motion);
+            let reach = offset - normal.dot(Vec2::new(point.x, point.y));
+            if along.abs() < 1e-12 {
+                if reach < -1e-9 {
+                    return 0.0;
+                }
+                continue;
+            }
+            let crossing = reach / along;
+            if along > 0.0 {
+                high = high.min(crossing);
+            } else {
+                low = low.max(crossing);
+            }
+        }
+        (high - low).clamp(0.0, 1.0)
     }
 
     #[test]

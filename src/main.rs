@@ -177,6 +177,7 @@ impl App {
                 *view = View::fit(render.viewport());
                 view.set_ui_scale(render.window.scale_factor());
                 self.frames.resized(size.into(), Instant::now());
+                self.ui.set_plate_mask(Some(render.plate_mask_image()));
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 view.set_ui_scale(scale_factor);
@@ -393,10 +394,24 @@ impl App {
                 let foreground = frame.foreground;
                 let presentation = if let Some(profile) = &mut self.profile {
                     profile.present(before_draw, after_draw, changed, |completed| {
-                        render.present(frame.background, foreground, completed, overlay)
+                        render.present(
+                            frame.background,
+                            foreground,
+                            frame.plate_instances,
+                            frame.plate_ink,
+                            completed,
+                            overlay,
+                        )
                     })?
                 } else {
-                    render.present(frame.background, foreground, |_| {}, overlay)?
+                    render.present(
+                        frame.background,
+                        foreground,
+                        frame.plate_instances,
+                        frame.plate_ink,
+                        |_| {},
+                        overlay,
+                    )?
                 };
                 if matches!(presentation, render::Presentation::Unavailable) {
                     self.frames.surface_unavailable(Instant::now());
@@ -425,6 +440,8 @@ impl ApplicationHandler for App {
                 self.frames
                     .resized(window.render.window.inner_size().into(), now);
                 self.frames.occlusion_changed(Occlusion::Visible, now);
+                self.ui
+                    .set_plate_mask(Some(window.render.plate_mask_image()));
                 WindowState::Active(Box::new(window))
             }
             Err(error) => {
@@ -508,6 +525,7 @@ fn main() -> anyhow::Result<()> {
     let profile = profile::Run::from_args()?;
     let settings = Saved::<Config>::load(config::config_file()?)?;
     let mut ui = Ui::new(&settings)?;
+    ui.set_presentation(true);
     let (tx, rx) = std::sync::mpsc::channel();
     let _stream = if profile.is_some() {
         ui.set_preamp(PreampDb::try_from(0.0)?);
