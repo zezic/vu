@@ -24,15 +24,6 @@ impl Vec2 {
         )
     }
 
-    pub fn normalized(self) -> Self {
-        let length = self.length();
-        if length > 1e-6 {
-            self * (1.0 / length)
-        } else {
-            Self::new(0.0, 0.0)
-        }
-    }
-
     pub fn perpendicular(self) -> Self {
         Self::new(-self.y, self.x)
     }
@@ -76,29 +67,52 @@ impl Vec3 {
     }
 
     pub fn rotate_x(self, angle: f32) -> Self {
-        let (sin, cos) = angle.sin_cos();
-        Self::new(
-            self.x,
-            self.y * cos - self.z * sin,
-            self.y * sin + self.z * cos,
-        )
+        Rotation::new(angle).around_x(self)
     }
 
     pub fn rotate_y(self, angle: f32) -> Self {
-        let (sin, cos) = angle.sin_cos();
-        Self::new(
-            self.x * cos + self.z * sin,
-            self.y,
-            -self.x * sin + self.z * cos,
-        )
+        Rotation::new(angle).around_y(self)
     }
 
     pub fn rotate_z(self, angle: f32) -> Self {
+        Rotation::new(angle).around_z(self)
+    }
+}
+
+/// Trigonometric coefficients shared by points rotating through the same angle.
+#[derive(Clone, Copy)]
+struct Rotation {
+    sin: f32,
+    cos: f32,
+}
+
+impl Rotation {
+    fn new(angle: f32) -> Self {
         let (sin, cos) = angle.sin_cos();
-        Self::new(
-            self.x * cos - self.y * sin,
-            self.x * sin + self.y * cos,
-            self.z,
+        Self { sin, cos }
+    }
+
+    fn around_x(self, point: Vec3) -> Vec3 {
+        Vec3::new(
+            point.x,
+            point.y * self.cos - point.z * self.sin,
+            point.y * self.sin + point.z * self.cos,
+        )
+    }
+
+    fn around_y(self, point: Vec3) -> Vec3 {
+        Vec3::new(
+            point.x * self.cos + point.z * self.sin,
+            point.y,
+            -point.x * self.sin + point.z * self.cos,
+        )
+    }
+
+    fn around_z(self, point: Vec3) -> Vec3 {
+        Vec3::new(
+            point.x * self.cos - point.y * self.sin,
+            point.x * self.sin + point.y * self.cos,
+            point.z,
         )
     }
 }
@@ -286,11 +300,14 @@ impl Pose {
 
     /// Applies the model orientation and scale without projecting.
     pub fn orient(self, vertex: Vec3) -> Vec3 {
-        vertex
-            .rotate_y(self.yaw)
-            .rotate_x(self.pitch)
-            .rotate_z(self.roll)
-            * self.scale
+        self.orienter()(vertex)
+    }
+
+    fn orienter(self) -> impl Fn(Vec3) -> Vec3 {
+        let yaw = Rotation::new(self.yaw);
+        let pitch = Rotation::new(self.pitch);
+        let roll = Rotation::new(self.roll);
+        move |vertex| roll.around_z(pitch.around_x(yaw.around_y(vertex))) * self.scale
     }
 
     /// The view-space y component of the model's up axis. The camera maps
@@ -377,16 +394,21 @@ impl Camera {
         self.project_oriented(rotated, pose.distance, pose.shake, self.focal, 0.4)
     }
 
-    /// Projects a vertex after blending toward a POI-focused view. The target
-    /// and orbit are expressed in model space and blended by `focus.blend`.
-    pub fn project_focused(self, vertex: Vec3, pose: Pose, focus: FocusProjection) -> Projected {
-        let posed = pose.orient(vertex);
-        let target = pose.orient(focus.target) * focus.blend;
-        let relative = posed - target;
-        let rotated = relative
-            .rotate_y(focus.rotation_yaw)
-            .rotate_x(focus.rotation_pitch);
-        self.project_oriented(rotated, focus.distance, pose.shake, focus.focal, focus.near)
+    /// Prepares the shared rotations and focus target for all model vertices.
+    pub fn focused_projector(
+        self,
+        pose: Pose,
+        focus: FocusProjection,
+    ) -> impl Fn(Vec3) -> Projected {
+        let orient = pose.orienter();
+        let target = orient(focus.target) * focus.blend;
+        let yaw = Rotation::new(focus.rotation_yaw);
+        let pitch = Rotation::new(focus.rotation_pitch);
+        move |vertex| {
+            let relative = orient(vertex) - target;
+            let rotated = pitch.around_x(yaw.around_y(relative));
+            self.project_oriented(rotated, focus.distance, pose.shake, focus.focal, focus.near)
+        }
     }
 
     fn project_oriented(
@@ -563,7 +585,7 @@ mod tests {
             near: 0.4,
             blend: 1.0,
         };
-        let projected = camera.project_focused(target, pose, focus);
+        let projected = camera.focused_projector(pose, focus)(target);
         assert!((projected.screen.x - camera.center.x).abs() < 1e-4);
         assert!((projected.screen.y - camera.center.y).abs() < 1e-4);
     }
@@ -583,7 +605,7 @@ mod tests {
             blend: 0.0,
         };
         let normal = camera.project(vertex, pose);
-        let focused = camera.project_focused(vertex, pose, focus);
+        let focused = camera.focused_projector(pose, focus)(vertex);
         assert!((normal.screen - focused.screen).length() < 1e-4);
         assert!((normal.depth - focused.depth).abs() < 1e-4);
     }
@@ -601,9 +623,9 @@ mod tests {
             near: 0.005,
             blend: 1.0,
         };
-        let behind = camera.project_focused(Vec3::new(0.0, 0.0, -1.0), pose, focus);
+        let behind = camera.focused_projector(pose, focus)(Vec3::new(0.0, 0.0, -1.0));
         assert!(!behind.visible);
-        let in_front = camera.project_focused(Vec3::new(0.0, 0.0, 0.02), pose, focus);
+        let in_front = camera.focused_projector(pose, focus)(Vec3::new(0.0, 0.0, 0.02));
         assert!(in_front.visible);
         assert!(
             in_front.depth < 0.4,

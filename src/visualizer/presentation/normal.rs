@@ -11,6 +11,7 @@ use vello::{
 };
 
 use crate::{
+    render::RasterAsset,
     text::{BlockAlign, Fonts, UiFace},
     weapon::{RealWorld, Weapon},
 };
@@ -225,7 +226,7 @@ struct AmmoTally {
 struct AmmoStrokes {
     accent: Color,
     muted: Color,
-    scene: Scene,
+    asset: RasterAsset,
 }
 
 impl Default for NormalScene {
@@ -566,6 +567,7 @@ impl NormalScene {
     pub fn draw(
         &mut self,
         scene: &mut Scene,
+        raster_assets: &mut Vec<RasterAsset>,
         stage: &Stage,
         palette: ScenePalette,
         alpha: f32,
@@ -576,7 +578,7 @@ impl NormalScene {
         }
         if !self.ammo_suppressed {
             if let Some(ammo) = &mut self.ammo {
-                draw_ammo(scene, stage, palette, ammo, alpha);
+                draw_ammo(scene, raster_assets, stage, palette, ammo, alpha);
             }
         }
     }
@@ -849,6 +851,7 @@ fn build_ammo(
 
 fn draw_ammo(
     scene: &mut Scene,
+    raster_assets: &mut Vec<RasterAsset>,
     stage: &Stage,
     palette: ScenePalette,
     ammo: &mut AmmoTally,
@@ -867,15 +870,8 @@ fn draw_ammo(
     let muted = palette.muted.with_alpha(0.55 * alpha);
     let cached = match ammo.strokes.take() {
         Some(cached) if cached.accent == accent && cached.muted == muted => cached,
-        previous => {
-            let mut cached = previous.unwrap_or_else(|| AmmoStrokes {
-                accent,
-                muted,
-                scene: Scene::new(),
-            });
-            cached.accent = accent;
-            cached.muted = muted;
-            cached.scene.reset();
+        _ => {
+            let mut strokes = Scene::new();
             let line_width = (ammo.cell * 0.06).max(0.6);
             let scale = ammo.cell * 0.82;
             for index in 0..ammo.capacity as usize {
@@ -895,7 +891,7 @@ fn draw_ammo(
                         center.x + f64::from(line[2]) * scale,
                         center.y + f64::from(line[3]) * scale,
                     );
-                    cached.scene.stroke(
+                    strokes.stroke(
                         &vello::kurbo::Stroke::new(line_width),
                         Affine::IDENTITY,
                         color,
@@ -904,10 +900,14 @@ fn draw_ammo(
                     );
                 }
             }
-            cached
+            AmmoStrokes {
+                accent,
+                muted,
+                asset: RasterAsset::new(&strokes, ammo.grid.inflate(1.0, 1.0)),
+            }
         }
     };
-    scene.append(&cached.scene, None);
+    cached.asset.draw(scene, raster_assets, Affine::IDENTITY);
     ammo.strokes = Some(cached);
 }
 
@@ -1176,7 +1176,7 @@ mod tests {
     use vello::kurbo::Size;
 
     #[test]
-    fn cached_ammunition_matches_fresh_draws_after_ink_changes() {
+    fn ammunition_raster_reuses_its_source_until_ink_changes() {
         let fixture = || AmmoTally {
             capacity: 2,
             icon: vec![[-0.5, -0.5, 0.5, 0.5], [-0.5, 0.5, 0.5, -0.5]],
@@ -1210,6 +1210,8 @@ mod tests {
             ..muted
         };
         let mut cached = fixture();
+        let mut previous = None;
+        let mut previous_ink = None;
         for (palette, alpha) in [
             (initial, 1.0),
             (initial, 1.0),
@@ -1218,13 +1220,22 @@ mod tests {
             (accent, 0.55),
         ] {
             let mut actual = Scene::new();
-            draw_ammo(&mut actual, &stage, palette, &mut cached, alpha);
-            let mut fresh = Scene::new();
-            draw_ammo(&mut fresh, &stage, palette, &mut fixture(), alpha);
-            assert!(!actual.encoding().draw_data.is_empty());
-            assert_eq!(actual.encoding().draw_data, fresh.encoding().draw_data);
-            assert!(actual.encoding().path_tags == fresh.encoding().path_tags);
-            assert_eq!(actual.encoding().path_data, fresh.encoding().path_data);
+            let mut requests = Vec::new();
+            draw_ammo(
+                &mut actual,
+                &mut requests,
+                &stage,
+                palette,
+                &mut cached,
+                alpha,
+            );
+            assert_eq!(requests.len(), 1);
+            let ink = (palette.accent, palette.muted, alpha);
+            if let Some(previous) = previous {
+                assert_eq!(requests[0] == previous, previous_ink == Some(ink));
+            }
+            previous = requests.pop();
+            previous_ink = Some(ink);
         }
     }
 

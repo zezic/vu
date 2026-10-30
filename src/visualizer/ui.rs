@@ -11,7 +11,7 @@ use crate::{
     audio::AudioCursor,
     config::{Config, PreampDb, PresentationOpacity, ShutterFrames, VisualizerTextScale},
     frame_schedule::{FrameRateLimit, FrameTime},
-    render::{Frame, PlateInstance, PlateMaskImage},
+    render::{Frame, PlateInstance, PlateMaskImage, RasterAsset},
     text::{Fonts, Text, UiFace},
     theme::{Theme, ThemeColors, ThemeId},
     AudioEvent,
@@ -1632,10 +1632,12 @@ impl Ui {
                 );
             }
         }
+        let mut raster_assets = Vec::new();
         if presentation_active {
             if let Some(stage) = self.presentation.stage() {
                 self.presentation.draw(
                     scene,
+                    &mut raster_assets,
                     &stage,
                     self.presentation.colors(),
                     self.plate_mask.as_ref(),
@@ -1672,6 +1674,7 @@ impl Ui {
             overlay_opacity,
             plate_instances: self.presentation.plate_instances(),
             plate_ink: self.presentation.colors().ink,
+            raster_assets,
         }
     }
 }
@@ -1679,6 +1682,8 @@ impl Ui {
 /// One retained background and its animated foreground overlay.
 pub struct UiFrame<'a> {
     pub background: Frame<'a>,
+    /// Retained vector sources referenced by the foreground scene.
+    pub raster_assets: Vec<RasterAsset>,
     pub overlay: VisualizerFrame<'a>,
     /// Whether the foreground scene carries anything to rasterize.
     pub foreground: bool,
@@ -1695,6 +1700,7 @@ pub struct UiFrame<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::RasterAssetCache;
     use crate::visualizer::{
         Contribution, EnvelopeTarget, Input, MixPoint, StyleInput, TreeTarget,
     };
@@ -1804,6 +1810,8 @@ mod tests {
             last = Some(ui.draw(&mut scene, view, FrameRateLimit::Fps120, frame_time));
         }
         let frame = last.expect("the presentation produced a frame");
+        let mut raster_assets = RasterAssetCache::new();
+        raster_assets.prepare(&mut renderer, device, &frame.raster_assets)?;
         let background_scene = match frame.background {
             Frame::Rebuilt(scene) | Frame::Retained(scene) | Frame::Unchanged(scene) => scene,
         };

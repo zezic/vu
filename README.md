@@ -639,3 +639,8 @@ renderer as a library. Feed borrowed output samples to `Ui::consume_buf` to driv
 the interactive application, or drive `Visualizer` directly with `consume_buf`
 and `update` for a custom host. `visualizer::Renderer` composites the retained
 HUD background and the model wireframe.
+
+Custom Vello hosts rendering the scene from `Ui::draw` must also retain a
+`render::RasterAssetCache` alongside their Vello renderer. Before rendering each
+frame, call `cache.prepare(&mut renderer, device, &frame.raster_assets)` to realize
+its retained subscenes. `RenderWindow::present` performs this step automatically.

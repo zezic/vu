@@ -1346,10 +1346,9 @@ impl DiagnosisMode {
 }
 
 struct Diagnosis {
-    active: bool,
     /// The inspector tree owns the left side while a property is selected.
     suppressed: bool,
-    vertex: usize,
+    vertex: Option<TrackedVertex>,
     mode: DiagnosisMode,
     next_in: f32,
     remaining: f32,
@@ -1364,9 +1363,8 @@ struct Diagnosis {
 impl Diagnosis {
     fn new() -> Self {
         Self {
-            active: false,
             suppressed: false,
-            vertex: 0,
+            vertex: None,
             mode: DiagnosisMode::Position,
             next_in: 2.5,
             remaining: 0.0,
@@ -1380,7 +1378,7 @@ impl Diagnosis {
     }
 
     fn reset(&mut self) {
-        self.active = false;
+        self.vertex = None;
         self.readout = None;
         self.next_in = 2.0;
         self.revision += 1;
@@ -2801,6 +2799,7 @@ impl Visualizer {
         if let Models::Ready(models) = &self.models {
             if self.scene.current.is_some() {
                 self.scene.set_wireframe(models.current(), crease);
+                self.diagnosis.reset();
             }
         }
     }
@@ -2846,8 +2845,9 @@ impl Visualizer {
 
     pub fn diagnosis_anchor(&self) -> Option<[f32; 2]> {
         self.diagnosis
-            .active
-            .then_some([self.diagnosis.anchor.x, self.diagnosis.anchor.y])
+            .vertex
+            .as_ref()
+            .map(|_| [self.diagnosis.anchor.x, self.diagnosis.anchor.y])
     }
 
     fn property_values(&self) -> [f32; Property::COUNT] {
@@ -3134,7 +3134,7 @@ impl Visualizer {
         self.model_lines.clear();
         self.model_ribbons.clear();
         if self.scene.current.is_none() {
-            self.diagnosis.active = false;
+            self.diagnosis.vertex = None;
             self.diagnosis.readout = None;
             self.record_debug_sample();
             return;
@@ -3170,18 +3170,18 @@ impl Visualizer {
         );
         self.record_debug_sample();
         let ui_scale = ui_scale.max(0.25);
-        self.update_diagnosis(dt, viewport, self.palette, ui_scale);
+        self.update_diagnosis(dt, viewport, self.palette, ui_scale, showcase.slide_offset);
         self.append_diagnosis(viewport, ui_scale);
     }
 
     fn diagnosis_target(&self, viewport: (f32, f32), ui_scale: f32) -> Vec2 {
         let vertex = self
-            .scene
-            .current
+            .diagnosis
+            .vertex
             .as_ref()
-            .and_then(|model| model.vertex_diagnosis(self.diagnosis.vertex))
-            .map(|data| data.screen)
-            .unwrap_or(Vec2::new(viewport.0 * 0.5, viewport.1 * 0.5));
+            .map_or(Vec2::new(viewport.0 * 0.5, viewport.1 * 0.5), |vertex| {
+                vertex.data.screen
+            });
         let center = Vec2::new(viewport.0 * 0.5, viewport.1 * 0.5);
         let side = if vertex.x < center.x { 1.0 } else { -1.0 };
         let target = Vec2::new(
@@ -3199,7 +3199,7 @@ impl Visualizer {
         )
     }
 
-    fn activate_diagnosis(&mut self, viewport: (f32, f32), ui_scale: f32) {
+    fn activate_diagnosis(&mut self, viewport: (f32, f32), ui_scale: f32, slide_offset: Vec3) {
         let Some(current) = self.scene.current.as_ref() else {
             return;
         };
@@ -3207,8 +3207,11 @@ impl Visualizer {
         if count == 0 {
             return;
         }
-        self.diagnosis.active = true;
-        self.diagnosis.vertex = self.rng.range(count);
+        self.diagnosis.vertex = Some(TrackedVertex::new(
+            self.rng.range(count),
+            current,
+            slide_offset,
+        ));
         self.diagnosis.mode = DiagnosisMode::random(&mut self.rng);
         self.diagnosis.remaining = 2.5 + self.rng.unit() * 3.0;
         self.diagnosis.mode_timer = 0.0;
@@ -3219,17 +3222,24 @@ impl Visualizer {
         self.diagnosis.revision += 1;
     }
 
-    fn update_diagnosis(&mut self, dt: f32, viewport: (f32, f32), palette: Palette, ui_scale: f32) {
-        if !self.diagnosis.active {
+    fn update_diagnosis(
+        &mut self,
+        dt: f32,
+        viewport: (f32, f32),
+        palette: Palette,
+        ui_scale: f32,
+        slide_offset: Vec3,
+    ) {
+        if self.diagnosis.vertex.is_none() {
             self.diagnosis.next_in -= dt;
             if self.diagnosis.next_in <= 0.0 {
-                self.activate_diagnosis(viewport, ui_scale);
+                self.activate_diagnosis(viewport, ui_scale, slide_offset);
             }
             return;
         }
         self.diagnosis.remaining -= dt;
         if self.diagnosis.remaining <= 0.0 {
-            self.diagnosis.active = false;
+            self.diagnosis.vertex = None;
             self.diagnosis.readout = None;
             self.diagnosis.revision += 1;
             self.diagnosis.next_in = 3.0 + self.rng.unit() * 5.0;
@@ -3241,7 +3251,11 @@ impl Visualizer {
         let scene = current.name();
         if scene != self.diagnosis.scene {
             self.diagnosis.scene = scene.to_owned();
-            self.diagnosis.vertex = self.rng.range(current.vertices.len().max(1));
+            self.diagnosis.vertex = Some(TrackedVertex::new(
+                self.rng.range(current.vertices.len()),
+                current,
+                slide_offset,
+            ));
             self.diagnosis.mode = DiagnosisMode::random(&mut self.rng);
             self.diagnosis.mode_timer = 0.0;
             self.diagnosis.refresh_timer = 0.1;
@@ -3250,9 +3264,11 @@ impl Visualizer {
             self.diagnosis.readout = None;
             self.diagnosis.revision += 1;
         }
-        if self.diagnosis.vertex >= current.vertices.len() {
-            self.diagnosis.vertex = current.vertices.len().saturating_sub(1);
-        }
+        self.diagnosis
+            .vertex
+            .as_mut()
+            .expect("an active diagnosis tracks a vertex")
+            .advance(current, slide_offset, dt);
         self.diagnosis.mode_timer += dt;
         if self.diagnosis.mode_timer >= 1.8 {
             self.diagnosis.mode_timer = 0.0;
@@ -3266,30 +3282,29 @@ impl Visualizer {
         self.diagnosis.refresh_timer += dt;
         if self.diagnosis.refresh_timer >= 0.1 {
             self.diagnosis.refresh_timer = 0.0;
-            if let Some(data) = current.vertex_diagnosis(self.diagnosis.vertex) {
-                let color = palette.vivid(self.diagnosis.vertex + self.diagnosis.mode.index() * 4);
-                self.diagnosis.revision += 1;
-                self.diagnosis.readout = Some(DiagnosisReadout {
-                    revision: self.diagnosis.revision,
-                    text: self.diagnosis.mode.format(data),
-                    color,
-                });
-            }
+            let vertex = self
+                .diagnosis
+                .vertex
+                .as_ref()
+                .expect("an active diagnosis tracks a vertex");
+            let color = palette.vivid(vertex.index + self.diagnosis.mode.index() * 4);
+            self.diagnosis.revision += 1;
+            self.diagnosis.readout = Some(DiagnosisReadout {
+                revision: self.diagnosis.revision,
+                text: self.diagnosis.mode.format(vertex.data),
+                color,
+            });
         }
     }
 
     fn append_diagnosis(&mut self, viewport: (f32, f32), ui_scale: f32) {
-        if !self.diagnosis.active || self.diagnosis.suppressed {
+        if self.diagnosis.suppressed {
             return;
         }
-        let Some(data) = self
-            .scene
-            .current
-            .as_ref()
-            .and_then(|model| model.vertex_diagnosis(self.diagnosis.vertex))
-        else {
+        let Some(vertex) = &self.diagnosis.vertex else {
             return;
         };
+        let data = vertex.data;
         let Some(readout) = &self.diagnosis.readout else {
             return;
         };
@@ -3843,10 +3858,6 @@ struct ModelRuntime {
     slide_vertices: Vec<bool>,
     history: VecDeque<PoseSnapshot>,
     vertices: Vec<Projected>,
-    world_vertices: Vec<Vec3>,
-    previous_screen: Vec<Vec2>,
-    velocity: Vec<Vec2>,
-    acceleration: Vec<Vec2>,
     current: Vec<LineGeometry>,
 }
 
@@ -3881,6 +3892,50 @@ struct VertexDiagnosis {
     world: Vec3,
     velocity: Vec2,
     acceleration: Vec2,
+}
+
+/// Motion is sampled only for the vertex whose diagnosis is active.
+struct TrackedVertex {
+    index: usize,
+    data: VertexDiagnosis,
+}
+
+impl TrackedVertex {
+    fn new(index: usize, model: &ModelRuntime, slide_offset: Vec3) -> Self {
+        Self {
+            index,
+            data: VertexDiagnosis {
+                screen: model.vertices[index].screen,
+                world: model.world_vertex(index, slide_offset),
+                velocity: Vec2::default(),
+                acceleration: Vec2::default(),
+            },
+        }
+    }
+
+    fn advance(&mut self, model: &ModelRuntime, slide_offset: Vec3, dt: f32) {
+        self.sample(
+            model.vertices[self.index].screen,
+            model.world_vertex(self.index, slide_offset),
+            dt,
+        );
+    }
+
+    fn sample(&mut self, screen: Vec2, world: Vec3, dt: f32) {
+        let (velocity, acceleration) = if dt > 1e-4 {
+            let velocity = (screen - self.data.screen) * (1.0 / dt);
+            let acceleration = (velocity - self.data.velocity) * (1.0 / dt);
+            (velocity, acceleration)
+        } else {
+            (self.data.velocity, Vec2::default())
+        };
+        let blend = 1.0 - (-dt * 10.0).exp();
+        self.data.velocity = self.data.velocity + (velocity - self.data.velocity) * blend;
+        self.data.acceleration =
+            self.data.acceleration + (acceleration - self.data.acceleration) * blend;
+        self.data.screen = screen;
+        self.data.world = world;
+    }
 }
 
 /// Interpolates two positive values in log space. A blend outside `[0, 1]`
@@ -3956,10 +4011,6 @@ impl ModelRuntime {
             slide_vertices,
             history: VecDeque::with_capacity(MAX_HISTORY),
             vertices: Vec::with_capacity(vertex_capacity),
-            world_vertices: Vec::with_capacity(vertex_capacity),
-            previous_screen: Vec::with_capacity(vertex_capacity),
-            velocity: Vec::with_capacity(vertex_capacity),
-            acceleration: Vec::with_capacity(vertex_capacity),
             current: Vec::with_capacity(edge_capacity),
         }
     }
@@ -3984,10 +4035,6 @@ impl ModelRuntime {
         self.history.clear();
         self.current.clear();
         self.vertices.clear();
-        self.world_vertices.clear();
-        self.previous_screen.clear();
-        self.velocity.clear();
-        self.acceleration.clear();
     }
 
     fn reset_temporal(&mut self) {
@@ -4086,7 +4133,6 @@ impl ModelRuntime {
         self.pose.scale =
             self.frozen_scale + (target_scale - self.frozen_scale) * model_motion.abs();
         self.line_energy = gates.drive(Property::Line, mixer.value(MixPoint::Line, &context));
-        self.world_vertices.clear();
         self.vertices.clear();
         // A flip is a discrete spring transition, not a continuous motion. It
         // keeps its full spring action across the motion fade so entering POI
@@ -4175,19 +4221,11 @@ impl ModelRuntime {
             near: view_near,
             blend,
         };
-        for index in 0..self.wireframe.vertex_count() {
-            let mut world = self.wireframe.vertex(index);
-            if self.slide_vertices[index] {
-                world = world + showcase.slide_offset;
-            }
-            self.world_vertices.push(world);
-            self.vertices.push(if blend != 0.0 {
-                camera.project_focused(world, pose, focus)
-            } else {
-                camera.project(world, pose)
-            });
+        if blend != 0.0 {
+            self.project_vertices(showcase.slide_offset, camera.focused_projector(pose, focus));
+        } else {
+            self.project_vertices(showcase.slide_offset, |world| camera.project(world, pose));
         }
-        self.update_kinematics(dt);
         // Models are fitted to a unit radius, so `pose.scale` is the model
         // radius in view space. Keep the depth planes on that fitted sphere
         // instead of following the silhouette of the current pose.
@@ -4310,43 +4348,20 @@ impl ModelRuntime {
         }
     }
 
-    fn update_kinematics(&mut self, dt: f32) {
-        let count = self.vertices.len();
-        self.previous_screen.resize(
-            count,
+    fn project_vertices(&mut self, slide_offset: Vec3, project: impl Fn(Vec3) -> Projected) {
+        for index in 0..self.wireframe.vertex_count() {
             self.vertices
-                .first()
-                .map_or(Vec2::new(0.0, 0.0), |v| v.screen),
-        );
-        self.velocity.resize(count, Vec2::new(0.0, 0.0));
-        self.acceleration.resize(count, Vec2::new(0.0, 0.0));
-        let blend = 1.0 - (-dt * 10.0).exp();
-        for index in 0..count {
-            let current = self.vertices[index].screen;
-            let previous = self.previous_screen[index];
-            let old_velocity = self.velocity[index];
-            let old_acceleration = self.acceleration[index];
-            let (raw_velocity, raw_acceleration) = if dt > 1e-4 {
-                let velocity = (current - previous) * (1.0 / dt);
-                let acceleration = (velocity - old_velocity) * (1.0 / dt);
-                (velocity, acceleration)
-            } else {
-                (old_velocity, Vec2::new(0.0, 0.0))
-            };
-            self.velocity[index] = old_velocity + (raw_velocity - old_velocity) * blend;
-            self.acceleration[index] =
-                old_acceleration + (raw_acceleration - old_acceleration) * blend;
-            self.previous_screen[index] = current;
+                .push(project(self.world_vertex(index, slide_offset)));
         }
     }
 
-    fn vertex_diagnosis(&self, index: usize) -> Option<VertexDiagnosis> {
-        Some(VertexDiagnosis {
-            screen: self.vertices.get(index)?.screen,
-            world: *self.world_vertices.get(index)?,
-            velocity: *self.velocity.get(index)?,
-            acceleration: *self.acceleration.get(index)?,
-        })
+    fn world_vertex(&self, index: usize, slide_offset: Vec3) -> Vec3 {
+        let vertex = self.wireframe.vertex(index);
+        if self.slide_vertices[index] {
+            vertex + slide_offset
+        } else {
+            vertex
+        }
     }
 
     /// The two recorded poses spanning one shutter exposure. The middle pose is
@@ -4412,6 +4427,7 @@ enum SampledPose<'a> {
 }
 
 impl SampledPose<'_> {
+    #[inline]
     fn line(&self, index: usize) -> LineGeometry {
         match self {
             Self::Recorded(lines) => lines[index],
@@ -4478,10 +4494,14 @@ fn push_sweep(
     screen: ScreenBounds,
     out: &mut Vec<RibbonInstance>,
 ) {
+    let half = (ink.width * 0.5).max(0.5);
     let middle = lerp_line(first, last, 0.5);
-    let movement = (last.start - first.start)
-        .length()
-        .max((last.end - first.end).length());
+    let start_motion = last.start - first.start;
+    let end_motion = last.end - first.end;
+    let movement = start_motion
+        .dot(start_motion)
+        .max(end_motion.dot(end_motion))
+        .sqrt();
     // A fast edge spreads the same ink over more pixels, so its peak opacity
     // is lower. Even a motionless edge keeps the central body.
     let peak = ink.alpha * motion_fade.factor(movement, ink.width);
@@ -4498,18 +4518,18 @@ fn push_sweep(
         peak * middle.end_depth_opacity,
     ];
     let peak_x_alpha = peak * (middle.start_depth_opacity + middle.end_depth_opacity) * 0.5;
-    let half = (ink.width * 0.5).max(0.5);
-    let direction = (middle.end - middle.start).normalized();
-    let normal = if direction.length() > 0.0 {
-        direction.perpendicular()
+    let direction = middle.end - middle.start;
+    let length_squared = direction.dot(direction);
+    let normal = if length_squared > 1e-12 {
+        direction.perpendicular() * (1.0 / length_squared.sqrt())
     } else {
         Vec2::new(0.0, 1.0)
     };
     // A wing spans from a pose to the body edge, so both poses must clear the
     // body before either wing is visible. Only displacement across the stroke
     // changes that distance; movement along the stroke never clears it.
-    let start_reach = 0.5 * (last.start - first.start).dot(normal).abs();
-    let end_reach = 0.5 * (last.end - first.end).dot(normal).abs();
+    let start_reach = 0.5 * start_motion.dot(normal).abs();
+    let end_reach = 0.5 * end_motion.dot(normal).abs();
     let wings_clear = start_reach.min(end_reach) > half;
 
     // A crossing smaller than the stroke itself is not a meaningful
@@ -4588,7 +4608,7 @@ fn push_sweep(
 
     let mut normal = normal;
     // Point the body normal from the first pose toward the last pose.
-    let motion = ((last.start - first.start) + (last.end - first.end)) * 0.5;
+    let motion = (start_motion + end_motion) * 0.5;
     if normal.dot(motion) < 0.0 {
         normal = normal * -1.0;
     }
@@ -6368,6 +6388,31 @@ mod tests {
     }
 
     #[test]
+    fn diagnosis_tracks_constant_motion_and_resets_when_the_vertex_changes() {
+        let mut model = test_runtime();
+        step_runtime(&mut model, &test_showcase_frame(0.0, false, 0.0));
+        let mut vertex = TrackedVertex::new(0, &model, Vec3::default());
+        let origin = model.vertices[0].screen;
+        let velocity = Vec2::new(80.0, -35.0);
+        let dt = 1.0 / 60.0;
+        for step in 1..=300 {
+            model.vertices[0].screen = origin + velocity * (step as f32 * dt);
+            vertex.advance(&model, Vec3::default(), dt);
+        }
+        assert!((vertex.data.velocity - velocity).length() < 0.01);
+        assert!(vertex.data.acceleration.length() < 0.1);
+        assert_eq!(vertex.data.screen, model.vertices[0].screen);
+        assert_eq!(vertex.data.world, model.wireframe.vertex(0));
+
+        model.slide_vertices[1] = true;
+        let slide = Vec3::new(0.1, 0.0, 0.0);
+        let selected = TrackedVertex::new(1, &model, slide);
+        assert_eq!(selected.data.velocity, Vec2::default());
+        assert_eq!(selected.data.acceleration, Vec2::default());
+        assert_eq!(selected.data.world, model.wireframe.vertex(1) + slide);
+    }
+
+    #[test]
     fn diagnosis_appears_on_a_vertex_and_follows_it_lazily() {
         let mut visualizer = loaded_visualizer();
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
@@ -6401,7 +6446,15 @@ mod tests {
                     .max_by(|(_, a), (_, b)| a.screen.y.total_cmp(&b.screen.y))
                     .map(|(index, _)| index)
                     .expect("the cube has vertices");
-                visualizer.diagnosis.vertex = vertex;
+                visualizer.diagnosis.vertex = Some(TrackedVertex::new(
+                    vertex,
+                    visualizer
+                        .scene
+                        .current
+                        .as_ref()
+                        .expect("the model is loaded"),
+                    visualizer.showcase.frame().slide_offset,
+                ));
                 visualizer.diagnosis.anchor = visualizer.diagnosis_target((1280.0, 440.0), 1.0);
                 visualizer.diagnosis.refresh_timer = 0.0;
             }

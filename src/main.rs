@@ -397,6 +397,7 @@ impl App {
                         render.present(
                             frame.background,
                             foreground,
+                            &frame.raster_assets,
                             frame.plate_instances,
                             frame.plate_ink,
                             completed,
@@ -407,6 +408,7 @@ impl App {
                     render.present(
                         frame.background,
                         foreground,
+                        &frame.raster_assets,
                         frame.plate_instances,
                         frame.plate_ink,
                         |_| {},

@@ -1,3 +1,7 @@
+mod raster_asset;
+
+pub use raster_asset::{RasterAsset, RasterAssetCache};
+
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
@@ -313,37 +317,18 @@ impl BackgroundCache {
             let source = match background {
                 Frame::Rebuilt(scene) | Frame::Retained(scene) | Frame::Unchanged(scene) => scene,
             };
-            let texture = device.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Cached background"),
-                size: wgpu::Extent3d {
-                    width: params.width,
-                    height: params.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            renderer.render_to_texture(
-                &device.device,
-                &device.queue,
-                source,
-                &texture.create_view(&wgpu::TextureViewDescriptor::default()),
-                params,
-            )?;
+            let texture = raster_asset::rasterize_scene(renderer, device, source, params)?;
             self.invalidate(renderer);
             self.image = Some(renderer.register_texture(texture));
         }
+        let image = self
+            .image
+            .as_ref()
+            .expect("the background has been rasterized");
+        // Solid-only renders can replace Vello's image atlas between uses.
+        renderer.mark_override_image_dirty(image);
         self.composite.reset();
-        self.composite.draw_image(
-            self.image
-                .as_ref()
-                .expect("the background has been rasterized"),
-            Affine::IDENTITY,
-        );
+        self.composite.draw_image(image, Affine::IDENTITY);
         Ok(&self.composite)
     }
 
@@ -400,6 +385,7 @@ pub struct RenderWindow {
     pub window: Arc<Window>,
     pub scene: Scene,
     background: BackgroundCache,
+    raster_assets: RasterAssetCache,
     foreground: Option<ForegroundCache>,
     plate_mask: PlateMask,
     target: TargetState,
@@ -470,6 +456,7 @@ impl RenderWindow {
             window,
             scene: Scene::new(),
             background: BackgroundCache::new(),
+            raster_assets: RasterAssetCache::new(),
             foreground: None,
             plate_mask,
             target: TargetState::Dirty,
@@ -515,6 +502,7 @@ impl RenderWindow {
         &mut self,
         background: Frame<'_>,
         foreground: bool,
+        raster_assets: &[RasterAsset],
         plates: &[PlateInstance],
         plate_ink: Color,
         mut completed: impl FnMut(Stage),
@@ -556,6 +544,8 @@ impl RenderWindow {
         completed(Stage::Acquire);
         self.update_plate_mask(plates, plate_ink);
         let device = &self.context.devices[self.surface.dev_id];
+        self.raster_assets
+            .prepare(&mut self.renderer, device, raster_assets)?;
         let params = RenderParams {
             base_color: Color::TRANSPARENT,
             width: self.surface.config.width,

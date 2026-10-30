@@ -17,7 +17,12 @@ pub use stage::Stage;
 
 use vello::{kurbo::Point, Scene};
 
-use crate::{render::PlateMaskImage, text::Fonts, theme::ThemeColors, visualizer::Palette};
+use crate::{
+    render::{PlateMaskImage, RasterAsset},
+    text::Fonts,
+    theme::ThemeColors,
+    visualizer::Palette,
+};
 
 use super::{showcase::ShowcaseMode, Rng, TriggerCounts, Visualizer};
 
@@ -253,6 +258,7 @@ impl Presentation {
     pub fn draw(
         &mut self,
         scene: &mut Scene,
+        raster_assets: &mut Vec<RasterAsset>,
         stage: &Stage,
         palette: ScenePalette,
         plate_mask: Option<&PlateMaskImage>,
@@ -261,8 +267,14 @@ impl Presentation {
             return;
         }
         let normal_alpha = if self.poi_mode { 0.55 } else { 1.0 };
-        self.normal
-            .draw(scene, stage, palette, normal_alpha, self.time);
+        self.normal.draw(
+            scene,
+            raster_assets,
+            stage,
+            palette,
+            normal_alpha,
+            self.time,
+        );
         self.selector.draw(scene, stage, palette);
         self.poi
             .draw(scene, stage, palette, self.focus_blend, plate_mask);
