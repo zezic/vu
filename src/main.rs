@@ -1,7 +1,7 @@
 use std::{sync::mpsc::Receiver, time::Instant};
 
 use audio::capture_stream;
-use config::{Config, PreampDb, PreampStep};
+use config::{Config, CursorVisibility, PreampDb, PreampStep};
 use frame_schedule::{
     Adjustment, FrameKind, FrameSchedule, FrameTime, Occlusion, RedrawPermit, SurfaceArea,
 };
@@ -13,10 +13,10 @@ use winit::{
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
-    window::WindowId,
+    window::{Fullscreen, WindowId},
 };
 
-use visualizer::{Ui, View};
+use visualizer::{ControlAction, Dial, Ui, View};
 use vu::{audio, config, frame_schedule, profile, render, visualizer, AudioEvent};
 mod saved;
 
@@ -58,6 +58,7 @@ enum Setting {
     NearOpacity,
     CreaseThreshold,
     LineWidth,
+    Zoom,
     MotionOpacity,
     MotionFadePower,
 }
@@ -90,10 +91,7 @@ impl App {
                 settings.shutter_frames = settings.shutter_frames.adjusted(adjustment);
                 self.ui.set_shutter(settings.shutter_frames);
             }
-            Setting::Theme => {
-                settings.theme = settings.theme.adjusted(adjustment);
-                self.ui.set_theme(settings.theme);
-            }
+            Setting::Theme => self.ui.navigate_theme(adjustment),
             Setting::PresentationOpacity => {
                 settings.presentation_opacity = settings.presentation_opacity.adjusted(adjustment);
                 self.ui
@@ -138,6 +136,13 @@ impl App {
                 settings.crease_threshold = settings.crease_threshold.adjusted(adjustment);
                 self.ui.set_crease_threshold(settings.crease_threshold);
             }
+            Setting::Zoom => {
+                settings.zoom = settings.zoom.adjusted(adjustment);
+                let WindowState::Active(window) = &mut self.state else {
+                    unreachable!("zoom requires an active window");
+                };
+                window.view.set_zoom(settings.zoom);
+            }
             Setting::LineWidth => {
                 settings.line_width = settings.line_width.adjusted(adjustment);
                 self.ui.set_line_width(settings.line_width);
@@ -150,6 +155,94 @@ impl App {
                 settings.motion_fade_power = settings.motion_fade_power.adjusted(adjustment);
                 self.ui.set_motion_fade_power(settings.motion_fade_power);
             }
+        }
+    }
+
+    fn set_fullscreen(&mut self, fullscreen: bool) {
+        self.ui.reset_presentation_clicks();
+        let WindowState::Active(window) = &self.state else {
+            unreachable!("fullscreen requires an active window");
+        };
+        window
+            .render
+            .window
+            .set_fullscreen(fullscreen.then_some(Fullscreen::Borderless(None)));
+        self.settings.edit().fullscreen = fullscreen;
+    }
+
+    fn apply_control(&mut self, action: ControlAction) {
+        match action {
+            ControlAction::Fullscreen => {
+                let WindowState::Active(window) = &self.state else {
+                    unreachable!("a control requires an active window");
+                };
+                self.set_fullscreen(window.render.window.fullscreen().is_none());
+            }
+            ControlAction::Adjust(dial, adjustment) => {
+                let setting = match dial {
+                    Dial::Theme => Setting::Theme,
+                    Dial::Model => {
+                        self.ui.navigate_model(adjustment);
+                        return;
+                    }
+                    Dial::LineWidth => Setting::LineWidth,
+                    Dial::Zoom => Setting::Zoom,
+                    Dial::FrameRate => Setting::FrameRate,
+                    Dial::Shutter => Setting::Shutter,
+                    Dial::TextOpacity => Setting::PresentationOpacity,
+                };
+                self.adjust_setting(setting, adjustment);
+            }
+            ControlAction::AutoColors => {
+                let preferences = self.ui.theme_preferences_mut();
+                preferences.auto_colors = !preferences.auto_colors;
+            }
+            ControlAction::Contrast(contrast) => {
+                self.ui.theme_preferences_mut().contrast = contrast
+            }
+            ControlAction::Tone(tone) => self.ui.choose_tone(tone),
+            ControlAction::ModelLock => {
+                let rotation = self.settings.model_rotation.toggled();
+                self.settings.edit().model_rotation = rotation;
+                self.ui.set_model_rotation(rotation);
+            }
+            ControlAction::Boost(boost) => {
+                self.settings.edit().preamp_db = boost;
+                self.ui.set_preamp(boost);
+            }
+            ControlAction::MotionBlur => {
+                let motion = self.settings.model_motion.toggled();
+                self.settings.edit().model_motion = motion;
+                self.ui.set_model_motion(motion);
+            }
+            ControlAction::HideCursor => {
+                let visibility = match self.settings.cursor_visibility {
+                    CursorVisibility::Always => CursorVisibility::AutoHide,
+                    CursorVisibility::AutoHide => CursorVisibility::Always,
+                };
+                self.settings.edit().cursor_visibility = visibility;
+            }
+            ControlAction::Dislike => self.ui.dislike_theme(),
+            ControlAction::SaveDefault => {
+                let theme = self.ui.selected_theme();
+                self.settings.edit().theme = theme;
+                self.ui.choose_theme(theme);
+            }
+            ControlAction::Restore(theme) => {
+                self.ui.theme_preferences_mut().restore(theme);
+            }
+            ControlAction::DeveloperMode => {
+                self.ui.set_presentation(false);
+                self.ui.set_debug(true);
+            }
+            ControlAction::Manage => {}
+        }
+        self.sync_theme_preferences();
+    }
+
+    fn sync_theme_preferences(&mut self) {
+        if &self.settings.theme_preferences != self.ui.theme_preferences() {
+            self.settings.edit().theme_preferences = self.ui.theme_preferences().clone();
         }
     }
 
@@ -173,8 +266,13 @@ impl App {
         }
         match event {
             WindowEvent::Resized(size) => {
+                let fullscreen = render.window.fullscreen().is_some();
+                if self.settings.fullscreen != fullscreen {
+                    self.settings.edit().fullscreen = fullscreen;
+                }
                 render.resize(size);
                 *view = View::fit(render.viewport());
+                view.set_zoom(self.settings.zoom);
                 view.set_ui_scale(render.window.scale_factor());
                 self.frames.resized(size.into(), Instant::now());
                 self.ui.set_plate_mask(Some(render.plate_mask_image()));
@@ -197,50 +295,56 @@ impl App {
                 ..
             } => match state {
                 ElementState::Pressed => {
-                    self.ui.click_debug(view, self.mouse);
+                    if self.ui.presentation() {
+                        if let Some(action) = self.ui.click_controls(view, self.mouse) {
+                            self.apply_control(action);
+                        }
+                    } else {
+                        self.ui.click_debug(view, self.mouse);
+                    }
                 }
                 ElementState::Released => self.ui.end_slider_drag(),
             },
             WindowEvent::CursorMoved { position, .. } => {
                 let position = Point::new(position.x, position.y);
                 self.ui.set_pointer(Some(position));
+                render.window.set_cursor_visible(true);
                 self.mouse = position;
             }
             WindowEvent::CursorLeft { .. } => {
                 self.ui.set_pointer(None);
+                render.window.set_cursor_visible(true);
                 self.ui.end_slider_drag();
             }
             WindowEvent::Focused(false) => {
                 self.modifiers = ModifiersState::empty();
+                self.ui.set_control_modifiers(false);
                 self.ui.set_pointer(None);
+                render.window.set_cursor_visible(true);
                 self.ui.end_slider_drag();
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+                self.ui.set_control_modifiers(!self.modifiers.is_empty());
             }
-            WindowEvent::MouseWheel {
-                delta: MouseScrollDelta::LineDelta(_, y),
-                ..
-            } => {
-                let scale = f64::from((1.0 + y / 10.0).max(0.1));
-                view.zoom(scale);
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                    MouseScrollDelta::PixelDelta(position) => position.y / 30.0,
+                };
+                if self.ui.presentation() {
+                    self.ui.scroll_controls(lines);
+                } else {
+                    let zoom = self.settings.zoom.scaled((1.0 + lines / 10.0).max(0.1));
+                    self.settings.edit().zoom = zoom;
+                    view.set_zoom(zoom);
+                }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     if self.ui.presentation() {
-                        match key {
-                            KeyCode::KeyF if !event.repeat => self.ui.set_presentation(false),
-                            KeyCode::KeyA => {
-                                self.adjust_setting(Setting::Theme, Adjustment::Decrease)
-                            }
-                            KeyCode::KeyS => {
-                                self.adjust_setting(Setting::Theme, Adjustment::Increase)
-                            }
-                            KeyCode::BracketLeft => self
-                                .adjust_setting(Setting::PresentationOpacity, Adjustment::Decrease),
-                            KeyCode::BracketRight => self
-                                .adjust_setting(Setting::PresentationOpacity, Adjustment::Increase),
-                            _ => {}
+                        if key == KeyCode::Escape && !event.repeat {
+                            self.set_fullscreen(false);
                         }
                         return Ok(());
                     }
@@ -360,7 +464,21 @@ impl App {
                 if self.settings.tuning != tuning {
                     self.settings.edit().tuning = tuning;
                 }
+                if &self.settings.theme_preferences != self.ui.theme_preferences() {
+                    self.settings.edit().theme_preferences = self.ui.theme_preferences().clone();
+                }
                 let now = Instant::now();
+                let top_overlay = self.profile.is_none()
+                    && self.ui.draw_controls(
+                        &mut render.overlay_scene,
+                        view,
+                        &self.settings,
+                        render.window.fullscreen().is_some(),
+                        now,
+                    );
+                render
+                    .window
+                    .set_cursor_visible(self.ui.cursor_visible(self.settings.cursor_visibility));
                 let frame_time = FrameTime::new(self.previous_frame, now);
                 self.previous_frame = now;
                 if let Some(profile) = &mut self.profile {
@@ -373,12 +491,21 @@ impl App {
                 let changed =
                     matches!(frame.background, render::Frame::Rebuilt(_)) || frame.foreground;
                 let viewport = render.viewport();
+                let content = render::FrameContent {
+                    background: frame.background,
+                    foreground: frame.foreground,
+                    top_overlay,
+                    raster_assets: &frame.raster_assets,
+                    plates: frame.plate_instances,
+                    plate_ink: frame.plate_ink,
+                };
                 let overlay =
                     |device: &vello::util::DeviceHandle,
                      encoder: &mut vello::wgpu::CommandEncoder,
                      background: &vello::wgpu::TextureView,
                      target: &vello::wgpu::TextureView,
-                     foreground: Option<&vello::wgpu::TextureView>| {
+                     foreground: Option<&vello::wgpu::TextureView>,
+                     top: Option<&vello::wgpu::TextureView>| {
                         visualizer_renderer.draw(
                             device,
                             encoder,
@@ -389,31 +516,15 @@ impl App {
                             foreground,
                             frame.overlay_composite,
                             frame.overlay_opacity,
+                            top,
                         );
                     };
-                let foreground = frame.foreground;
                 let presentation = if let Some(profile) = &mut self.profile {
                     profile.present(before_draw, after_draw, changed, |completed| {
-                        render.present(
-                            frame.background,
-                            foreground,
-                            &frame.raster_assets,
-                            frame.plate_instances,
-                            frame.plate_ink,
-                            completed,
-                            overlay,
-                        )
+                        render.present(content, completed, overlay)
                     })?
                 } else {
-                    render.present(
-                        frame.background,
-                        foreground,
-                        &frame.raster_assets,
-                        frame.plate_instances,
-                        frame.plate_ink,
-                        |_| {},
-                        overlay,
-                    )?
+                    render.present(content, |_| {}, overlay)?
                 };
                 if matches!(presentation, render::Presentation::Unavailable) {
                     self.frames.surface_unavailable(Instant::now());
@@ -427,6 +538,7 @@ impl App {
 
 impl ApplicationHandler for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.sync_theme_preferences();
         if let Err(error) = self.settings.flush() {
             log::error!("{error:#}");
         }
@@ -437,7 +549,13 @@ impl ApplicationHandler for App {
             return;
         }
         self.state = match ActiveWindow::new(event_loop) {
-            Ok(window) => {
+            Ok(mut window) => {
+                window.view.set_zoom(self.settings.zoom);
+                window.render.window.set_fullscreen(
+                    self.settings
+                        .fullscreen
+                        .then_some(Fullscreen::Borderless(None)),
+                );
                 let now = Instant::now();
                 self.frames
                     .resized(window.render.window.inner_size().into(), now);

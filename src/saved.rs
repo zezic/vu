@@ -106,11 +106,28 @@ mod tests {
         config.flush()?;
         assert!(!path.exists());
         config.edit().preamp_db = PreampDb::try_from(-12.0)?;
+        config.edit().zoom = crate::config::Zoom::try_from(1.7)?;
         config.edit().frame_rate_limit = FrameRateLimit::Fps55;
         config.edit().shutter_frames = crate::config::ShutterFrames::try_from(2.5)?;
         config.edit().theme = config
             .theme
             .adjusted(crate::frame_schedule::Adjustment::Increase);
+        let startup_theme = config.theme;
+        let light_theme = vu::theme::ThemeId::all()
+            .find(|theme| theme.tone() == vu::theme::Tone::Light)
+            .unwrap();
+        let manual_theme = startup_theme.adjusted(crate::frame_schedule::Adjustment::Increase);
+        let preferences = &mut config.edit().theme_preferences;
+        preferences.auto_colors = true;
+        preferences.contrast = vu::theme::ThemeContrast::Always;
+        preferences.remember_manual(manual_theme);
+        preferences.remember_manual(light_theme);
+        assert!(preferences.dislike(startup_theme));
+        assert_eq!(preferences.random(manual_theme, 0.0), Some(light_theme));
+        assert_eq!(config.theme, startup_theme);
+        config.edit().fullscreen = true;
+        config.edit().cursor_visibility = crate::config::CursorVisibility::Always;
+        config.edit().model_rotation = crate::visualizer::ModelRotation::Locked;
         config.edit().visualizer_text_scale = config
             .visualizer_text_scale
             .adjusted(crate::frame_schedule::Adjustment::Increase);
@@ -170,6 +187,9 @@ mod tests {
         for text in [
             "(preamp_db: 97.0)",
             "(preamp_db: NaN)",
+            "(zoom: 0.34)",
+            "(zoom: 3.01)",
+            "(zoom: NaN)",
             "(shutter_frames: 0.0)",
             "(shutter_frames: 17.0)",
             "(shutter_frames: NaN)",
@@ -245,7 +265,21 @@ mod tests {
             assert_eq!(fs::read_to_string(&path)?, text);
         }
         let missing: Config = ron::from_str("(frame_rate_limit: Fps48)")?;
+        assert_eq!(
+            missing.theme_preferences,
+            vu::theme::ThemePreferences::default()
+        );
+        assert!(!missing.fullscreen);
+        assert_eq!(
+            missing.cursor_visibility,
+            crate::config::CursorVisibility::AutoHide
+        );
+        assert_eq!(
+            missing.model_rotation,
+            crate::visualizer::ModelRotation::default()
+        );
         assert_eq!(missing.preamp_db, PreampDb::default());
+        assert_eq!(missing.zoom, crate::config::Zoom::default());
         assert_eq!(
             missing.shutter_frames,
             crate::config::ShutterFrames::default()

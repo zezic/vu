@@ -1,6 +1,7 @@
 //! Spectrum-driven pseudo-3D model visualizer.
 
 mod computation;
+mod controls;
 mod debug;
 mod detection;
 mod geometry;
@@ -59,6 +60,7 @@ use geometry::{
 pub use spectrum::{RelativeExcessSettings, BAND_COUNT};
 use spectrum::{Spectrum, SpectrumAnalyzer};
 
+pub use controls::{ControlAction, Dial};
 pub use renderer::Renderer;
 pub use ui::{Ui, UiFrame, View};
 
@@ -289,7 +291,7 @@ impl LineWidth {
 
 impl Default for LineWidth {
     fn default() -> Self {
-        Self(0.8000001)
+        Self(0.6)
     }
 }
 
@@ -337,6 +339,28 @@ impl ModelMotion {
         }
     }
 }
+
+/// Whether music drops may replace the current model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelRotation {
+    #[default]
+    Automatic,
+    Locked,
+}
+
+impl ModelRotation {
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Automatic => Self::Locked,
+            Self::Locked => Self::Automatic,
+        }
+    }
+}
+
+/// Changes whenever a model is replaced, including manual navigation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModelRevision(u64);
 
 /// Opacity floor reached by edges at high motion-blur speed.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -1428,6 +1452,8 @@ pub struct Visualizer {
     showcase: Showcase,
     catalog: Option<crate::weapon::Catalog>,
     models: Models,
+    model_rotation: ModelRotation,
+    model_revision: ModelRevision,
     model_composite: ModelComposite,
     model_lines: Vec<LineInstance>,
     model_ribbons: Vec<RibbonInstance>,
@@ -1493,6 +1519,8 @@ impl Visualizer {
             showcase,
             catalog: None,
             models: Models::Unloaded,
+            model_rotation: ModelRotation::default(),
+            model_revision: ModelRevision::default(),
             model_composite: ModelComposite::default(),
             model_lines: Vec::new(),
             model_ribbons: Vec::new(),
@@ -1610,27 +1638,60 @@ impl Visualizer {
         self.showcase.set_model(pois, model.part_count());
     }
 
-    /// Steps to the next model. Drops advance the set; the hotkey calls this
-    /// from outside a frame.
+    /// Steps through the automatic shuffled cycle when model rotation is on.
     fn advance_model(&mut self, accent: f32) {
+        if self.model_rotation == ModelRotation::Locked {
+            return;
+        }
         let Models::Ready(models) = &mut self.models else {
             return;
         };
         if !models.advance(&mut self.rng) {
             return;
         }
+        self.switch_model(accent);
+    }
+
+    fn switch_model(&mut self, accent: f32) {
+        let Models::Ready(models) = &self.models else {
+            unreachable!("switching a model requires a loaded catalog")
+        };
         self.scene.switch(
             models.current(),
             self.crease_threshold,
             self.model_motion,
             accent,
         );
+        self.model_revision.0 += 1;
         self.sync_showcase();
     }
 
     pub fn next_model(&mut self) {
+        self.navigate_model(Adjustment::Increase);
+    }
+
+    /// Manual catalog navigation stays available while automatic rotation is
+    /// locked and starts the selected model's normal showcase.
+    pub fn navigate_model(&mut self, adjustment: Adjustment) {
+        if matches!(self.models, Models::Unloaded) {
+            self.load_models();
+        }
+        let Models::Ready(models) = &mut self.models else {
+            return;
+        };
+        if !models.navigate(adjustment) {
+            return;
+        }
         let accent = self.accent();
-        self.advance_model(accent);
+        self.switch_model(accent);
+    }
+
+    pub fn set_model_rotation(&mut self, rotation: ModelRotation) {
+        self.model_rotation = rotation;
+    }
+
+    pub fn model_revision(&self) -> ModelRevision {
+        self.model_revision
     }
 
     pub fn model_position(&self) -> Option<(usize, usize)> {
@@ -4839,7 +4900,7 @@ mod tests {
         }
         let mut steps = 0;
         loop {
-            probe.next_model();
+            probe.advance_model(0.0);
             steps += 1;
             if probe.showcase_poi_count() > 0 {
                 break;
@@ -4850,7 +4911,7 @@ mod tests {
         }
         let mut visualizer = loaded_visualizer();
         for _ in 1..steps {
-            visualizer.next_model();
+            visualizer.advance_model(0.0);
         }
         Some(visualizer)
     }
@@ -6998,7 +7059,7 @@ mod tests {
     }
 
     #[test]
-    fn drops_and_the_hotkey_advance_the_model() {
+    fn drops_advance_the_shuffled_model_cycle() {
         let mut visualizer = Visualizer::new();
         visualizer.load_models();
         let (_, total) = visualizer
@@ -7014,7 +7075,7 @@ mod tests {
         // Step through the rest of the bag cycle: every model appears once.
         let mut seen = vec![first, visualizer.scene_name().to_owned()];
         for _ in 2..total {
-            visualizer.next_model();
+            visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
             seen.push(visualizer.scene_name().to_owned());
         }
         seen.sort_unstable();
@@ -7023,10 +7084,42 @@ mod tests {
     }
 
     #[test]
+    fn model_lock_keeps_the_model_while_showcase_and_manual_navigation_continue() {
+        let mut visualizer = loaded_visualizer();
+        let position = visualizer.model_position().expect("models loaded");
+        let revision = visualizer.model_revision();
+        assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Normal);
+        visualizer.set_model_rotation(ModelRotation::Locked);
+        visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
+        assert_eq!(visualizer.model_position(), Some(position));
+        assert_eq!(visualizer.model_revision(), revision);
+        assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Poi);
+        visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
+        assert_eq!(visualizer.model_position(), Some(position));
+        assert_eq!(visualizer.showcase.mode(), showcase::ShowcaseMode::Normal);
+
+        if position.1 > 1 {
+            visualizer.navigate_model(Adjustment::Increase);
+            assert_eq!(
+                visualizer.model_position(),
+                Some((position.0 % position.1 + 1, position.1))
+            );
+            assert_ne!(visualizer.model_revision(), revision);
+            visualizer.navigate_model(Adjustment::Decrease);
+            assert_eq!(visualizer.model_position(), Some(position));
+            assert_ne!(visualizer.model_revision(), revision);
+
+            visualizer.set_model_rotation(ModelRotation::Automatic);
+            visualizer.handle_action(Action::Drop(1.0), 0.0, 0.75);
+            assert_ne!(visualizer.model_position(), Some(position));
+        }
+    }
+
+    #[test]
     fn line_width_steps_and_clamps() {
         let mut width = LineWidth::default();
-        assert_eq!(width.percent(), 80);
-        assert_eq!(width.adjusted(Adjustment::Decrease).percent(), 70);
+        assert_eq!(width.percent(), 60);
+        assert_eq!(width.adjusted(Adjustment::Decrease).percent(), 50);
         for _ in 0..40 {
             width = width.adjusted(Adjustment::Increase);
         }

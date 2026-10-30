@@ -21,6 +21,12 @@ fn overlay_color_fragment(@builtin(position) position: vec4<f32>) -> @location(0
 }
 
 @fragment
+fn overlay_unscaled_fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let ink = textureLoad(overlay_texture, vec2<i32>(position.xy), 0);
+    return vec4(ink.rgb * ink.a, ink.a);
+}
+
+@fragment
 fn overlay_multiply_fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let ink = textureLoad(overlay_texture, vec2<i32>(position.xy), 0);
     let alpha = ink.a * uniforms.opacity.x;

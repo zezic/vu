@@ -14,19 +14,19 @@ struct OverlayUniforms {
     opacity: [f32; 4],
 }
 
-struct BackgroundBinding {
+struct TextureBinding {
     source: wgpu::TextureView,
     bindings: wgpu::BindGroup,
 }
 
-impl BackgroundBinding {
+impl TextureBinding {
     fn new(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         source: &wgpu::TextureView,
     ) -> Self {
         let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Visualizer retained background"),
+            label: Some("Visualizer retained texture"),
             layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -47,9 +47,11 @@ pub struct Renderer {
     overlay_normal_pipeline: wgpu::RenderPipeline,
     overlay_additive_pipeline: wgpu::RenderPipeline,
     overlay_multiply_pipeline: wgpu::RenderPipeline,
+    top_overlay_pipeline: wgpu::RenderPipeline,
     overlay_opacity: wgpu::Buffer,
     background_layout: wgpu::BindGroupLayout,
-    background: Option<BackgroundBinding>,
+    background: Option<TextureBinding>,
+    top_overlay: Option<TextureBinding>,
     line_pipeline: wgpu::RenderPipeline,
     model_additive_pipeline: wgpu::RenderPipeline,
     model_multiplicative_pipeline: wgpu::RenderPipeline,
@@ -161,6 +163,16 @@ impl Renderer {
             "overlay_vertex",
             "overlay_multiply_fragment",
             Some(multiplicative_blend()),
+        );
+        let top_overlay_pipeline = fullscreen_pipeline(
+            device,
+            format,
+            "Visualizer top overlay",
+            &overlay_shader,
+            &background_layout,
+            "overlay_vertex",
+            "overlay_unscaled_fragment",
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
         );
 
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -328,9 +340,11 @@ impl Renderer {
             overlay_normal_pipeline,
             overlay_additive_pipeline,
             overlay_multiply_pipeline,
+            top_overlay_pipeline,
             overlay_opacity,
             background_layout,
             background: None,
+            top_overlay: None,
             line_pipeline,
             model_additive_pipeline,
             model_multiplicative_pipeline,
@@ -381,13 +395,14 @@ impl Renderer {
         overlay: Option<&wgpu::TextureView>,
         overlay_composite: Option<ModelComposite>,
         overlay_opacity: f32,
+        top_overlay: Option<&wgpu::TextureView>,
     ) {
         if self
             .background
             .as_ref()
             .is_none_or(|binding| binding.source != *background)
         {
-            self.background = Some(BackgroundBinding::new(
+            self.background = Some(TextureBinding::new(
                 &device.device,
                 &self.background_layout,
                 background,
@@ -456,6 +471,19 @@ impl Renderer {
                 ],
             })
         });
+        if let Some(view) = top_overlay {
+            if self
+                .top_overlay
+                .as_ref()
+                .is_none_or(|binding| binding.source != *view)
+            {
+                self.top_overlay = Some(TextureBinding::new(
+                    &device.device,
+                    &self.background_layout,
+                    view,
+                ));
+            }
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Visualizer overlay"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -513,6 +541,15 @@ impl Renderer {
             };
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, binding, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        if top_overlay.is_some() {
+            let binding = self
+                .top_overlay
+                .as_ref()
+                .expect("the top overlay texture has been bound");
+            pass.set_pipeline(&self.top_overlay_pipeline);
+            pass.set_bind_group(0, &binding.bindings, &[]);
             pass.draw(0..3, 0..1);
         }
     }
@@ -706,6 +743,133 @@ mod tests {
 
     #[test]
     #[ignore = "requires a compute-capable GPU"]
+    fn top_overlay_keeps_normal_alpha_across_foreground_modes() -> anyhow::Result<()> {
+        let mut context = RenderContext::new();
+        let id = pollster::block_on(crate::render::prepare_device(
+            &mut context,
+            None,
+            wgpu::DeviceDescriptor::default(),
+        ))?;
+        let device = &context.devices[id];
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let width = 64;
+        let textures = ["Background", "Foreground", "Top overlay", "Target"].map(|label| {
+            device.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        });
+        let [background, foreground, top_overlay, target] = &textures;
+        for (texture, pixels) in [
+            (background, [0, 0, 255, 255].repeat(width as usize)),
+            (foreground, [0, 200, 0, 128].repeat(width as usize)),
+            (
+                top_overlay,
+                [255, 0, 0, 128]
+                    .repeat(width as usize / 2)
+                    .into_iter()
+                    .chain([0, 0, 0, 0].repeat(width as usize / 2))
+                    .collect(),
+            ),
+        ] {
+            device.queue.write_texture(
+                texture.as_image_copy(),
+                &pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(1),
+                },
+                texture.size(),
+            );
+        }
+        let [background, foreground, top_overlay, target_view] = textures
+            .each_ref()
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        let readback = device.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Top overlay readback"),
+            size: u64::from(width * 4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut renderer = Renderer::new(&device.device, format);
+        for composite in [
+            None,
+            Some(ModelComposite::Additive),
+            Some(ModelComposite::Multiplicative),
+        ] {
+            for opacity in [0.0, 1.0] {
+                let mut encoder = device
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                renderer.draw(
+                    device,
+                    &mut encoder,
+                    &background,
+                    &target_view,
+                    Size::new(f64::from(width), 1.0),
+                    Frame {
+                        lines: &[],
+                        model_lines: &[],
+                        ribbons: &[],
+                        model_composite: ModelComposite::Additive,
+                    },
+                    Some(&foreground),
+                    composite,
+                    opacity,
+                    Some(&top_overlay),
+                );
+                encoder.copy_texture_to_buffer(
+                    target.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &readback,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(width * 4),
+                            rows_per_image: Some(1),
+                        },
+                    },
+                    target.size(),
+                );
+                device.queue.submit([encoder.finish()]);
+                let (tx, rx) = mpsc::channel();
+                readback
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+                device.device.poll(wgpu::PollType::wait_indefinitely())?;
+                rx.recv()??;
+                let pixels = readback.slice(..).get_mapped_range()?.to_vec();
+                readback.unmap();
+                let covered = &pixels[..4];
+                let uncovered = &pixels[width as usize * 2..width as usize * 2 + 4];
+                for channel in 0..3 {
+                    let ink = if channel == 0 { 255.0 } else { 0.0 };
+                    let expected = (ink * 128.0 + f32::from(uncovered[channel]) * 127.0) / 255.0;
+                    assert!(
+                        (f32::from(covered[channel]) - expected).abs() <= 1.0,
+                        "top overlay must retain normal alpha at foreground opacity {opacity}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
     fn renders_wireframe_lines_and_swept_ribbons() -> anyhow::Result<()> {
         let mut context = RenderContext::new();
         let id = pollster::block_on(crate::render::prepare_device(
@@ -864,6 +1028,7 @@ mod tests {
             None,
             None,
             1.0,
+            None,
         );
         let row_bytes = width * 4;
         let readback = device.device.create_buffer(&wgpu::BufferDescriptor {

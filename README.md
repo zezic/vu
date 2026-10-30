@@ -15,22 +15,23 @@ Run with `cargo run --release`
 
 On macOS, allow system audio recording when prompted.
 
-## Hotkeys
+## Developer hotkeys
 
-- `F` - toggle presentation mode. While it is active only `F`, the theme
-  hotkeys `A` / `S`, and the presentation-opacity hotkeys `[` / `]` are
-  accepted; the HUD, inspector, timeline, and vertex diagnosis are hidden.
-  Presentation does not force fullscreen and does not hide the cursor.
+VU starts in presentation mode, where `Esc` leaves fullscreen and other
+keyboard shortcuts are inactive. Move the mouse to reveal the controls. Hold
+any modifier key and click `Developer: exit presentation` to open the developer
+HUD and enable the following shortcuts.
+
+- `F` - enter presentation mode.
 - `[` / `]` - decrease or increase the presentation text opacity multiplier in
   5% steps, from 0% to 200%. The factory value is 100% and the setting persists
-  in the config file. These keys work in both modes but only affect the
-  presentation layer.
+  in the config file. The setting affects the presentation layer.
 - `B` - cycles the analyzer's refresh rate: FFT hop, 20, 10, 5, 2, and 1 Hz.
 - `D` - toggles the analyzer debug panel.
 - `Esc` - closes the analysis inspector without leaving the debug panel.
-- `A` / `S` - cycle backward or forward through all 361 bundled Gogh themes.
+- `A` / `S` - browse the 361 bundled Gogh themes, skipping disliked themes.
 - `Z` / `X` - decrease or increase preamp by 6 dB, or 1 dB while holding `Shift`.
-- `Q` / `W` - cycle backward or forward through the frame rate limits: 30, 48,
+- `Q` / `W` - cycle backward or forward through the frame rate limits: 15, 30, 48,
   55, 60, 72, 90, 120, 180, 240, and VSync.
 - `-` / `=` - decrease or increase HUD text size in 10% steps, from 60% to
   200%. The setting persists in the config file.
@@ -49,8 +50,9 @@ On macOS, allow system audio recording when prompted.
 - `,` / `.` - decrease or increase the model crease threshold in 5 degree steps,
   from 10 to 80 degrees. Lower values keep more mesh edges; the setting persists
   in the config file.
-- `\` - advance to the next model. Energy drops also advance it and toggle
-  between normal and POI showcase modes.
+- `\` - advance to the next model in catalog order. When Model Lock is off,
+  energy drops choose from the shuffled model cycle. Drops also toggle between
+  normal and POI showcase modes.
 - `T` - toggle analytical motion blur. The setting persists in the config file.
 - `;` / `'` - decrease or increase the base line width in 10% steps, from 10%
   to 300%. The setting persists in the config file.
@@ -155,22 +157,65 @@ independent of the snare and drop detectors.
 
 ### Presentation mode
 
-Presentation mode starts active. Press `F` to leave or enter it. It replaces
-the debug chrome with viewport-relative typography and infographics, keeps the
-selected theme, and leaves the model wireframe in place. The layout is designed
-against a 1920x1080 (16:9) reference and adapts to the actual window: the font
-scale and all geometry are derived from the viewport, side columns widen on
-ultrawide windows, and the same composition remains readable at 16:9 and taller
-ratios. Presentation never forces fullscreen and never hides the cursor.
+Presentation mode starts active. It replaces the debug chrome with
+viewport-relative typography and infographics over the model wireframe. The
+layout is designed against a 1920x1080 (16:9) reference and adapts to the actual
+window: the font scale and all geometry are derived from the viewport, side
+columns widen on ultrawide windows, and the same composition remains readable at 16:9 and taller
+ratios.
+
+Mouse controls form two aligned rows of equal-width blocks at the bottom center,
+using the theme's foreground color, thin rules, and square corners.
+The borderless alpha-gradient backdrop spans the lower screen edge to edge.
+Dial buttons are square;
+labels align left above the top row and below the bottom row. Hover a block for
+its hint. Related controls share columns within the Colors, Scene, Audio,
+Rendering, and Window groups.
+The grid fades after 10 seconds of inactivity and returns on mouse movement;
+hovering controls or opening the disliked-theme list keeps it visible. Hide
+Cursor is on by default and hides the pointer with the grid. Toggle fullscreen
+with its button or a double-click on the presentation background. `Esc` leaves
+fullscreen, and the last state persists. Hold any modifier key to reveal the
+developer exit button.
+
+Theme navigation skips disliked themes. Dark / Light recalls the last manually
+chosen theme of that tone; automatic changes leave those choices intact.
+Auto Colors is off by default. When enabled, it chooses a different allowed
+theme on model changes. Allow Contrast selects the permitted tone: Off keeps
+the current tone, On allows either, and Always switches to the opposite tone.
+Mouse movement starts a 10-second cooldown, shown beside Auto Colors. Model
+changes during the cooldown skip their color change; no change is queued.
+When the permitted tone has no alternative, the current theme stays selected.
+
+The model dial browses catalog order. Model Lock blocks automatic model
+replacement while music-driven movement, focus changes, and manual navigation
+continue. Analyzer Boost selects -6, 0, or +6 dB without changing playback
+volume. Hover it to show a compact live graph aligned to the Audio section: the
+last four seconds
+of boosted RMS, its smoothed envelope, and the gap threshold. Armed intervals
+and confirmed drop markers show when the gap detector permits a scene change;
+Model Lock still prevents automatic model replacement. Other blocks control
+model motion blur, shutter, line width, zoom,
+FPS limit, and text opacity. Model line width defaults to 60%. Zoom ranges from
+35% to 300%, persists across restarts, and stays unchanged when the window
+resizes. Controls whose required mode is off are faint, including
+Allow Contrast with Auto Colors off and Shutter with Motion Blur off.
+
+Dislike immediately leaves the current theme and excludes it from navigation
+and automatic choices. Hover this block to reveal Manage when any themes are
+disliked; its scrollable list has an `x` on each row to restore that theme.
+The final available theme cannot be disliked. Save as Default saves the
+displayed theme for startup; browsing and automatic changes preserve that
+startup choice.
 
 The animated presentation layer is rasterized to a transparent texture and
 composited over the model lines, so a backdrop with text cut out of it really is
 a hole instead of a rectangle covered by wireframe. The normal HUD background is
 still cached; only the animated layer is rebuilt each frame. Like the model
 wireframe, presentation text uses additive composition on dark themes and
-multiplicative composition on light themes. The `[` / `]` hotkeys scale the
-whole text layer from 0% to 200% because a theme's background and vivid palette
-can need a different amount of ink.
+multiplicative composition on light themes. Text Opacity scales the whole
+text layer from 0% to 200%; 0% hides the infographics while the controls remain
+available.
 
 Normal mode always shows the model's catalog `display_name` large, then a
 rotating subset of three to five real-world fields. Each model appearance picks
@@ -193,6 +238,10 @@ per-side padding, where the glyphs are cut out of the backdrop. Characters
 enter and leave with independently chosen per-glyph fade, neon flicker, or
 glitch substitutions. Long jokes and facts wrap without reflowing during their
 animation.
+
+While the controls are visible or fading, Selector FX grids use a side placement
+and avoid the reserved controls area. Existing bottom grids relocate when the
+controls return.
 
 While the Selector FX is active in normal mode, a loading panel appears on a
 random side. On the left or right it uses two columns; on the bottom it uses two
@@ -552,6 +601,10 @@ vertex readout sit optically centered in their boxes.
 - macOS: `~/Library/Application Support/com.zezic.vu/vu-config.ron`
 - Linux: `$XDG_CONFIG_HOME/vu/vu-config.ron` (normally `~/.config/vu/vu-config.ron`)
 - Windows: `%APPDATA%\zezic\vu\config\vu-config.ron`
+
+Changes save automatically every two seconds and on exit. Presentation settings,
+manual dark/light choices, disliked themes, and the fullscreen state persist.
+The startup theme changes only through Save as Default.
 
 ## Audio Capture Details
 

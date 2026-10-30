@@ -37,6 +37,16 @@ pub enum Frame<'a> {
     Unchanged(&'a Scene),
 }
 
+/// Scene layers and GPU resources submitted together for one displayed frame.
+pub struct FrameContent<'a> {
+    pub background: Frame<'a>,
+    pub foreground: bool,
+    pub top_overlay: bool,
+    pub raster_assets: &'a [RasterAsset],
+    pub plates: &'a [PlateInstance],
+    pub plate_ink: Color,
+}
+
 /// Most plate edges the coverage shader clips against.
 /// Keep in sync with the `edges` array in `visualizer/plates.wgsl`.
 pub const MAX_PLATE_EDGES: usize = 8;
@@ -339,18 +349,17 @@ impl BackgroundCache {
     }
 }
 
-/// The animated foreground, rasterized with a transparent base so the GPU pass
-/// can layer it over the model wireframe.
-pub struct ForegroundCache {
+/// A transparent scene texture retained until the drawable extent changes.
+struct SceneTexture {
     view: wgpu::TextureView,
     width: u32,
     height: u32,
 }
 
-impl ForegroundCache {
+impl SceneTexture {
     fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Animated foreground"),
+            label: Some("Transparent scene layer"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -376,6 +385,26 @@ impl ForegroundCache {
     fn matches(&self, width: u32, height: u32) -> bool {
         self.width == width && self.height == height
     }
+
+    fn rasterize<'a>(
+        cache: &'a mut Option<Self>,
+        renderer: &mut Renderer,
+        device: &DeviceHandle,
+        scene: &Scene,
+        params: &RenderParams,
+    ) -> anyhow::Result<&'a wgpu::TextureView> {
+        if !cache
+            .as_ref()
+            .is_some_and(|texture| texture.matches(params.width, params.height))
+        {
+            *cache = Some(Self::new(&device.device, params.width, params.height));
+        }
+        let texture = cache
+            .as_ref()
+            .expect("the scene texture has been allocated");
+        renderer.render_to_texture(&device.device, &device.queue, scene, &texture.view, params)?;
+        Ok(&texture.view)
+    }
 }
 
 pub struct RenderWindow {
@@ -384,9 +413,12 @@ pub struct RenderWindow {
     context: RenderContext,
     pub window: Arc<Window>,
     pub scene: Scene,
+    /// Normal-alpha UI drawn above every visualizer layer.
+    pub overlay_scene: Scene,
     background: BackgroundCache,
     raster_assets: RasterAssetCache,
-    foreground: Option<ForegroundCache>,
+    foreground: Option<SceneTexture>,
+    overlay: Option<SceneTexture>,
     plate_mask: PlateMask,
     target: TargetState,
 }
@@ -455,9 +487,11 @@ impl RenderWindow {
             context,
             window,
             scene: Scene::new(),
+            overlay_scene: Scene::new(),
             background: BackgroundCache::new(),
             raster_assets: RasterAssetCache::new(),
             foreground: None,
+            overlay: None,
             plate_mask,
             target: TargetState::Dirty,
         })
@@ -500,11 +534,7 @@ impl RenderWindow {
 
     pub fn present(
         &mut self,
-        background: Frame<'_>,
-        foreground: bool,
-        raster_assets: &[RasterAsset],
-        plates: &[PlateInstance],
-        plate_ink: Color,
+        content: FrameContent<'_>,
         mut completed: impl FnMut(Stage),
         paint: impl FnOnce(
             &DeviceHandle,
@@ -512,9 +542,18 @@ impl RenderWindow {
             &wgpu::TextureView,
             &wgpu::TextureView,
             Option<&wgpu::TextureView>,
+            Option<&wgpu::TextureView>,
         ),
     ) -> anyhow::Result<Presentation> {
         use wgpu::CurrentSurfaceTexture;
+        let FrameContent {
+            background,
+            foreground,
+            top_overlay,
+            raster_assets,
+            plates,
+            plate_ink,
+        } = content;
         if matches!(background, Frame::Rebuilt(_)) {
             self.target = TargetState::Dirty;
         }
@@ -566,35 +605,24 @@ impl RenderWindow {
             self.target = TargetState::Ready;
         }
         let overlay = if foreground {
-            if !self
-                .foreground
-                .as_ref()
-                .is_some_and(|cache| cache.matches(params.width, params.height))
-            {
-                self.foreground = Some(ForegroundCache::new(
-                    &device.device,
-                    params.width,
-                    params.height,
-                ));
-            }
-            let overlay = self
-                .foreground
-                .as_mut()
-                .expect("the foreground cache has been created");
-            let overlay_params = RenderParams {
-                base_color: Color::TRANSPARENT,
-                width: params.width,
-                height: params.height,
-                antialiasing_method: ANTIALIASING,
-            };
-            self.renderer.render_to_texture(
-                &device.device,
-                &device.queue,
+            Some(SceneTexture::rasterize(
+                &mut self.foreground,
+                &mut self.renderer,
+                device,
                 &self.scene,
-                &overlay.view,
-                &overlay_params,
-            )?;
-            Some(&overlay.view)
+                &params,
+            )?)
+        } else {
+            None
+        };
+        let top_overlay = if top_overlay {
+            Some(SceneTexture::rasterize(
+                &mut self.overlay,
+                &mut self.renderer,
+                device,
+                &self.overlay_scene,
+                &params,
+            )?)
         } else {
             None
         };
@@ -611,6 +639,7 @@ impl RenderWindow {
             &self.surface.target_view,
             &view,
             overlay,
+            top_overlay,
         );
         device.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();

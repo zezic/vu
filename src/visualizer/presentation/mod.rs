@@ -15,7 +15,10 @@ pub use poi::PoiScene;
 pub use selector::SelectorOverlay;
 pub use stage::Stage;
 
-use vello::{kurbo::Point, Scene};
+use vello::{
+    kurbo::{Point, Rect},
+    Scene,
+};
 
 use crate::{
     render::{PlateMaskImage, RasterAsset},
@@ -26,10 +29,6 @@ use crate::{
 
 use super::{showcase::ShowcaseMode, Rng, TriggerCounts, Visualizer};
 
-use self::text::{AnimatedText, PaintStyle};
-
-const HINT: &str = "F  EXIT     A / S  THEME     [ ]  OPACITY";
-
 pub struct Presentation {
     active: bool,
     time: f32,
@@ -38,7 +37,6 @@ pub struct Presentation {
     normal: NormalScene,
     selector: SelectorOverlay,
     poi: PoiScene,
-    hint: AnimatedText,
     colors: ScenePalette,
     colors_ready: bool,
     model_id: Option<String>,
@@ -64,32 +62,19 @@ struct MicroFx {
     kind: MicroKind,
 }
 
-impl Default for Presentation {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Presentation {
-    pub fn new() -> Self {
+    pub fn new(palette: &Palette, colors: ThemeColors) -> Self {
+        let mut rng = Rng::new(0x7072_6573_656e_7421);
+        let colors = ScenePalette::choose(palette, colors, &mut rng);
         Self {
             active: false,
             time: 0.0,
             stage: None,
-            rng: Rng::new(0x7072_6573_656e_7421),
+            rng,
             normal: NormalScene::default(),
             selector: SelectorOverlay::default(),
             poi: PoiScene::default(),
-            hint: AnimatedText::new(
-                HINT,
-                12.0,
-                crate::text::UiFace::Light,
-                crate::text::BlockAlign::Left,
-                None,
-                1.0,
-                PaintStyle::Fill,
-            ),
-            colors: ScenePalette::placeholder(),
+            colors,
             colors_ready: false,
             model_id: None,
             poi_key: None,
@@ -123,6 +108,11 @@ impl Presentation {
         self.stage
     }
 
+    /// Reserves screen space for an interactive overlay above the presentation.
+    pub fn set_exclusion_bounds(&mut self, bounds: Option<Rect>) {
+        self.selector.set_exclusion_bounds(bounds);
+    }
+
     /// Advance the presentation scene. Layout is rebuilt only when the stage
     /// size or the model changes.
     pub fn update(
@@ -144,8 +134,6 @@ impl Presentation {
             .is_some_and(|current| same_stage(&current, &stage))
         {
             self.stage = Some(stage);
-            self.hint.layout(fonts, &stage, &mut self.rng);
-            self.hint.set_visible();
         }
         if !self.active {
             return;
@@ -281,22 +269,6 @@ impl Presentation {
         for fx in &self.micro {
             draw_micro(scene, stage, palette, fx);
         }
-        let bounds = self.hint.bounds(stage);
-        let origin = Point::new(
-            stage.width - stage.margin - bounds.width(),
-            stage.height - stage.margin - bounds.height(),
-        );
-        self.hint.draw(
-            scene,
-            vello::kurbo::Affine::translate((origin.x, origin.y)),
-            stage,
-            ScenePalette {
-                ink: palette.muted,
-                ..palette
-            },
-            0.45,
-            self.time,
-        );
     }
 
     pub fn colors(&self) -> ScenePalette {

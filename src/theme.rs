@@ -1,12 +1,181 @@
-use std::sync::OnceLock;
+use std::{collections::BTreeSet, sync::OnceLock};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use vello::peniko::Color;
 
 use crate::frame_schedule::Adjustment;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ThemeId(usize);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tone {
+    Dark,
+    Light,
+}
+
+impl Tone {
+    #[must_use]
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::Dark,
+        }
+    }
+}
+
+/// Which tones automatic theme changes may choose.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemeContrast {
+    #[default]
+    Off,
+    On,
+    Always,
+}
+
+/// Theme choices that persist independently of the startup default.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ThemePreferences {
+    pub auto_colors: bool,
+    pub contrast: ThemeContrast,
+    #[serde(deserialize_with = "deserialize_dark_theme")]
+    last_dark: ThemeId,
+    #[serde(deserialize_with = "deserialize_light_theme")]
+    last_light: ThemeId,
+    #[serde(deserialize_with = "deserialize_disliked")]
+    disliked: BTreeSet<ThemeId>,
+}
+
+impl Default for ThemePreferences {
+    fn default() -> Self {
+        Self {
+            auto_colors: false,
+            contrast: ThemeContrast::default(),
+            last_dark: ThemeId::default(),
+            last_light: ThemeId::all()
+                .find(|theme| theme.tone() == Tone::Light)
+                .expect("the bundled themes include a light theme"),
+            disliked: BTreeSet::new(),
+        }
+    }
+}
+
+impl ThemePreferences {
+    pub fn disliked(&self) -> impl ExactSizeIterator<Item = ThemeId> + DoubleEndedIterator + '_ {
+        self.disliked.iter().copied()
+    }
+
+    pub fn is_disliked(&self, theme: ThemeId) -> bool {
+        self.disliked.contains(&theme)
+    }
+
+    pub fn can_dislike(&self, theme: ThemeId) -> bool {
+        !self.is_disliked(theme) && self.disliked.len() < registry().len() - 1
+    }
+
+    /// Refuses to exclude the final theme available in the catalog.
+    pub fn dislike(&mut self, theme: ThemeId) -> bool {
+        self.can_dislike(theme) && self.disliked.insert(theme)
+    }
+
+    pub fn restore(&mut self, theme: ThemeId) -> bool {
+        self.disliked.remove(&theme)
+    }
+
+    pub fn remember_manual(&mut self, theme: ThemeId) {
+        assert!(
+            !self.is_disliked(theme),
+            "a disliked theme cannot be selected"
+        );
+        match theme.tone() {
+            Tone::Dark => self.last_dark = theme,
+            Tone::Light => self.last_light = theme,
+        }
+    }
+
+    /// Uses the remembered choice when allowed, then the first allowed theme
+    /// of that tone. An exhausted tone has no choice.
+    pub fn remembered(&self, tone: Tone) -> Option<ThemeId> {
+        let remembered = match tone {
+            Tone::Dark => self.last_dark,
+            Tone::Light => self.last_light,
+        };
+        if !self.is_disliked(remembered) {
+            return Some(remembered);
+        }
+        ThemeId::all().find(|theme| theme.tone() == tone && !self.is_disliked(*theme))
+    }
+
+    pub fn navigate(&self, current: ThemeId, adjustment: Adjustment) -> Option<ThemeId> {
+        let mut next = current;
+        for _ in 1..registry().len() {
+            next = next.adjusted(adjustment);
+            if !self.is_disliked(next) {
+                return Some(next);
+            }
+        }
+        None
+    }
+
+    /// `unit` comes from a uniform random source in the half-open range 0..1.
+    /// Automatic choices never replace the remembered manual themes.
+    pub fn random(&self, current: ThemeId, unit: f32) -> Option<ThemeId> {
+        assert!(
+            (0.0..1.0).contains(&unit),
+            "random theme input must be in 0..1"
+        );
+        let eligible = || {
+            ThemeId::all().filter(|theme| {
+                *theme != current
+                    && !self.is_disliked(*theme)
+                    && match self.contrast {
+                        ThemeContrast::Off => theme.tone() == current.tone(),
+                        ThemeContrast::On => true,
+                        ThemeContrast::Always => theme.tone() == current.tone().opposite(),
+                    }
+            })
+        };
+        let count = eligible().count();
+        eligible().nth((unit * count as f32) as usize)
+    }
+}
+
+fn deserialize_theme_tone<'de, D: Deserializer<'de>>(
+    deserializer: D,
+    tone: Tone,
+) -> Result<ThemeId, D::Error> {
+    let theme = ThemeId::deserialize(deserializer)?;
+    if theme.tone() != tone {
+        return Err(serde::de::Error::custom(format!(
+            "remembered {tone:?} theme has the wrong tone: {:?}",
+            theme.name()
+        )));
+    }
+    Ok(theme)
+}
+
+fn deserialize_dark_theme<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ThemeId, D::Error> {
+    deserialize_theme_tone(deserializer, Tone::Dark)
+}
+
+fn deserialize_light_theme<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ThemeId, D::Error> {
+    deserialize_theme_tone(deserializer, Tone::Light)
+}
+
+fn deserialize_disliked<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeSet<ThemeId>, D::Error> {
+    let disliked = BTreeSet::deserialize(deserializer)?;
+    if disliked.len() == registry().len() {
+        return Err(serde::de::Error::custom(
+            "at least one theme must remain available",
+        ));
+    }
+    Ok(disliked)
+}
 
 impl Default for ThemeId {
     fn default() -> Self {
@@ -20,6 +189,10 @@ impl Default for ThemeId {
 }
 
 impl ThemeId {
+    pub fn all() -> impl ExactSizeIterator<Item = Self> + DoubleEndedIterator {
+        (0..registry().len()).map(Self)
+    }
+
     pub fn name(self) -> &'static str {
         &registry()[self.0].name
     }
@@ -79,8 +252,16 @@ impl ThemeId {
     /// The registry groups a light theme by its background being lighter than
     /// its foreground.
     pub fn is_light(self) -> bool {
+        self.tone() == Tone::Light
+    }
+
+    pub fn tone(self) -> Tone {
         let entry = &registry()[self.0];
-        luma(entry.colors.background) >= luma(entry.foreground)
+        if luma(entry.colors.background) >= luma(entry.foreground) {
+            Tone::Light
+        } else {
+            Tone::Dark
+        }
     }
 
     pub fn color(self, accent: Accent) -> Color {
@@ -346,5 +527,88 @@ mod tests {
         let settled = theme.colors;
         theme.advance(1.0);
         assert_eq!(theme.colors, settled);
+    }
+
+    #[test]
+    fn theme_navigation_skips_dislikes_and_preserves_manual_choices() {
+        let mut preferences = ThemePreferences::default();
+        let dark = ThemeId::all()
+            .find(|theme| theme.tone() == Tone::Dark && *theme != ThemeId::default())
+            .unwrap();
+        let light = ThemeId::all()
+            .find(|theme| theme.tone() == Tone::Light)
+            .unwrap();
+        preferences.remember_manual(dark);
+        preferences.remember_manual(light);
+        let skipped = dark.adjusted(Adjustment::Increase);
+        assert!(preferences.dislike(skipped));
+        assert_eq!(
+            preferences.navigate(dark, Adjustment::Increase),
+            Some(skipped.adjusted(Adjustment::Increase))
+        );
+        assert_eq!(preferences.remembered(Tone::Dark), Some(dark));
+        assert_eq!(preferences.remembered(Tone::Light), Some(light));
+        assert!(preferences.restore(skipped));
+        assert_eq!(
+            preferences.navigate(dark, Adjustment::Increase),
+            Some(skipped)
+        );
+    }
+
+    #[test]
+    fn automatic_theme_changes_apply_tone_policy_without_repeating() {
+        let current = ThemeId::default();
+        let dark = ThemeId::all()
+            .find(|theme| theme.tone() == Tone::Dark && *theme != current)
+            .unwrap();
+        let light = ThemeId::all()
+            .find(|theme| theme.tone() == Tone::Light)
+            .unwrap();
+        let mut preferences = ThemePreferences::default();
+        for theme in ThemeId::all().filter(|theme| ![current, dark, light].contains(theme)) {
+            assert!(preferences.dislike(theme));
+        }
+        assert_eq!(preferences.random(current, 0.0), Some(dark));
+        preferences.contrast = ThemeContrast::Always;
+        assert_eq!(preferences.random(current, 0.0), Some(light));
+        preferences.contrast = ThemeContrast::On;
+        assert_eq!(preferences.random(current, 0.0), Some(dark));
+        assert_eq!(preferences.random(current, 0.999), Some(light));
+        assert_eq!(preferences.remembered(Tone::Dark), Some(current));
+        assert!(preferences.dislike(dark));
+        preferences.contrast = ThemeContrast::Off;
+        assert_eq!(preferences.random(current, 0.0), None);
+        assert!(preferences.dislike(light));
+        assert!(!preferences.dislike(current));
+        assert_eq!(preferences.remembered(Tone::Light), None);
+        assert_eq!(preferences.navigate(current, Adjustment::Increase), None);
+    }
+
+    #[test]
+    fn theme_preferences_round_trip_and_reject_incoherent_saved_choices() {
+        let mut preferences = ThemePreferences::default();
+        let light = preferences.remembered(Tone::Light).unwrap();
+        let dark = preferences.remembered(Tone::Dark).unwrap();
+        preferences.auto_colors = true;
+        preferences.contrast = ThemeContrast::Always;
+        assert!(preferences.dislike(light));
+        assert_ne!(preferences.remembered(Tone::Light), Some(light));
+        let saved = ron::to_string(&preferences).unwrap();
+        assert_eq!(
+            ron::from_str::<ThemePreferences>(&saved).unwrap(),
+            preferences
+        );
+        assert!(
+            ron::from_str::<ThemePreferences>(&format!("(last_light: {:?})", dark.name())).is_err()
+        );
+        assert!(
+            ron::from_str::<ThemePreferences>(&format!("(last_dark: {:?})", light.name())).is_err()
+        );
+        let all_disliked = ron::to_string(&ThemeId::all().collect::<BTreeSet<_>>()).unwrap();
+        assert!(ron::from_str::<ThemePreferences>(&format!("(disliked: {all_disliked})")).is_err());
+        assert_eq!(
+            ron::from_str::<ThemePreferences>("()").unwrap(),
+            ThemePreferences::default()
+        );
     }
 }

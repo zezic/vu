@@ -66,6 +66,64 @@ impl PreampDb {
     }
 }
 
+/// Camera magnification, independent of the window size.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f64", into = "f64")]
+pub struct Zoom(f64);
+
+impl Zoom {
+    pub const MIN: f64 = 0.35;
+    pub const MAX: f64 = 3.0;
+
+    pub fn factor(self) -> f64 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn adjusted(self, adjustment: Adjustment) -> Self {
+        let delta = match adjustment {
+            Adjustment::Decrease => -0.1,
+            Adjustment::Increase => 0.1,
+        };
+        Self((self.0 + delta).clamp(Self::MIN, Self::MAX))
+    }
+
+    #[must_use]
+    pub fn scaled(self, factor: f64) -> Self {
+        assert!(
+            factor.is_finite() && factor > 0.0,
+            "zoom scaling must be finite and positive"
+        );
+        Self((self.0 * factor).clamp(Self::MIN, Self::MAX))
+    }
+}
+
+impl Default for Zoom {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl TryFrom<f64> for Zoom {
+    type Error = anyhow::Error;
+
+    fn try_from(factor: f64) -> Result<Self, Self::Error> {
+        ensure!(
+            factor.is_finite() && (Self::MIN..=Self::MAX).contains(&factor),
+            "zoom must be finite and between {} and {}",
+            Self::MIN,
+            Self::MAX
+        );
+        Ok(Self(factor))
+    }
+}
+
+impl From<Zoom> for f64 {
+    fn from(value: Zoom) -> Self {
+        value.0
+    }
+}
+
 /// Exposure length in frame intervals, bounded to keep motion history finite.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "f32", into = "f32")]
@@ -218,11 +276,22 @@ impl PresentationOpacity {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CursorVisibility {
+    Always,
+    #[default]
+    AutoHide,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub theme: crate::theme::ThemeId,
+    pub theme_preferences: crate::theme::ThemePreferences,
+    pub fullscreen: bool,
+    pub cursor_visibility: CursorVisibility,
     pub preamp_db: PreampDb,
+    pub zoom: Zoom,
     pub frame_rate_limit: FrameRateLimit,
     pub shutter_frames: ShutterFrames,
     pub visualizer_text_scale: VisualizerTextScale,
@@ -233,6 +302,7 @@ pub struct Config {
     pub crease_threshold: crate::visualizer::CreaseThreshold,
     pub line_width: crate::visualizer::LineWidth,
     pub model_motion: crate::visualizer::ModelMotion,
+    pub model_rotation: crate::visualizer::ModelRotation,
     pub motion_opacity: crate::visualizer::MotionOpacity,
     pub motion_fade_power: crate::visualizer::MotionFadePower,
     pub tuning: crate::visualizer::VisualizerTuning,
@@ -265,6 +335,33 @@ pub fn config_file() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_preserves_camera_bounds_across_dials_and_wheel_scaling() {
+        let normal = Zoom::default();
+        assert_eq!(normal.factor(), 1.0);
+        assert_eq!(normal.adjusted(Adjustment::Increase).factor(), 1.1);
+        assert_eq!(normal.scaled(2.0).factor(), 2.0);
+        assert_eq!(normal.scaled(0.01).factor(), Zoom::MIN);
+        assert_eq!(normal.scaled(100.0).factor(), Zoom::MAX);
+        assert_eq!(
+            Zoom::try_from(Zoom::MIN)
+                .unwrap()
+                .adjusted(Adjustment::Decrease)
+                .factor(),
+            Zoom::MIN
+        );
+        assert_eq!(
+            Zoom::try_from(Zoom::MAX)
+                .unwrap()
+                .adjusted(Adjustment::Increase)
+                .factor(),
+            Zoom::MAX
+        );
+        for invalid in [0.34, 3.01, f64::NAN, f64::INFINITY] {
+            assert!(Zoom::try_from(invalid).is_err());
+        }
+    }
 
     #[test]
     fn presentation_opacity_steps_between_sane_bounds() {

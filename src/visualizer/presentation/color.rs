@@ -17,6 +17,7 @@ pub struct ScenePalette {
 }
 
 impl ScenePalette {
+    #[cfg(test)]
     pub fn placeholder() -> Self {
         Self {
             ink: Color::WHITE,

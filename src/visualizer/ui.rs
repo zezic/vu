@@ -1,3 +1,7 @@
+mod pointer_click;
+
+use pointer_click::{ClickKind, ClickSequence};
+
 use std::{collections::HashMap, time::Instant};
 
 use strum::{EnumCount, VariantArray};
@@ -9,20 +13,25 @@ use vello::{
 
 use crate::{
     audio::AudioCursor,
-    config::{Config, PreampDb, PresentationOpacity, ShutterFrames, VisualizerTextScale},
-    frame_schedule::{FrameRateLimit, FrameTime},
+    config::{
+        Config, CursorVisibility, PreampDb, PresentationOpacity, ShutterFrames,
+        VisualizerTextScale, Zoom,
+    },
+    frame_schedule::{Adjustment, FrameRateLimit, FrameTime},
     render::{Frame, PlateInstance, PlateMaskImage, RasterAsset},
     text::{Fonts, Text, UiFace},
-    theme::{Theme, ThemeColors, ThemeId},
+    theme::{Theme, ThemeColors, ThemeId, ThemePreferences, Tone},
     AudioEvent,
 };
 
 use super::{
-    debug, presentation::Presentation, Contribution, CreaseThreshold, DebugSelection,
-    DebugSnapshot, DepthFade, Detector, DetectorSettings, DropKernel, Frame as VisualizerFrame,
-    LineWidth, ModelComposite, ModelMotion, MotionFadePower, MotionOpacity, NearOpacity, Palette,
-    Parameter, PatternKernel, PatternLayer, Property, TreeTarget, Visualizer, VisualizerTuning,
-    BAND_COUNT,
+    controls::{ControlAction, ControlState, Controls},
+    debug,
+    presentation::Presentation,
+    Contribution, CreaseThreshold, DebugSelection, DebugSnapshot, DepthFade, Detector,
+    DetectorSettings, DropKernel, Frame as VisualizerFrame, LineWidth, ModelComposite, ModelMotion,
+    MotionFadePower, MotionOpacity, NearOpacity, Palette, Parameter, PatternKernel, PatternLayer,
+    Property, TreeTarget, Visualizer, VisualizerTuning, BAND_COUNT,
 };
 
 pub(super) const HUD_MARGIN: f64 = 24.0;
@@ -31,7 +40,7 @@ pub(super) const HUD_MARGIN: f64 = 24.0;
 #[derive(Clone, Copy, PartialEq)]
 pub struct View {
     pub(super) viewport: Size,
-    zoom: f64,
+    zoom: Zoom,
     ui_scale: f64,
 }
 
@@ -43,14 +52,13 @@ impl View {
         );
         Self {
             viewport,
-            zoom: 1.0,
+            zoom: Zoom::default(),
             ui_scale: 1.0,
         }
     }
 
-    pub fn zoom(&mut self, factor: f64) {
-        assert!(factor > 0.0, "zoom must preserve a positive scale");
-        self.zoom = (self.zoom * factor).clamp(0.35, 3.0);
+    pub fn set_zoom(&mut self, zoom: Zoom) {
+        self.zoom = zoom;
     }
 
     /// Physical pixels per logical UI point, independent of window size.
@@ -67,7 +75,7 @@ impl View {
     }
 
     pub fn zoom_factor(&self) -> f64 {
-        self.zoom
+        self.zoom.factor()
     }
 }
 
@@ -286,7 +294,8 @@ pub struct Ui {
     pattern_drag: Option<PatternDrag>,
     temporal_view: debug::TemporalView,
     offset_drag: Option<Rect>,
-    pattern_click: Option<(Instant, Point)>,
+    pattern_click: ClickSequence,
+    presentation_click: ClickSequence,
     debug_clock: f32,
     debug_analysis_revision: u64,
     text_scale: VisualizerTextScale,
@@ -329,6 +338,10 @@ pub struct Ui {
     face: Scene,
     face_settings: Option<FaceSettings>,
     presentation: Presentation,
+    controls: Controls,
+    theme_preferences: ThemePreferences,
+    theme_model_revision: super::ModelRevision,
+    theme_rng: super::Rng,
     plate_mask: Option<PlateMaskImage>,
 }
 
@@ -391,7 +404,14 @@ impl Ui {
     }
 
     pub fn new(config: &Config) -> anyhow::Result<Self> {
-        let selected = config.theme;
+        let selected = if config.theme_preferences.is_disliked(config.theme) {
+            config
+                .theme_preferences
+                .navigate(config.theme, Adjustment::Increase)
+                .expect("at least one theme is available")
+        } else {
+            config.theme
+        };
         let mut fonts = Fonts::new()?;
         let scene_readout = Readout::inline(&mut fonts, ["MODEL"]);
         let debug_readout = Readout::inline(&mut fonts, ["[D]", "[B]"]);
@@ -439,6 +459,7 @@ impl Ui {
         visualizer.set_line_width(line_width);
         let model_motion = config.model_motion;
         visualizer.set_model_motion(model_motion);
+        visualizer.set_model_rotation(config.model_rotation);
         let motion_opacity = config.motion_opacity;
         visualizer.set_motion_opacity(motion_opacity);
         let motion_fade_power = config.motion_fade_power;
@@ -471,6 +492,9 @@ impl Ui {
             .collect();
         let preamp = config.preamp_db;
         let preamp_value = Readout::value(&mut fonts, &format!("{:.1}dB", preamp.db()));
+        let theme_model_revision = visualizer.model_revision();
+        let theme = Theme::new(selected);
+        let presentation = Presentation::new(&Palette::from_theme(selected), theme.colors);
         Ok(Self {
             scene_readout,
             scene_value,
@@ -502,7 +526,8 @@ impl Ui {
             pattern_drag: None,
             temporal_view: debug::TemporalView::editing(),
             offset_drag: None,
-            pattern_click: None,
+            pattern_click: ClickSequence::default(),
+            presentation_click: ClickSequence::default(),
             debug_clock: 0.0,
             debug_analysis_revision: 0,
             text_scale,
@@ -531,7 +556,7 @@ impl Ui {
             visualizer,
             preamp,
             audio: AudioCursor::new(),
-            theme: Theme::new(selected),
+            theme,
             theme_readout,
             theme_value,
             shutter_frames: config.shutter_frames,
@@ -544,7 +569,16 @@ impl Ui {
             frame_values,
             face: Scene::new(),
             face_settings: None,
-            presentation: Presentation::new(),
+            presentation,
+            controls: Controls::new(Instant::now()),
+            theme_preferences: config.theme_preferences.clone(),
+            theme_model_revision,
+            theme_rng: super::Rng::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock follows Unix epoch")
+                    .as_nanos() as u64,
+            ),
             plate_mask: None,
         })
     }
@@ -577,7 +611,11 @@ impl Ui {
         if self.presentation.active() == presentation {
             return;
         }
+        self.presentation_click.reset();
         self.presentation.set_active(presentation);
+        if presentation {
+            self.controls.activate(Instant::now());
+        }
         if presentation {
             self.clear_drag();
         }
@@ -626,6 +664,10 @@ impl Ui {
     /// Hover state for the analysis panel. The UI owns the layout, so the
     /// host only forwards the physical pointer position.
     pub fn set_pointer(&mut self, pointer: Option<Point>) {
+        self.controls.pointer(pointer, Instant::now());
+        if pointer.is_none() {
+            self.presentation_click.reset();
+        }
         if self.debug_pointer == pointer {
             return;
         }
@@ -892,7 +934,7 @@ impl Ui {
             }
         }
         self.clear_drag();
-        self.pattern_click = None;
+        self.pattern_click.reset();
         self.face_settings = None;
     }
 
@@ -974,11 +1016,8 @@ impl Ui {
             None
         };
         let now = Instant::now();
-        let double = self.pattern_click.take().is_some_and(|(at, previous)| {
-            now.duration_since(at) <= std::time::Duration::from_millis(400)
-                && previous.distance(position) <= 6.0
-        });
-        if double {
+        let click = self.pattern_click.record(position, now, 6.0);
+        if click == ClickKind::Double {
             match hit {
                 Some(debug::PatternHit::Vertex { layer, index }) => {
                     let polygon = match (kernel, layer) {
@@ -1024,7 +1063,6 @@ impl Ui {
             self.face_settings = None;
             return;
         }
-        self.pattern_click = Some((now, position));
         match hit {
             Some(debug::PatternHit::Vertex { layer, index }) => {
                 self.begin_polygon(detector, canvas, kernel, layer, index);
@@ -1077,7 +1115,7 @@ impl Ui {
         self.slider_drag = None;
         self.kernel_drag = None;
         self.pattern_drag = None;
-        self.pattern_click = None;
+        self.pattern_click.reset();
         self.offset_drag = Some(rect);
         if !self.temporal_view.paused {
             self.temporal_view.paused = true;
@@ -1172,8 +1210,6 @@ impl Ui {
 
     pub fn set_theme(&mut self, selected: ThemeId) {
         self.theme.select(selected);
-        self.visualizer
-            .set_model_composite(Self::model_composite(selected));
         self.theme_value = Readout::value(&mut self.fonts, selected.name());
         self.face_settings = None;
     }
@@ -1258,7 +1294,159 @@ impl Ui {
     }
 
     pub fn next_model(&mut self) {
-        self.visualizer.next_model();
+        self.navigate_model(Adjustment::Increase);
+    }
+
+    pub fn navigate_model(&mut self, adjustment: Adjustment) {
+        self.visualizer.navigate_model(adjustment);
+        self.auto_theme(Instant::now());
+    }
+
+    pub fn set_model_rotation(&mut self, rotation: super::ModelRotation) {
+        self.visualizer.set_model_rotation(rotation);
+    }
+
+    pub fn selected_theme(&self) -> ThemeId {
+        self.theme.selected()
+    }
+
+    pub fn theme_preferences(&self) -> &ThemePreferences {
+        &self.theme_preferences
+    }
+
+    pub fn theme_preferences_mut(&mut self) -> &mut ThemePreferences {
+        &mut self.theme_preferences
+    }
+
+    pub fn navigate_theme(&mut self, adjustment: Adjustment) {
+        if let Some(theme) = self
+            .theme_preferences
+            .navigate(self.theme.selected(), adjustment)
+        {
+            self.choose_theme(theme);
+        }
+    }
+
+    pub fn choose_tone(&mut self, tone: Tone) {
+        if let Some(theme) = self.theme_preferences.remembered(tone) {
+            self.choose_theme(theme);
+        }
+    }
+
+    pub fn choose_theme(&mut self, theme: ThemeId) {
+        self.theme_preferences.remember_manual(theme);
+        self.set_theme(theme);
+    }
+
+    pub fn dislike_theme(&mut self) {
+        let current = self.theme.selected();
+        if self.theme_preferences.dislike(current) {
+            let next = self
+                .theme_preferences
+                .navigate(current, Adjustment::Increase)
+                .expect("disliking leaves an available theme");
+            self.choose_theme(next);
+        }
+    }
+
+    pub fn set_control_modifiers(&mut self, held: bool) {
+        self.controls.modifiers(held, Instant::now());
+    }
+
+    pub fn click_controls(&mut self, view: &View, point: Point) -> Option<ControlAction> {
+        self.click_controls_at(view, point, Instant::now())
+    }
+
+    fn click_controls_at(
+        &mut self,
+        view: &View,
+        point: Point,
+        now: Instant,
+    ) -> Option<ControlAction> {
+        assert!(
+            self.presentation(),
+            "presentation clicks require presentation mode"
+        );
+        let over_controls = self.controls.contains(point);
+        let action = self.controls.click(point, now);
+        if over_controls {
+            self.presentation_click.reset();
+            action
+        } else {
+            match self
+                .presentation_click
+                .record(point, now, 6.0 * view.ui_scale())
+            {
+                ClickKind::Single => None,
+                ClickKind::Double => Some(ControlAction::Fullscreen),
+            }
+        }
+    }
+
+    pub fn reset_presentation_clicks(&mut self) {
+        self.presentation_click.reset();
+    }
+
+    pub fn scroll_controls(&mut self, delta: f64) {
+        self.controls.scroll(delta, Instant::now());
+    }
+
+    pub fn cursor_visible(&self, visibility: CursorVisibility) -> bool {
+        !self.presentation()
+            || self.debug_pointer.is_none()
+            || visibility == CursorVisibility::Always
+            || self.controls.cursor_visible()
+    }
+
+    pub fn draw_controls(
+        &mut self,
+        scene: &mut Scene,
+        view: &View,
+        config: &Config,
+        fullscreen: bool,
+        now: Instant,
+    ) -> bool {
+        scene.reset();
+        let visible = self.presentation()
+            && self.controls.draw(
+                &mut self.fonts,
+                scene,
+                view,
+                ControlState {
+                    config,
+                    theme: self.theme.selected(),
+                    model: self.visualizer.scene_name(),
+                    fullscreen,
+                    palette: self.presentation.colors(),
+                    background: self.theme.colors.background,
+                    history: self.visualizer.debug_history(),
+                },
+                now,
+            );
+        self.presentation.set_exclusion_bounds(if visible {
+            self.controls.exclusion_bounds()
+        } else {
+            None
+        });
+        visible
+    }
+
+    fn auto_theme(&mut self, now: Instant) {
+        let revision = self.visualizer.model_revision();
+        if revision != self.theme_model_revision {
+            self.theme_model_revision = revision;
+            if self.presentation()
+                && self.theme_preferences.auto_colors
+                && self.controls.cooldown(now) == 0.0
+            {
+                if let Some(theme) = self
+                    .theme_preferences
+                    .random(self.theme.selected(), self.theme_rng.unit())
+                {
+                    self.set_theme(theme);
+                }
+            }
+        }
     }
 
     pub fn set_line_width(&mut self, width: LineWidth) {
@@ -1566,6 +1754,8 @@ impl Ui {
         frame_time: FrameTime,
     ) -> UiFrame<'_> {
         let dt = frame_time.seconds();
+        let composite = Self::model_composite(self.theme.selected());
+        self.visualizer.set_model_composite(composite);
         self.theme.advance(dt);
         let presentation_active = self.presentation.active();
         let tree_open =
@@ -1583,6 +1773,7 @@ impl Ui {
             view.zoom_factor() as f32,
             view.ui_scale() as f32 * self.text_scale.factor(),
         );
+        self.auto_theme(frame_time.end());
         self.presentation.update(
             dt,
             (view.viewport.width as f32, view.viewport.height as f32),
@@ -1644,8 +1835,7 @@ impl Ui {
                 );
             }
         }
-        let overlay_composite =
-            presentation_active.then_some(Self::model_composite(self.theme.selected()));
+        let overlay_composite = presentation_active.then_some(composite);
         let overlay_opacity = if presentation_active {
             self.presentation_opacity.factor()
         } else {
@@ -1706,6 +1896,135 @@ mod tests {
     };
     use std::time::Duration;
 
+    #[test]
+    fn background_click_pairs_use_logical_distance_and_reset_with_presentation_context(
+    ) -> anyhow::Result<()> {
+        let mut ui = Ui::new(&Config::default())?;
+        ui.set_presentation(true);
+        let mut view = View::fit(Size::new(1920.0, 1080.0));
+        view.set_ui_scale(2.0);
+        let now = Instant::now();
+        let first = Point::new(20.0, 20.0);
+        let second = Point::new(31.0, 20.0);
+        for pair in 0..2 {
+            let at = now + Duration::from_millis(pair * 100);
+            assert!(ui.click_controls_at(&view, first, at).is_none());
+            assert!(matches!(
+                ui.click_controls_at(&view, second, at + Duration::from_millis(50)),
+                Some(ControlAction::Fullscreen)
+            ));
+        }
+        let at = now + Duration::from_millis(300);
+        assert!(ui.click_controls_at(&view, first, at).is_none());
+        ui.set_pointer(None);
+        assert!(ui
+            .click_controls_at(&view, first, at + Duration::from_millis(10))
+            .is_none());
+        ui.set_presentation(false);
+        ui.set_presentation(true);
+        assert!(ui
+            .click_controls_at(&view, first, at + Duration::from_millis(20))
+            .is_none());
+        ui.reset_presentation_clicks();
+        assert!(ui
+            .click_controls_at(&view, first, at + Duration::from_millis(30))
+            .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn visible_controls_hints_and_popups_interrupt_background_click_pairs() -> anyhow::Result<()> {
+        let config = Config::default();
+        let mut ui = Ui::new(&config)?;
+        ui.set_presentation(true);
+        let view = View::fit(Size::new(1920.0, 1080.0));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        ui.draw_controls(&mut scene, &view, &config, false, now);
+        let auto = ui
+            .controls
+            .target_center(|action| matches!(action, ControlAction::AutoColors));
+        let tone = ui
+            .controls
+            .target_center(|action| matches!(action, ControlAction::Tone(_)));
+        let disabled_contrast = Point::new(auto.x, tone.y);
+        let hint = Point::new(
+            auto.x,
+            ui.controls.exclusion_bounds().expect("controls visible").y0 + 1.0,
+        );
+        let boost = ui
+            .controls
+            .target_center(|action| matches!(action, ControlAction::Boost(_)));
+        ui.set_pointer(Some(boost));
+        ui.draw_controls(&mut scene, &view, &config, false, now);
+        let graph = Point::new(
+            boost.x,
+            ui.controls.exclusion_bounds().expect("graph visible").y0 + 20.0,
+        );
+        let background = Point::new(10.0, 10.0);
+        for (index, point) in [disabled_contrast, hint, graph, auto]
+            .into_iter()
+            .enumerate()
+        {
+            let at = now + Duration::from_millis(index as u64 * 50);
+            assert!(ui.click_controls_at(&view, background, at).is_none());
+            assert!(!matches!(
+                ui.click_controls_at(&view, point, at + Duration::from_millis(10)),
+                Some(ControlAction::Fullscreen)
+            ));
+            assert!(ui
+                .click_controls_at(&view, background, at + Duration::from_millis(20))
+                .is_none());
+            assert!(matches!(
+                ui.click_controls_at(&view, background, at + Duration::from_millis(30)),
+                Some(ControlAction::Fullscreen)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hidden_controls_wake_without_receiving_stale_actions() -> anyhow::Result<()> {
+        let config = Config::default();
+        let mut ui = Ui::new(&config)?;
+        ui.set_presentation(true);
+        let view = View::fit(Size::new(1920.0, 1080.0));
+        let now = Instant::now();
+        let mut scene = Scene::new();
+        ui.draw_controls(&mut scene, &view, &config, false, now);
+        let auto = ui
+            .controls
+            .target_center(|action| matches!(action, ControlAction::AutoColors));
+        let hidden_at = now + Duration::from_secs(11);
+        assert!(!ui.draw_controls(&mut scene, &view, &config, false, hidden_at));
+        assert!(ui.click_controls_at(&view, auto, hidden_at).is_none());
+        assert!(matches!(
+            ui.click_controls_at(&view, auto, hidden_at + Duration::from_millis(50)),
+            Some(ControlAction::Fullscreen)
+        ));
+        let next = now + Duration::from_secs(12);
+        assert!(ui.click_controls_at(&view, auto, next).is_none());
+        assert!(ui.draw_controls(
+            &mut scene,
+            &view,
+            &config,
+            false,
+            next + Duration::from_millis(100)
+        ));
+        assert!(matches!(
+            ui.click_controls_at(&view, auto, next + Duration::from_millis(150)),
+            Some(ControlAction::AutoColors)
+        ));
+        assert!(ui
+            .click_controls_at(
+                &view,
+                Point::new(10.0, 10.0),
+                next + Duration::from_millis(200)
+            )
+            .is_none());
+        Ok(())
+    }
+
     fn write_preview(
         path: &std::path::Path,
         width: u32,
@@ -1723,14 +2042,15 @@ mod tests {
     fn presentation_pixels(
         ui: &mut Ui,
         view: &View,
-        width: u32,
-        height: u32,
         frames: usize,
         feed_audio: bool,
+        controls_config: Option<&Config>,
         mut before_frame: impl FnMut(usize, &mut Ui),
     ) -> anyhow::Result<Vec<u8>> {
         use vello::{kurbo::Size, util::RenderContext, wgpu, RenderParams};
 
+        let width = view.viewport.width as u32;
+        let height = view.viewport.height as u32;
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut context = RenderContext::new();
         let id = pollster::block_on(crate::render::prepare_device(
@@ -1767,6 +2087,13 @@ mod tests {
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::RENDER_ATTACHMENT,
         );
+        let top = make_texture(
+            "Presentation controls",
+            wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let top_view = top.create_view(&wgpu::TextureViewDescriptor::default());
         let target = make_texture(
             "Presentation target",
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
@@ -1780,8 +2107,13 @@ mod tests {
             crate::render::PlateMask::new(&device.device, &mut renderer, width, height);
         ui.set_plate_mask(Some(plate_mask.image()));
 
+        if feed_audio {
+            ui.audio_event(AudioEvent::Config { samplerate: 48_000 });
+        }
         let now = Instant::now();
         let mut scene = Scene::new();
+        let mut top_scene = Scene::new();
+        let mut top_visible = false;
         let mut last = None;
         for frame in 0..frames {
             let mut input = Vec::with_capacity(800);
@@ -1796,17 +2128,28 @@ mod tests {
                 };
                 let tone = 0.2 * (std::f32::consts::TAU * 220.0 * time).sin()
                     + 0.1 * (std::f32::consts::TAU * 900.0 * time).sin();
-                input.push([tone + kick * (std::f32::consts::TAU * 64.0 * time).sin(); 2]);
+                let level = match frame % 240 {
+                    0..60 => 2.0,
+                    60..120 => 0.04,
+                    120..180 => 3.0,
+                    _ => 1.0,
+                };
+                input
+                    .push([level * (tone + kick * (std::f32::consts::TAU * 64.0 * time).sin()); 2]);
             }
             before_frame(frame, ui);
             if feed_audio {
-                ui.consume_buf(&input, now + Duration::from_millis((frame as u64) * 16));
+                ui.consume_buf(&input, now + Duration::from_secs_f64(frame as f64 / 60.0));
             }
             scene.reset();
             let frame_time = FrameTime::new(
-                now + Duration::from_millis((frame as u64) * 16),
-                now + Duration::from_millis(((frame + 1) as u64) * 16),
+                now + Duration::from_secs_f64(frame as f64 / 60.0),
+                now + Duration::from_secs_f64((frame + 1) as f64 / 60.0),
             );
+            if let Some(config) = controls_config {
+                top_visible =
+                    ui.draw_controls(&mut top_scene, view, config, false, frame_time.end());
+            }
             last = Some(ui.draw(&mut scene, view, FrameRateLimit::Fps120, frame_time));
         }
         let frame = last.expect("the presentation produced a frame");
@@ -1842,6 +2185,15 @@ mod tests {
             &foreground_view,
             &params,
         )?;
+        if top_visible {
+            renderer.render_to_texture(
+                &device.device,
+                &device.queue,
+                &top_scene,
+                &top_view,
+                &params,
+            )?;
+        }
         let mut visualizer_renderer = crate::visualizer::Renderer::new(&device.device, format);
         let mut encoder = device
             .device
@@ -1856,11 +2208,14 @@ mod tests {
             Some(&foreground_view),
             frame.overlay_composite,
             frame.overlay_opacity,
+            top_visible.then_some(&top_view),
         );
         let row_bytes = width * 4;
+        let padded_row_bytes = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let readback = device.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Presentation readback"),
-            size: u64::from(row_bytes * height),
+            size: u64::from(padded_row_bytes * height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -1870,7 +2225,7 @@ mod tests {
                 buffer: &readback,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(row_bytes),
+                    bytes_per_row: Some(padded_row_bytes),
                     rows_per_image: Some(height),
                 },
             },
@@ -1883,7 +2238,12 @@ mod tests {
             .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
         device.device.poll(wgpu::PollType::wait_indefinitely())?;
         rx.recv()??;
-        let pixels = readback.slice(..).get_mapped_range()?.to_vec();
+        let mapped = readback.slice(..).get_mapped_range()?;
+        let pixels = mapped
+            .chunks(padded_row_bytes as usize)
+            .flat_map(|row| row[..row_bytes as usize].iter().copied())
+            .collect();
+        drop(mapped);
         readback.unmap();
         Ok(pixels)
     }
@@ -1913,7 +2273,7 @@ mod tests {
                 MotionOpacity::default(),
                 MotionFadePower::default(),
             ),
-            "MODEL [\\] 2/3   BLUR [T] ON   WIDTH [;] [']  80%   FLOOR [L] [R]   0%   POWER [Y] 0.5"
+            "MODEL [\\] 2/3   BLUR [T] ON   WIDTH [;] [']  60%   FLOOR [L] [R]   0%   POWER [Y] 0.5"
         );
     }
 
@@ -1976,6 +2336,270 @@ mod tests {
     }
 
     #[test]
+    fn auto_colors_skip_cooldown_and_preserve_manual_preferences() -> anyhow::Result<()> {
+        let config = Config::default();
+        let mut ui = Ui::new(&config)?;
+        ui.set_presentation(true);
+        ui.theme_preferences.auto_colors = true;
+        ui.theme_preferences.contrast = crate::theme::ThemeContrast::Always;
+        let now = Instant::now();
+        let manual = ui.theme_preferences.clone();
+        ui.controls.pointer(Some(Point::new(1.0, 1.0)), now);
+        ui.visualizer.navigate_model(Adjustment::Increase);
+        ui.auto_theme(now + Duration::from_secs(5));
+        assert_eq!(ui.selected_theme(), config.theme);
+        ui.auto_theme(now + Duration::from_secs(11));
+        assert_eq!(
+            ui.selected_theme(),
+            config.theme,
+            "suppressed changes are not queued"
+        );
+        ui.visualizer.navigate_model(Adjustment::Increase);
+        ui.auto_theme(now + Duration::from_secs(11));
+        assert_ne!(ui.selected_theme().tone(), config.theme.tone());
+        assert_eq!(ui.theme_preferences, manual);
+        ui.choose_tone(config.theme.tone());
+        assert_eq!(ui.selected_theme(), config.theme);
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_change_inside_cooldown_is_skipped_after_a_delayed_redraw() -> anyhow::Result<()> {
+        let config = Config::default();
+        let mut ui = Ui::new(&config)?;
+        ui.set_presentation(true);
+        ui.theme_preferences.auto_colors = true;
+        let now = Instant::now();
+        ui.controls.pointer(Some(Point::new(1.0, 1.0)), now);
+        ui.visualizer.navigate_model(Adjustment::Increase);
+        let mut scene = Scene::new();
+        let view = View::fit(Size::new(1280.0, 720.0));
+        ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            FrameTime::new(
+                now + Duration::from_millis(9980),
+                now + Duration::from_millis(9990),
+            ),
+        );
+        assert_eq!(ui.selected_theme(), config.theme);
+        ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            FrameTime::new(
+                now + Duration::from_secs(30),
+                now + Duration::from_millis(30016),
+            ),
+        );
+        assert_eq!(ui.selected_theme(), config.theme);
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_contrast_changes_keep_each_frame_color_composition_consistent(
+    ) -> anyhow::Result<()> {
+        let config = Config::default();
+        let mut ui = Ui::new(&config)?;
+        ui.set_presentation(true);
+        ui.theme_preferences.auto_colors = true;
+        ui.theme_preferences.contrast = crate::theme::ThemeContrast::Always;
+        let now = Instant::now();
+        ui.controls
+            .pointer(Some(Point::new(1.0, 1.0)), now - Duration::from_secs(11));
+        ui.visualizer.navigate_model(Adjustment::Increase);
+        let view = View::fit(Size::new(1280.0, 720.0));
+        let mut scene = Scene::new();
+        let original = Ui::model_composite(config.theme);
+        let frame = ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            FrameTime::new(now, now + Duration::from_millis(16)),
+        );
+        assert_eq!(frame.overlay.model_composite, original);
+        assert_eq!(frame.overlay_composite, Some(original));
+        assert_ne!(ui.selected_theme().tone(), config.theme.tone());
+        let next = Ui::model_composite(ui.selected_theme());
+        let frame = ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            FrameTime::new(
+                now + Duration::from_millis(16),
+                now + Duration::from_millis(32),
+            ),
+        );
+        assert_eq!(frame.overlay.model_composite, next);
+        assert_eq!(frame.overlay_composite, Some(next));
+        Ok(())
+    }
+
+    #[test]
+    fn startup_and_manual_choices_never_select_disliked_themes() -> anyhow::Result<()> {
+        let mut config = Config::default();
+        config.theme_preferences.dislike(config.theme);
+        let mut ui = Ui::new(&config)?;
+        assert_ne!(ui.selected_theme(), config.theme);
+        ui.navigate_theme(Adjustment::Decrease);
+        assert!(!ui.theme_preferences.is_disliked(ui.selected_theme()));
+        let previous = ui.selected_theme();
+        ui.dislike_theme();
+        assert!(ui.theme_preferences.is_disliked(previous));
+        assert_ne!(ui.selected_theme(), previous);
+        Ok(())
+    }
+
+    #[test]
+    fn presentation_history_exposes_the_boosted_rms_used_by_the_gap_gate() -> anyhow::Result<()> {
+        let mut config = Config::default();
+        config.preamp_db = PreampDb::try_from(6.0)?;
+        let mut ui = Ui::new(&config)?;
+        ui.set_presentation(true);
+        ui.audio_event(AudioEvent::Config { samplerate: 48_000 });
+        let now = Instant::now();
+        let input: Vec<_> = (0..48_000)
+            .map(|index| {
+                let value =
+                    0.02 * (std::f32::consts::TAU * 1_000.0 * index as f32 / 48_000.0).sin();
+                [value; 2]
+            })
+            .collect();
+        ui.consume_buf(&input, now);
+        let mut scene = Scene::new();
+        let view = View::fit(Size::new(1920.0, 1080.0));
+        ui.draw(
+            &mut scene,
+            &view,
+            FrameRateLimit::Fps60,
+            FrameTime::new(now, now + Duration::from_secs(1)),
+        );
+        let sample = ui
+            .visualizer
+            .debug_history()
+            .latest()
+            .expect("presentation records analysis history");
+        let expected = 20.0 * (0.02 * config.preamp_db.gain() / std::f32::consts::SQRT_2).log10();
+        assert!((sample.drop_status.rms_db - expected).abs() < 0.1);
+        assert!(sample.drop_status.envelope_db < config.detectors.drop_gap_threshold);
+        assert!(!ui.debug());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_analyzer_boost_gap_graph() -> anyhow::Result<()> {
+        let directory = std::env::var_os("VU_GAP_PREVIEW_DIR").map(std::path::PathBuf::from);
+        if let Some(directory) = &directory {
+            std::fs::create_dir_all(directory)?;
+        }
+        for (width, height, light) in [(1920, 1080, false), (1920, 1080, true), (800, 600, false)] {
+            let mut config = Config::default();
+            if light {
+                config.theme = ThemeId::all()
+                    .find(|theme| theme.is_light())
+                    .expect("light themes exist");
+            }
+            let mut ui = Ui::new(&config)?;
+            ui.set_presentation(true);
+            let view = View::fit(Size::new(f64::from(width), f64::from(height)));
+            let mut top = Scene::new();
+            ui.draw_controls(&mut top, &view, &config, false, Instant::now());
+            let boost = ui
+                .controls
+                .target_center(|action| matches!(action, ControlAction::Boost(_)));
+            ui.set_pointer(Some(boost));
+            let pixels = presentation_pixels(&mut ui, &view, 240, true, Some(&config), |_, _| {})?;
+            if let Some(directory) = &directory {
+                write_preview(
+                    &directory.join(format!("gap-{width}x{height}-{light}.png")),
+                    width,
+                    height,
+                    &pixels,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a compute-capable GPU"]
+    fn renders_presentation_controls() -> anyhow::Result<()> {
+        let directory = std::env::var_os("VU_CONTROLS_PREVIEW_DIR").map(std::path::PathBuf::from);
+        if let Some(directory) = &directory {
+            std::fs::create_dir_all(directory)?;
+        }
+        for (width, height, scale, light, manager) in [
+            (1920, 1080, 1.0, false, false),
+            (800, 600, 1.0, false, false),
+            (1280, 720, 2.0, false, false),
+            (1920, 1080, 1.0, true, false),
+            (1920, 1080, 1.0, false, true),
+            (800, 600, 1.0, false, true),
+        ] {
+            let mut config = Config::default();
+            config.theme_preferences.auto_colors = true;
+            if light {
+                config.theme = ThemeId::all()
+                    .find(|theme| theme.is_light())
+                    .expect("light themes exist");
+            }
+            if manager {
+                for theme in ThemeId::all()
+                    .filter(|theme| *theme != config.theme)
+                    .take(12)
+                {
+                    config.theme_preferences.dislike(theme);
+                }
+                config.presentation_opacity = PresentationOpacity::try_from(0.0)?;
+            }
+            let mut ui = Ui::new(&config)?;
+            ui.set_presentation(true);
+            let mut view = View::fit(Size::new(f64::from(width), f64::from(height)));
+            view.set_ui_scale(scale);
+            if manager {
+                let mut controls_scene = Scene::new();
+                ui.draw_controls(&mut controls_scene, &view, &config, false, Instant::now());
+                let dislike = ui
+                    .controls
+                    .target_center(|action| matches!(action, ControlAction::Dislike));
+                ui.set_pointer(Some(dislike));
+                ui.draw_controls(&mut controls_scene, &view, &config, false, Instant::now());
+                let manage = ui
+                    .controls
+                    .target_center(|action| matches!(action, ControlAction::Manage));
+                ui.set_pointer(Some(manage));
+                ui.click_controls(&view, manage);
+                ui.set_control_modifiers(true);
+            }
+            let pixels =
+                presentation_pixels(&mut ui, &view, 90, false, Some(&config), |frame, ui| {
+                    if !manager && frame == 1 {
+                        ui.visualizer
+                            .set_parameter(Parameter::SelectorEntryKicks, 1.0);
+                        ui.visualizer.handle_action(
+                            crate::visualizer::Action::Kick(0.6),
+                            0.0,
+                            0.75,
+                        );
+                    }
+                })?;
+            if let Some(directory) = &directory {
+                write_preview(
+                    &directory.join(format!(
+                        "controls-{width}x{height}-{scale}-{light}-{manager}.png"
+                    )),
+                    width,
+                    height,
+                    &pixels,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "requires a compute-capable GPU"]
     fn renders_presentation_at_sixteen_by_nine() -> anyhow::Result<()> {
         let width = 1920;
@@ -1997,7 +2621,7 @@ mod tests {
             }
             ui.visualizer.next_model();
         }
-        let pixels = presentation_pixels(&mut ui, &view, width, height, 150, false, |_, _| {})?;
+        let pixels = presentation_pixels(&mut ui, &view, 150, false, None, |_, _| {})?;
         if let Some(path) = std::env::var_os("VU_PRESENTATION_PREVIEW_PATH") {
             write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
         }
@@ -2026,7 +2650,7 @@ mod tests {
             }
             ui.visualizer.next_model();
         }
-        let pixels = presentation_pixels(&mut ui, &view, width, height, 22, false, |_, _| {})?;
+        let pixels = presentation_pixels(&mut ui, &view, 22, false, None, |_, _| {})?;
         if let Some(path) = std::env::var_os("VU_ENTRANCE_PREVIEW_PATH") {
             write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
         }
@@ -2057,7 +2681,7 @@ mod tests {
             }
             ui.visualizer.next_model();
         }
-        let pixels = presentation_pixels(&mut ui, &view, width, height, 80, false, |_, _| {})?;
+        let pixels = presentation_pixels(&mut ui, &view, 80, false, None, |_, _| {})?;
         if let Some(path) = std::env::var_os("VU_OPACITY_PREVIEW_PATH") {
             write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
         }
@@ -2088,7 +2712,7 @@ mod tests {
             }
             ui.visualizer.next_model();
         }
-        let pixels = presentation_pixels(&mut ui, &view, width, height, 80, false, |_, _| {})?;
+        let pixels = presentation_pixels(&mut ui, &view, 80, false, None, |_, _| {})?;
         if let Some(path) = std::env::var_os("VU_LIGHT_PREVIEW_PATH") {
             write_preview(&std::path::PathBuf::from(path), width, height, &pixels)?;
         }
@@ -2122,7 +2746,7 @@ mod tests {
         }
         for (width, height) in [(1280, 720), (1280, 440), (1024, 768)] {
             let view = View::fit(Size::new(f64::from(width), f64::from(height)));
-            let pixels = presentation_pixels(&mut ui, &view, width, height, 70, false, |_, _| {})?;
+            let pixels = presentation_pixels(&mut ui, &view, 70, false, None, |_, _| {})?;
             write_preview(
                 &directory.join(format!("presentation-{width}x{height}.png")),
                 width,
@@ -2157,7 +2781,7 @@ mod tests {
             }
             ui.visualizer.next_model();
         }
-        let pixels = presentation_pixels(&mut ui, &view, width, height, 90, false, |frame, ui| {
+        let pixels = presentation_pixels(&mut ui, &view, 90, false, None, |frame, ui| {
             if frame == 0 {
                 ui.visualizer
                     .set_parameter(Parameter::SelectorEntryKicks, 1.0);
@@ -2197,7 +2821,7 @@ mod tests {
             }
             ui.visualizer.next_model();
         }
-        let pixels = presentation_pixels(&mut ui, &view, width, height, 38, false, |frame, ui| {
+        let pixels = presentation_pixels(&mut ui, &view, 38, false, None, |frame, ui| {
             if frame == 0 {
                 ui.visualizer
                     .set_parameter(Parameter::SelectorEntryKicks, 1.0);
@@ -2243,7 +2867,7 @@ mod tests {
             .set_parameter(Parameter::SnarePoiSwitches, 10.0);
         let mut rng = Rng::new(7);
         ui.visualizer.showcase.enter_focus(&mut rng, 1.1);
-        let pixels = presentation_pixels(&mut ui, &view, width, height, 80, false, |frame, ui| {
+        let pixels = presentation_pixels(&mut ui, &view, 80, false, None, |frame, ui| {
             if frame == 35 {
                 ui.visualizer.handle_action(Action::Snare, 0.0, 1.1);
             }

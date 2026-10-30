@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 
 use vello::{
-    kurbo::{Affine, Point, Rect, Stroke},
+    kurbo::{Affine, Point, Rect, Shape, Stroke},
     peniko::Fill,
     Scene,
 };
@@ -59,6 +59,17 @@ enum GridSide {
     Bottom,
 }
 
+impl GridSide {
+    fn choose(rng: &mut Rng, exclusion: Option<Rect>) -> Self {
+        let sides: &[Self] = if exclusion.is_some() {
+            &[Self::Left, Self::Right]
+        } else {
+            &[Self::Left, Self::Right, Self::Bottom]
+        };
+        sides[rng.range(sides.len())]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GridTarget {
     /// Index into the resolved showcase POIs.
@@ -91,8 +102,8 @@ pub struct SelectorOverlay {
     phase: Phase,
     clock: f32,
     exit_clock: f32,
-    stage_unit: f64,
-    stage_size: (f64, f64),
+    layout_size: Option<(f64, f64)>,
+    exclusion: Option<Rect>,
     side: GridSide,
     log_right: bool,
     items: Vec<GridItem>,
@@ -113,8 +124,8 @@ impl Default for SelectorOverlay {
             phase: Phase::Hidden,
             clock: 0.0,
             exit_clock: 0.0,
-            stage_unit: f64::NAN,
-            stage_size: (0.0, 0.0),
+            layout_size: None,
+            exclusion: None,
             side: GridSide::Right,
             log_right: false,
             items: Vec::new(),
@@ -132,6 +143,20 @@ impl Default for SelectorOverlay {
 }
 
 impl SelectorOverlay {
+    pub fn set_exclusion_bounds(&mut self, exclusion: Option<Rect>) {
+        if self.exclusion != exclusion {
+            self.exclusion = exclusion;
+            if exclusion.is_some() && self.side == GridSide::Bottom {
+                self.side = if self.log_right {
+                    GridSide::Left
+                } else {
+                    GridSide::Right
+                };
+            }
+            self.layout_size = None;
+        }
+    }
+
     pub fn hide(&mut self) {
         self.phase = Phase::Hidden;
         self.items.clear();
@@ -190,6 +215,7 @@ impl SelectorOverlay {
                 self.layout(fonts, stage, rng);
             }
             Phase::Exiting => {
+                self.ensure_layout(fonts, stage, rng);
                 self.exit_clock += dt;
                 if self.exit_clock > self.exit_duration() {
                     self.hide();
@@ -207,11 +233,7 @@ impl SelectorOverlay {
         self.last_part = None;
         self.items.clear();
         self.log.clear();
-        self.side = match rng.range(3) {
-            0 => GridSide::Left,
-            1 => GridSide::Right,
-            _ => GridSide::Bottom,
-        };
+        self.side = GridSide::choose(rng, self.exclusion);
         self.log_right = match self.side {
             GridSide::Left => true,
             GridSide::Right => false,
@@ -396,18 +418,14 @@ impl SelectorOverlay {
     }
 
     fn ensure_layout(&mut self, fonts: &mut Fonts, stage: &Stage, rng: &mut Rng) {
-        if (self.stage_unit - stage.unit).abs() <= f64::EPSILON
-            && (self.stage_size.0 - stage.width).abs() <= f64::EPSILON
-            && (self.stage_size.1 - stage.height).abs() <= f64::EPSILON
-        {
+        if self.layout_size == Some((stage.width, stage.height)) {
             return;
         }
         self.layout(fonts, stage, rng);
     }
 
     fn layout(&mut self, fonts: &mut Fonts, stage: &Stage, rng: &mut Rng) {
-        self.stage_unit = stage.unit;
-        self.stage_size = (stage.width, stage.height);
+        self.layout_size = Some((stage.width, stage.height));
         let count = self.items.len().max(1);
         let gap = stage.px(3.0);
         let item_height = stage.px(25.0);
@@ -439,6 +457,7 @@ impl SelectorOverlay {
                 (columns, rows, Rect::new(x, y, x + width, y + height))
             }
         };
+        let grid_rect = clear_exclusion(grid_rect, self.exclusion, stage);
         self.grid_rect = grid_rect;
         let item_width = (grid_rect.width() - (columns - 1) as f64 * gap) / columns as f64;
         self.item_rects.clear();
@@ -462,7 +481,11 @@ impl SelectorOverlay {
             stage.margin,
             (stage.height - stage.margin - log_height).max(stage.margin),
         );
-        self.log_rect = Rect::new(log_x, log_y, log_x + log_width, log_y + log_height);
+        self.log_rect = clear_exclusion(
+            Rect::new(log_x, log_y, log_x + log_width, log_y + log_height),
+            self.exclusion,
+            stage,
+        );
 
         self.header = Some(static_text(
             "PARTS BUS / SELECTOR FX",
@@ -568,6 +591,11 @@ impl SelectorOverlay {
     pub fn draw(&self, scene: &mut Scene, stage: &Stage, palette: ScenePalette) {
         if self.phase == Phase::Hidden {
             return;
+        }
+        if let Some(exclusion) = self.exclusion {
+            let mut clip = Rect::new(0.0, 0.0, stage.width, stage.height).to_path(0.1);
+            clip.extend(exclusion.path_elements(0.1));
+            scene.push_clip_layer(Fill::EvenOdd, Affine::IDENTITY, &clip);
         }
         let grid_header_height = stage.px(20.0);
         if let Some(header) = &self.header {
@@ -708,6 +736,9 @@ impl SelectorOverlay {
                 y -= stage.px(1.5);
             }
         }
+        if self.exclusion.is_some() {
+            scene.pop_layer();
+        }
     }
 
     fn item_alpha(&self, index: usize) -> f32 {
@@ -733,6 +764,16 @@ impl SelectorOverlay {
                 1.0 - smoothstep((self.exit_clock - start) / 0.25)
             }
         }
+    }
+}
+
+fn clear_exclusion(rect: Rect, exclusion: Option<Rect>, stage: &Stage) -> Rect {
+    match exclusion {
+        Some(exclusion) if rect.intersect(exclusion).area() > 0.0 => {
+            let y = (exclusion.y0 - stage.px(10.0) - rect.height()).max(stage.margin);
+            Rect::new(rect.x0, y, rect.x1, y + rect.height())
+        }
+        _ => rect,
     }
 }
 
@@ -807,4 +848,47 @@ fn first_sentence(fact: &str) -> String {
 fn smoothstep(value: f32) -> f32 {
     let value = value.clamp(0.0, 1.0);
     value * value * (3.0 - 2.0 * value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserved_space_excludes_bottom_placement() {
+        let exclusion = Rect::new(180.0, 800.0, 1740.0, 1056.0);
+        let mut unrestricted_bottom = false;
+        for seed in 0..128 {
+            assert_ne!(
+                GridSide::choose(&mut Rng::new(seed), Some(exclusion)),
+                GridSide::Bottom
+            );
+            unrestricted_bottom |= GridSide::choose(&mut Rng::new(seed), None) == GridSide::Bottom;
+        }
+        assert!(unrestricted_bottom);
+    }
+
+    #[test]
+    fn returning_overlay_relocates_an_active_or_exiting_bottom_grid() -> anyhow::Result<()> {
+        let stage = Stage::new(vello::kurbo::Size::new(1920.0, 1080.0));
+        let exclusion = Rect::new(180.0, 500.0, 1740.0, 1056.0);
+        let visualizer = Visualizer::new();
+        let mut fonts = Fonts::new()?;
+        let mut rng = Rng::new(17);
+        for phase in [Phase::Active, Phase::Exiting] {
+            let mut selector = SelectorOverlay {
+                phase,
+                side: GridSide::Bottom,
+                ..SelectorOverlay::default()
+            };
+            selector.layout(&mut fonts, &stage, &mut rng);
+            assert!(selector.grid_rect.intersect(exclusion).area() > 0.0);
+            selector.set_exclusion_bounds(Some(exclusion));
+            selector.update(0.0, false, None, &visualizer, &mut fonts, &stage, &mut rng);
+            assert_ne!(selector.side, GridSide::Bottom);
+            assert_eq!(selector.grid_rect.intersect(exclusion).area(), 0.0);
+            assert_eq!(selector.log_rect.intersect(exclusion).area(), 0.0);
+        }
+        Ok(())
+    }
 }

@@ -8,6 +8,8 @@ use std::{
 
 use anyhow::{ensure, Context};
 
+use crate::frame_schedule::Adjustment;
+
 use super::{
     geometry::{Vec3, Wireframe},
     CreaseThreshold, Rng,
@@ -273,8 +275,7 @@ impl EdgeKind {
     }
 }
 
-/// Every bundled model in display order. Drops and the next-model hotkey step
-/// through this list and wrap around.
+/// Every bundled model in catalog order, with a shuffled automatic cycle.
 pub struct ModelSet {
     models: Vec<Model>,
     current: usize,
@@ -322,6 +323,21 @@ impl ModelSet {
             .bag
             .pop_front()
             .expect("a refilled bag holds every model but the current one");
+        true
+    }
+
+    /// Selects an adjacent catalog entry and removes it from this automatic
+    /// cycle, so automatic playback does not immediately revisit it.
+    pub fn navigate(&mut self, adjustment: Adjustment) -> bool {
+        let count = self.models.len();
+        if count < 2 {
+            return false;
+        }
+        self.current = match adjustment {
+            Adjustment::Decrease => (self.current + count - 1) % count,
+            Adjustment::Increase => (self.current + 1) % count,
+        };
+        self.bag.retain(|index| *index != self.current);
         true
     }
 
@@ -811,6 +827,42 @@ mod tests {
             last,
             "a cycle boundary must not repeat the same model"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn manual_navigation_wraps_in_catalog_order_and_skips_automatic_repeats() -> anyhow::Result<()>
+    {
+        let mut rng = Rng::new(7);
+        let mut set = ModelSet::load(&mut rng)?;
+        let (_, total) = set.position();
+        let start = set.current;
+        if total == 1 {
+            assert!(!set.navigate(Adjustment::Increase));
+            assert!(!set.navigate(Adjustment::Decrease));
+            return Ok(());
+        }
+        for step in 1..=total {
+            assert!(set.navigate(Adjustment::Increase));
+            assert_eq!(set.current, (start + step) % total);
+            assert!(!set.bag.contains(&set.current));
+        }
+        for step in 1..=total {
+            assert!(set.navigate(Adjustment::Decrease));
+            assert_eq!(set.current, (start + total - step) % total);
+        }
+        assert!(set.advance(&mut rng));
+        assert_ne!(
+            set.current, start,
+            "automatic refill skips the manual selection"
+        );
+        let manual = set.current;
+        assert!(set.navigate(Adjustment::Increase));
+        assert!(!set.bag.contains(&set.current));
+        let selected = set.current;
+        assert_ne!(manual, selected);
+        assert!(set.advance(&mut rng));
+        assert_ne!(set.current, selected);
         Ok(())
     }
 
