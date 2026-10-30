@@ -50,19 +50,32 @@ pub enum PaintStyle {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Backdrop {
-    /// Padding in stage units, ordered left, top, right, bottom.
+    /// Padding in stage units, ordered left, top, right, bottom. The vertical
+    /// padding is either symmetric or flush against one edge.
     pub padding: [f64; 4],
     /// Which corners receive a 45 degree cut, ordered top-left, top-right,
     /// bottom-right, bottom-left.
     pub cut: [bool; 4],
     pub cut_size: f64,
     pub fill_alpha: f32,
+    /// Border opacity. Flush plates leave it at zero so the stroke never
+    /// crosses the edge the text opens through.
     pub border_alpha: f32,
 }
 
 impl Backdrop {
     pub fn random(rng: &mut Rng, text_size: f64) -> Self {
-        let padding = std::array::from_fn(|_| text_size * (0.12 + rng.unit() as f64 * 0.28));
+        let side = |rng: &mut Rng| text_size * (0.12 + rng.unit() as f64 * 0.28);
+        let left = side(rng);
+        let right = side(rng);
+        let vertical = side(rng);
+        // An uneven gap above and below makes the plate look misaligned, so an
+        // off-center plate is flush with the text instead.
+        let (padding, centered) = match rng.range(3) {
+            0 => ([left, vertical, right, vertical], true),
+            1 => ([left, 0.0, right, vertical], false),
+            _ => ([left, vertical, right, 0.0], false),
+        };
         let mut cut = [false; 4];
         let count = rng.range(5);
         let mut order = [0, 1, 2, 3];
@@ -78,7 +91,7 @@ impl Backdrop {
             cut,
             cut_size: text_size * (0.08 + rng.unit() as f64 * 0.22),
             fill_alpha: 0.72 + rng.unit() * 0.2,
-            border_alpha: if rng.unit() < 0.6 {
+            border_alpha: if centered && rng.unit() < 0.6 {
                 0.3 + rng.unit() * 0.5
             } else {
                 0.0
@@ -404,30 +417,60 @@ impl AnimatedText {
         let Some(plan) = &self.plan else {
             return Rect::ZERO;
         };
-        let [left, top, right, bottom] = self.padding(stage);
-        Rect::new(
-            0.0,
-            0.0,
-            plan.max_width + left + right,
-            plan.height + top + bottom,
-        )
+        let padding = self.backdrop_padding(stage);
+        let left = padding.map_or(0.0, |padding| padding[0]);
+        let right = padding.map_or(0.0, |padding| padding[2]);
+        let (top, bottom) = self.plate_vertical(stage);
+        Rect::new(0.0, 0.0, plan.max_width + left + right, bottom - top)
     }
 
-    fn padding(&self, stage: &Stage) -> [f64; 4] {
+    /// Padding in stage units for text punched out of a backdrop.
+    fn backdrop_padding(&self, stage: &Stage) -> Option<[f64; 4]> {
         match (&self.paint, &self.backdrop) {
-            (PaintStyle::Hole, Some(backdrop)) => [
+            (PaintStyle::Hole, Some(backdrop)) => Some([
                 stage.px(backdrop.padding[0]),
                 stage.px(backdrop.padding[1]),
                 stage.px(backdrop.padding[2]),
                 stage.px(backdrop.padding[3]),
-            ],
-            _ => [0.0; 4],
+            ]),
+            _ => None,
         }
     }
 
+    /// Vertical plate extents in layout coordinates. A flush side meets the
+    /// glyph ink, not the line box, which is taller than the symbols.
+    fn plate_vertical(&self, stage: &Stage) -> (f64, f64) {
+        let Some(plan) = &self.plan else {
+            return (0.0, 0.0);
+        };
+        let Some([_, top, _, bottom]) = self.backdrop_padding(stage) else {
+            return (0.0, plan.height);
+        };
+        let plate_top = if top > 0.0 { -top } else { plan.ink_top };
+        let plate_bottom = if bottom > 0.0 {
+            plan.height + bottom
+        } else {
+            plan.ink_bottom
+        };
+        (plate_top, plate_bottom)
+    }
+
     fn text_origin(&self, stage: &Stage) -> Point {
-        let [left, top, _, _] = self.padding(stage);
-        Point::new(left, top)
+        let padding = self.backdrop_padding(stage);
+        let left = padding.map_or(0.0, |padding| padding[0]);
+        let (plate_top, _) = self.plate_vertical(stage);
+        let mut y = -plate_top;
+        if let (Some([_, top, _, bottom]), Some(plan)) = (padding, &self.plan) {
+            // A flush edge lets the hole run slightly past the plate so no
+            // antialiasing sliver is left between the text and the surface.
+            let overhang = plan.line_height * 0.025;
+            if top == 0.0 {
+                y -= overhang;
+            } else if bottom == 0.0 {
+                y += overhang;
+            }
+        }
+        Point::new(left, y)
     }
 
     pub fn draw(
@@ -797,6 +840,74 @@ mod tests {
 
     fn stage() -> Stage {
         Stage::new(Size::new(1920.0, 1080.0))
+    }
+
+    #[test]
+    fn backdrop_vertical_padding_is_centered_or_flush() {
+        let mut rng = Rng::new(23);
+        for _ in 0..256 {
+            let backdrop = Backdrop::random(&mut rng, 96.0);
+            let [_, top, _, bottom] = backdrop.padding;
+            assert!(
+                top == bottom || top == 0.0 || bottom == 0.0,
+                "vertical padding {top}/{bottom} leaves the text floating"
+            );
+            if top == 0.0 || bottom == 0.0 {
+                assert_eq!(
+                    backdrop.border_alpha, 0.0,
+                    "a flush plate must not draw a border"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flush_backdrop_edges_overhang_the_glyph_ink() -> anyhow::Result<()> {
+        let stage = stage();
+        let mut fonts = Fonts::new()?;
+        let mut rng = Rng::new(31);
+        let text = |padding| {
+            AnimatedText::new(
+                "HANDGUARD",
+                64.0,
+                UiFace::SemiBold,
+                BlockAlign::Left,
+                None,
+                1.0,
+                PaintStyle::Hole,
+            )
+            .with_backdrop(Backdrop {
+                padding,
+                cut: [false; 4],
+                cut_size: 0.0,
+                fill_alpha: 0.8,
+                border_alpha: 0.0,
+            })
+        };
+
+        let mut top_flush = text([10.0, 0.0, 10.0, 8.0]);
+        top_flush.layout(&mut fonts, &stage, &mut rng);
+        let plan = top_flush.plan().expect("the text has been laid out");
+        let origin = top_flush.text_origin(&stage);
+        let overhang = plan.line_height * 0.025;
+        assert!(
+            (origin.y + plan.ink_top + overhang).abs() < 1e-9,
+            "the top edge is {} away from the glyph ink",
+            origin.y + plan.ink_top
+        );
+
+        let mut bottom_flush = text([10.0, 8.0, 10.0, 0.0]);
+        bottom_flush.layout(&mut fonts, &stage, &mut rng);
+        let plan = bottom_flush.plan().expect("the text has been laid out");
+        let origin = bottom_flush.text_origin(&stage);
+        let bounds = bottom_flush.bounds(&stage);
+        let overhang = plan.line_height * 0.025;
+        assert!(
+            (origin.y + plan.ink_bottom - bounds.height() - overhang).abs() < 1e-9,
+            "the bottom edge is {} away from the glyph ink",
+            origin.y + plan.ink_bottom - bounds.height()
+        );
+        Ok(())
     }
 
     #[test]

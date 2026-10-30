@@ -369,6 +369,10 @@ pub struct TextPlan {
     pub max_width: f64,
     pub width: f64,
     pub height: f64,
+    /// Distance from the block's top to the highest glyph ink.
+    pub ink_top: f64,
+    /// Distance from the block's top to the lowest glyph ink.
+    pub ink_bottom: f64,
     pub line_height: f64,
     pub cap_height: f64,
 }
@@ -508,6 +512,8 @@ impl Text {
                 .map_or(0.0, |line| (line.baseline - line.top).max(0.0) * 0.72);
         }
         let line_height = lines.first().map_or(0.0, |line| line.line_height);
+        let height = f64::from(self.layout.height());
+        let (ink_top, ink_bottom) = ink_extents(&runs, &glyphs, height);
         TextPlan {
             runs,
             glyphs,
@@ -516,10 +522,46 @@ impl Text {
                 .max_width
                 .map_or_else(|| f64::from(self.layout.width()), f64::from),
             width: f64::from(self.layout.width()),
-            height: f64::from(self.layout.height()),
+            height,
+            ink_top,
+            ink_bottom,
             line_height,
             cap_height,
         }
+    }
+}
+
+/// Vertical extents of the glyph ink in block coordinates. Falls back to the
+/// layout box when the plan has no drawable outlines.
+fn ink_extents(runs: &[TextRun], glyphs: &[TextGlyph], fallback_height: f64) -> (f64, f64) {
+    let mut top = f64::INFINITY;
+    let mut bottom = f64::NEG_INFINITY;
+    for run in runs {
+        let Ok(font) = FontRef::from_index(run.font.data.as_ref(), run.font.index) else {
+            continue;
+        };
+        let coords: Vec<NormalizedCoord> = run
+            .normalized_coords
+            .iter()
+            .map(|&coord| NormalizedCoord::from_bits(coord))
+            .collect();
+        let metrics = font.glyph_metrics(Size::new(run.font_size), LocationRef::new(&coords));
+        for &index in &run.glyphs {
+            let glyph = &glyphs[index as usize];
+            let Some(bounds) = metrics.bounds(GlyphId::new(glyph.id)) else {
+                continue;
+            };
+            if bounds.x_min >= bounds.x_max || bounds.y_min >= bounds.y_max {
+                continue;
+            }
+            top = top.min(glyph.y - f64::from(bounds.y_max));
+            bottom = bottom.max(glyph.y - f64::from(bounds.y_min));
+        }
+    }
+    if top.is_finite() {
+        (top, bottom)
+    } else {
+        (0.0, fallback_height)
     }
 }
 
@@ -705,6 +747,37 @@ mod tests {
         assert!(plan.glyphs.iter().all(|glyph| glyph.y.is_finite()));
         assert_eq!(plan.runs.len(), 1);
         assert_eq!(plan.runs[0].glyphs.len(), plan.glyph_count());
+        Ok(())
+    }
+
+    #[test]
+    fn text_plan_ink_bounds_hug_the_glyphs() -> anyhow::Result<()> {
+        let mut fonts = Fonts::new()?;
+        let layout = fonts.layout_wrapped(
+            "HANDGUARD",
+            96.0,
+            UiFace::SemiBold,
+            None,
+            BlockAlign::Left,
+            1.0,
+        );
+        let plan = layout.plan();
+        assert!(
+            plan.ink_top > 0.0,
+            "the line box leaves a gap above the capitals"
+        );
+        assert!(plan.ink_bottom < plan.height);
+        let cap_top = plan.lines[0].baseline - plan.cap_height;
+        assert!(
+            (plan.ink_top - cap_top).abs() < 1.5,
+            "ink top {} does not sit on the cap line {cap_top}",
+            plan.ink_top
+        );
+        assert!(
+            (plan.ink_bottom - plan.lines[0].baseline).abs() < 1.5,
+            "ink bottom {} does not sit on the baseline",
+            plan.ink_bottom
+        );
         Ok(())
     }
 
