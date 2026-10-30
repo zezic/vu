@@ -29,11 +29,7 @@ pub enum StyleInput {
     AxisY,
     AxisZ,
     PhaseRate,
-    TwistSign,
-    ShearSign,
-    DeformBias,
     ZoomBias,
-    JitterBias,
 }
 
 /// Onset detector that can be selected in a computation tree.
@@ -208,14 +204,9 @@ pub enum BandComponent {
     Spin,
     Pitch,
     Roll,
-    Twist,
-    Bulge,
-    Ripple,
-    Shear,
     Zoom,
     Accent,
     Line,
-    Jitter,
     Phase,
 }
 
@@ -225,14 +216,9 @@ impl BandComponent {
             Self::Spin => 2,
             Self::Pitch => 5,
             Self::Roll => 0,
-            Self::Twist => 7,
-            Self::Bulge => 8,
-            Self::Ripple => 9,
-            Self::Shear => 10,
             Self::Zoom => 11,
             Self::Accent => 12,
             Self::Line => 13,
-            Self::Jitter => 14,
             Self::Phase => 15,
         }
     }
@@ -242,14 +228,9 @@ impl BandComponent {
             Self::Spin => "SPIN",
             Self::Pitch => "PITCH",
             Self::Roll => "ROLL",
-            Self::Twist => "TWIST",
-            Self::Bulge => "BULGE",
-            Self::Ripple => "RIPPLE",
-            Self::Shear => "SHEAR",
             Self::Zoom => "ZOOM",
             Self::Accent => "ACCENT",
             Self::Line => "LINE",
-            Self::Jitter => "JITTER",
             Self::Phase => "PHASE",
         }
     }
@@ -377,12 +358,7 @@ pub enum Gain {
     PitchPowerRate,
     RollBand,
     RollPowerRate,
-    TwistBand,
-    BulgeBand,
-    RippleBand,
-    ShearBand,
     LineEnergy,
-    JitterBand,
     PhasePower,
     PhaseBand,
     XfadePower,
@@ -406,12 +382,7 @@ impl Gain {
             Self::PitchPowerRate => 1.8,
             Self::RollBand => 1.75,
             Self::RollPowerRate => 1.6,
-            Self::TwistBand => 1.01,
-            Self::BulgeBand => 1.01,
-            Self::RippleBand => 0.75,
-            Self::ShearBand => 0.55,
             Self::LineEnergy => 0.4,
-            Self::JitterBand => 0.055,
             Self::PhasePower => 2.6,
             Self::PhaseBand => 0.7,
             Self::XfadePower => 2.8,
@@ -433,12 +404,7 @@ impl Gain {
             Self::RollBand => "ROLL BAND GAIN",
             Self::PitchOscillator => "OSC GAIN",
             Self::PitchPowerRate | Self::RollPowerRate => "PWR RATE GAIN",
-            Self::TwistBand => "TWIST BAND GAIN",
-            Self::BulgeBand => "BULGE BAND GAIN",
-            Self::RippleBand => "RIPPLE BAND GAIN",
-            Self::ShearBand => "SHEAR BAND GAIN",
             Self::LineEnergy => "LINE BAND GAIN",
-            Self::JitterBand => "JITTER BAND GAIN",
             Self::PhaseBand => "PHASE BAND GAIN",
             Self::MorphPower | Self::EntrancePower => "PWR GAIN",
         }
@@ -450,12 +416,7 @@ impl Gain {
             Self::SpinBand => Some(BandComponent::Spin),
             Self::PitchBand => Some(BandComponent::Pitch),
             Self::RollBand => Some(BandComponent::Roll),
-            Self::TwistBand => Some(BandComponent::Twist),
-            Self::BulgeBand => Some(BandComponent::Bulge),
-            Self::RippleBand => Some(BandComponent::Ripple),
-            Self::ShearBand => Some(BandComponent::Shear),
             Self::LineEnergy => Some(BandComponent::Line),
-            Self::JitterBand => Some(BandComponent::Jitter),
             Self::PhaseBand => Some(BandComponent::Phase),
             _ => None,
         }
@@ -470,10 +431,7 @@ impl Gain {
     }
 
     pub fn step(self) -> f32 {
-        match self {
-            Self::JitterBand => 0.001,
-            _ => 0.01,
-        }
+        0.01
     }
 
     pub fn index(self) -> usize {
@@ -918,11 +876,7 @@ impl Parameter {
             Self::Style(StyleInput::AxisY) => "AXIS Y",
             Self::Style(StyleInput::AxisZ) => "AXIS Z",
             Self::Style(StyleInput::PhaseRate) => "PHASE RATE",
-            Self::Style(StyleInput::TwistSign) => "TWIST SIGN",
-            Self::Style(StyleInput::ShearSign) => "SHEAR SIGN",
-            Self::Style(StyleInput::DeformBias) => "DEFORM BIAS",
             Self::Style(StyleInput::ZoomBias) => "ZOOM BIAS",
-            Self::Style(StyleInput::JitterBias) => "JITTER BIAS",
             Self::Gain(gain) => gain.label(),
             Self::BandSource(_) => "BAND",
             Self::InputLow(_) => "LOW REF",
@@ -1022,10 +976,7 @@ impl Parameter {
             Self::KickDecay => (0.0, 20.0),
             Self::Style(StyleInput::AxisX | StyleInput::AxisY | StyleInput::AxisZ) => (-1.0, 1.0),
             Self::Style(StyleInput::PhaseRate) => (0.1, 3.0),
-            Self::Style(StyleInput::TwistSign | StyleInput::ShearSign) => (-1.0, 1.0),
-            Self::Style(StyleInput::DeformBias) => (0.0, 2.0),
             Self::Style(StyleInput::ZoomBias) => (0.5, 1.5),
-            Self::Style(StyleInput::JitterBias) => (0.0, 2.0),
             Self::Gain(gain) => gain.range(),
             Self::BandSource(_) => (0.0, (BAND_COUNT - 1) as f32),
             Self::InputLow(_) => (0.0, 0.99),
@@ -1348,18 +1299,13 @@ pub enum SelectableInput {
 }
 
 impl SelectableInput {
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 22] = [
         Self::Band(BandComponent::Spin),
         Self::Band(BandComponent::Pitch),
         Self::Band(BandComponent::Roll),
-        Self::Band(BandComponent::Twist),
-        Self::Band(BandComponent::Bulge),
-        Self::Band(BandComponent::Ripple),
-        Self::Band(BandComponent::Shear),
         Self::Band(BandComponent::Zoom),
         Self::Band(BandComponent::Accent),
         Self::Band(BandComponent::Line),
-        Self::Band(BandComponent::Jitter),
         Self::Band(BandComponent::Phase),
         Self::BassBands,
         Self::Power,
@@ -1375,11 +1321,7 @@ impl SelectableInput {
         Self::Style(StyleInput::AxisY),
         Self::Style(StyleInput::AxisZ),
         Self::Style(StyleInput::PhaseRate),
-        Self::Style(StyleInput::TwistSign),
-        Self::Style(StyleInput::ShearSign),
-        Self::Style(StyleInput::DeformBias),
         Self::Style(StyleInput::ZoomBias),
-        Self::Style(StyleInput::JitterBias),
     ];
 
     pub fn index(self) -> usize {
@@ -1463,11 +1405,6 @@ pub enum MixPoint {
     PitchRate,
     RollTarget,
     RollRate,
-    Twist,
-    Bulge,
-    Ripple,
-    Shear,
-    Jitter,
     Zoom,
     Accent,
     Line,
@@ -1695,7 +1632,6 @@ impl Mixer {
         let mut sum = 0.0;
         let mut summed = false;
         let mut product = 1.0;
-        let mut multiplied = false;
         for (index, spec) in point.contributions().iter().enumerate() {
             let contribution = Contribution::Fixed(point, index);
             let constant = self.constants.get(&(point, index)).copied();
@@ -1707,7 +1643,6 @@ impl Mixer {
                 }
                 Mix::Mul => {
                     product *= value;
-                    multiplied = true;
                 }
             }
         }
@@ -1720,15 +1655,13 @@ impl Mixer {
                 }
                 Mix::Mul => {
                     product *= value;
-                    multiplied = true;
                 }
             }
         }
-        match point.primary() {
-            Mix::Add if summed => sum * if multiplied { product } else { 1.0 },
-            Mix::Add => product,
-            Mix::Mul if multiplied => product + if summed { sum } else { 0.0 },
-            Mix::Mul => sum,
+        if summed {
+            sum * product
+        } else {
+            product
         }
     }
 }
@@ -2095,98 +2028,6 @@ static ROLL_RATE_TERMS: [ContributionSpec; 2] = [
     constant_term(1.3, "BASE"),
 ];
 
-static TWIST_TERMS: [ContributionSpec; 3] = [
-    input_term(
-        Input::Band(BandComponent::Twist),
-        "TWIST BAND",
-        "×gain",
-        Some(Gain::TwistBand),
-        Mix::Mul,
-    ),
-    input_term(
-        Input::Style(StyleInput::DeformBias),
-        "DEFORM BIAS",
-        "×",
-        None,
-        Mix::Mul,
-    ),
-    input_term(
-        Input::Style(StyleInput::TwistSign),
-        "TWIST SIGN",
-        "×",
-        None,
-        Mix::Mul,
-    ),
-];
-
-static BULGE_TERMS: [ContributionSpec; 2] = [
-    input_term(
-        Input::Band(BandComponent::Bulge),
-        "BULGE BAND",
-        "×gain",
-        Some(Gain::BulgeBand),
-        Mix::Mul,
-    ),
-    input_term(
-        Input::Style(StyleInput::DeformBias),
-        "DEFORM BIAS",
-        "×",
-        None,
-        Mix::Mul,
-    ),
-];
-
-static RIPPLE_TERMS: [ContributionSpec; 2] = [
-    input_term(
-        Input::Band(BandComponent::Ripple),
-        "RIPPLE BAND",
-        "×gain",
-        Some(Gain::RippleBand),
-        Mix::Mul,
-    ),
-    input_term(
-        Input::Style(StyleInput::DeformBias),
-        "DEFORM BIAS",
-        "×",
-        None,
-        Mix::Mul,
-    ),
-];
-
-static SHEAR_TERMS: [ContributionSpec; 2] = [
-    input_term(
-        Input::Band(BandComponent::Shear),
-        "SHEAR BAND",
-        "×gain",
-        Some(Gain::ShearBand),
-        Mix::Mul,
-    ),
-    input_term(
-        Input::Style(StyleInput::ShearSign),
-        "SHEAR SIGN",
-        "×",
-        None,
-        Mix::Mul,
-    ),
-];
-
-static JITTER_TERMS: [ContributionSpec; 2] = [
-    input_term(
-        Input::Band(BandComponent::Jitter),
-        "JITTER BAND",
-        "×gain",
-        Some(Gain::JitterBand),
-        Mix::Mul,
-    ),
-    input_term(
-        Input::Style(StyleInput::JitterBias),
-        "JITTER BIAS",
-        "×",
-        None,
-        Mix::Mul,
-    ),
-];
-
 static ZOOM_TERMS: [ContributionSpec; 2] = [
     input_term(
         Input::Band(BandComponent::Zoom),
@@ -2293,11 +2134,6 @@ impl MixPoint {
             Self::PitchRate => "PITCH RATE",
             Self::RollTarget => "ROLL TARGET",
             Self::RollRate => "ROLL RATE",
-            Self::Twist => "TWIST",
-            Self::Bulge => "BULGE",
-            Self::Ripple => "RIPPLE",
-            Self::Shear => "SHEAR",
-            Self::Jitter => "JITTER",
             Self::Zoom => "CAMERA ZOOM",
             Self::Accent => "ACCENT",
             Self::Line => "LINE ENERGY",
@@ -2305,14 +2141,6 @@ impl MixPoint {
             Self::CrossfadeRate => "XFADE RATE",
             Self::MorphRate => "MORPH RATE",
             Self::EntranceRate => "ENTRANCE RATE",
-        }
-    }
-
-    /// The operation that owns the plain sum or product shape of the point.
-    pub fn primary(self) -> Mix {
-        match self {
-            Self::Twist | Self::Bulge | Self::Ripple | Self::Shear | Self::Jitter => Mix::Mul,
-            _ => Mix::Add,
         }
     }
 
@@ -2326,11 +2154,6 @@ impl MixPoint {
             Self::PitchRate => &PITCH_RATE_TERMS,
             Self::RollTarget => &ROLL_TARGET_TERMS,
             Self::RollRate => &ROLL_RATE_TERMS,
-            Self::Twist => &TWIST_TERMS,
-            Self::Bulge => &BULGE_TERMS,
-            Self::Ripple => &RIPPLE_TERMS,
-            Self::Shear => &SHEAR_TERMS,
-            Self::Jitter => &JITTER_TERMS,
             Self::Zoom => &ZOOM_TERMS,
             Self::Accent => &ACCENT_TERMS,
             Self::Line => &LINE_TERMS,
@@ -2423,14 +2246,9 @@ impl Property {
             Self::Spin => &SPIN,
             Self::Pitch => &PITCH,
             Self::Roll => &ROLL,
-            Self::Twist => &TWIST,
-            Self::Bulge => &BULGE,
-            Self::Ripple => &RIPPLE,
-            Self::Shear => &SHEAR,
             Self::Zoom => &ZOOM,
             Self::Accent => &ACCENT,
             Self::Line => &LINE,
-            Self::Jitter => &JITTER,
             Self::Phase => &PHASE,
             Self::Kick => &KICK,
             Self::Flip => &FLIP,
@@ -2451,14 +2269,9 @@ impl Property {
             Self::Spin => &[MixPoint::SpinSpeed],
             Self::Pitch => &[MixPoint::PitchTarget, MixPoint::PitchRate],
             Self::Roll => &[MixPoint::RollTarget, MixPoint::RollRate],
-            Self::Twist => &[MixPoint::Twist],
-            Self::Bulge => &[MixPoint::Bulge],
-            Self::Ripple => &[MixPoint::Ripple],
-            Self::Shear => &[MixPoint::Shear],
             Self::Zoom => &[MixPoint::Zoom],
             Self::Accent => &[MixPoint::Accent],
             Self::Line => &[MixPoint::Line],
-            Self::Jitter => &[MixPoint::Jitter],
             Self::Phase => &[MixPoint::PhaseSpeed],
             Self::Kick => &[],
             Self::Flip => &[],
@@ -2525,30 +2338,6 @@ static ROLL: ComputeNode = branch(
     )],
 );
 
-static TWIST: ComputeNode = branch(
-    "TWIST amount",
-    "",
-    &[mix_branch("BAND × BIAS × SIGN", MixPoint::Twist)],
-);
-
-static BULGE: ComputeNode = branch(
-    "BULGE amount",
-    "",
-    &[mix_branch("BAND × BIAS", MixPoint::Bulge)],
-);
-
-static RIPPLE: ComputeNode = branch(
-    "RIPPLE amount",
-    "",
-    &[mix_branch("BAND × BIAS", MixPoint::Ripple)],
-);
-
-static SHEAR: ComputeNode = branch(
-    "SHEAR amount",
-    "",
-    &[mix_branch("BAND × SIGN", MixPoint::Shear)],
-);
-
 static ZOOM: ComputeNode = branch(
     "CAMERA ZOOM",
     "",
@@ -2565,12 +2354,6 @@ static LINE: ComputeNode = branch(
     "LINE energy",
     "",
     &[mix_branch("0.6 + gain × value", MixPoint::Line)],
-);
-
-static JITTER: ComputeNode = branch(
-    "JITTER amount",
-    "",
-    &[mix_branch("BAND × BIAS", MixPoint::Jitter)],
 );
 
 static PHASE: ComputeNode = branch(
@@ -3092,7 +2875,7 @@ mod tests {
         mixer.set_mode(Contribution::Fixed(point, 0), Mix::Mul);
         mixer.set_constant_value(base, 0.4);
         let extra = mixer.add_extra(MixPoint::SpinSpeed);
-        mixer.set_extra_input(extra, Input::Band(BandComponent::Bulge));
+        mixer.set_extra_input(extra, Input::Band(BandComponent::Line));
         mixer.set_extra_gain(extra, 1.5);
         mixer.set_mode(Contribution::Extra(extra), Mix::Mul);
 
@@ -3105,7 +2888,7 @@ mod tests {
             .extras(MixPoint::SpinSpeed)
             .next()
             .expect("the extra input survives the round trip");
-        assert_eq!(restored_extra.1.input, Input::Band(BandComponent::Bulge));
+        assert_eq!(restored_extra.1.input, Input::Band(BandComponent::Line));
         assert_eq!(restored_extra.1.gain, 1.5);
         assert_eq!(restored_extra.1.mix, Mix::Mul);
     }

@@ -417,10 +417,9 @@ fn draw_panel(
 
         let center = row.center().y;
         let label = format!(
-            "{:02} {:>5.0}Hz {:<6} {:.2}/{:.2}",
+            "{:02} {:>5.0}Hz {:.2}/{:.2}",
             index,
             (band.low_hz + band.high_hz) * 0.5,
-            band.role.name(),
             band.value,
             band.raw
         );
@@ -641,13 +640,10 @@ fn draw_panel(
     );
 
     let third = format!(
-        "AX{:+5.1},{:+5.1},{:+5.1} TW{:+5.1} DF{:>4.1} SH{:+5.1} ZM{:>4.1} PR{:>4.1}",
+        "AX{:+5.1},{:+5.1},{:+5.1} ZM{:>4.1} PR{:>4.1}",
         snapshot.style.axis[0],
         snapshot.style.axis[1],
         snapshot.style.axis[2],
-        snapshot.style.twist_sign,
-        snapshot.style.deform_bias,
-        snapshot.style.shear_sign,
         snapshot.style.zoom_bias,
         snapshot.style.phase_rate
     );
@@ -771,11 +767,8 @@ fn draw_extension(
                 let band = &snapshot.bands[index];
                 (
                     format!(
-                        "BAND {:02}  {:.0}-{:.0}Hz  {}",
-                        index,
-                        band.low_hz,
-                        band.high_hz,
-                        band.role.name()
+                        "BAND {:02}  {:.0}-{:.0}Hz",
+                        index, band.low_hz, band.high_hz,
                     ),
                     format!(
                         "Excess {:.3}, onset {:.3}, ABDR {:.2}, ABL {:.2}, DRP {:.2}.",
@@ -3774,11 +3767,7 @@ fn style_value(style: StyleInput, snapshot: &DebugSnapshot) -> f32 {
         StyleInput::AxisY => snapshot.style.axis[1],
         StyleInput::AxisZ => snapshot.style.axis[2],
         StyleInput::PhaseRate => snapshot.style.phase_rate,
-        StyleInput::TwistSign => snapshot.style.twist_sign,
-        StyleInput::ShearSign => snapshot.style.shear_sign,
-        StyleInput::DeformBias => snapshot.style.deform_bias,
         StyleInput::ZoomBias => snapshot.style.zoom_bias,
-        StyleInput::JitterBias => snapshot.style.jitter_bias,
     }
 }
 
@@ -4054,12 +4043,7 @@ impl GraphSource {
 
     fn title(self, snapshot: &DebugSnapshot, routing: &BandRouting) -> String {
         match self {
-            Self::Band(index) => format!(
-                "B{:02} {} {:.2}",
-                index,
-                snapshot.bands[index].role.name(),
-                snapshot.bands[index].value
-            ),
+            Self::Band(index) => format!("B{:02} {:.2}", index, snapshot.bands[index].value),
             Self::BandOnset(index) => {
                 format!("B{:02} ONSET {:.3}", index, snapshot.bands[index].onset)
             }
@@ -4524,12 +4508,8 @@ fn graph_usage_for_focus(
                 BandComponent::Spin => "×gain add, ×PHASE_RATE",
                 BandComponent::Pitch => "×gain ×AXIS_Y add",
                 BandComponent::Roll => "×gain ×AXIS_Z add",
-                BandComponent::Twist => "×gain ×DEFORM ×SIGN",
-                BandComponent::Bulge | BandComponent::Ripple => "×gain ×DEFORM",
-                BandComponent::Shear => "×gain ×SIGN",
                 BandComponent::Accent => "clamp; tint at spawn",
                 BandComponent::Line => "0.6 + gain×value",
-                BandComponent::Jitter => "×gain ×BIAS",
                 BandComponent::Phase => "×gain add, ×PHASE_RATE",
             },
             GraphSource::Power => match property {
@@ -6236,19 +6216,19 @@ mod tests {
     fn extra_inputs_extend_the_band_dependencies() {
         let mut visualizer = Visualizer::new();
         let extra = visualizer.add_extra(MixPoint::SpinSpeed);
-        let source = Input::Band(BandComponent::Bulge);
+        let source = Input::Band(BandComponent::Line);
         visualizer.set_parameter(
             Parameter::ExtraSource(extra),
-            source.selectable_index().expect("bulge is selectable") as f32,
+            source.selectable_index().expect("line is selectable") as f32,
         );
         assert!(visualizer
             .property_dependencies(Property::Spin)
-            .contains(&Dependency::Band(BandComponent::Bulge)));
-        let band = visualizer.band_for(BandComponent::Bulge);
+            .contains(&Dependency::Band(BandComponent::Line)));
+        let band = visualizer.band_for(BandComponent::Line);
         assert_eq!(band_route(Property::Spin, band, &visualizer), "V");
         assert!(
             graph_sources(DebugSelection::Property(Property::Spin), &visualizer)
-                .contains(&GraphSource::BandRole(BandComponent::Bulge))
+                .contains(&GraphSource::BandRole(BandComponent::Line))
         );
     }
 

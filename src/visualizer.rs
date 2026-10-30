@@ -53,7 +53,7 @@ use crate::{
 };
 
 use geometry::{
-    soft_saturate, wrap_angle, Camera, Deformation, DepthOpacity, FocusProjection, Pose, Projected,
+    soft_saturate, wrap_angle, Camera, DepthOpacity, FocusProjection, Pose, Projected,
     ScreenBounds, Vec2, Vec3, Wireframe,
 };
 pub use spectrum::{RelativeExcessSettings, BAND_COUNT};
@@ -797,70 +797,6 @@ impl Palette {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BandRole {
-    Sub,
-    Bass,
-    Low,
-    Kick,
-    Spin,
-    Pitch,
-    Roll,
-    Twist,
-    Bulge,
-    Ripple,
-    Shear,
-    Zoom,
-    Accent,
-    Line,
-    Jitter,
-    Phase,
-}
-
-impl BandRole {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Sub => "SUB",
-            Self::Bass => "BASS",
-            Self::Low => "LOW",
-            Self::Kick => "KICK",
-            Self::Spin => "SPIN",
-            Self::Pitch => "PITCH",
-            Self::Roll => "ROLL",
-            Self::Twist => "TWIST",
-            Self::Bulge => "BULGE",
-            Self::Ripple => "RIPPLE",
-            Self::Shear => "SHEAR",
-            Self::Zoom => "ZOOM",
-            Self::Accent => "ACCENT",
-            Self::Line => "LINE",
-            Self::Jitter => "JITTER",
-            Self::Phase => "PHASE",
-        }
-    }
-
-    fn for_index(index: usize) -> Self {
-        match index {
-            0 => Self::Sub,
-            1 => Self::Bass,
-            2 => Self::Low,
-            3 => Self::Kick,
-            4 => Self::Spin,
-            5 => Self::Pitch,
-            6 => Self::Roll,
-            7 => Self::Twist,
-            8 => Self::Bulge,
-            9 => Self::Ripple,
-            10 => Self::Shear,
-            11 => Self::Zoom,
-            12 => Self::Accent,
-            13 => Self::Line,
-            14 => Self::Jitter,
-            _ => Self::Phase,
-        }
-    }
-}
-
 /// One animation value that the analyzer drives. The rendering code keeps no
 /// separate registry: this enum owns the name, the description shown in the
 /// inspector, and the analysis sources that feed its current value.
@@ -883,14 +819,9 @@ pub enum Property {
     Spin,
     Pitch,
     Roll,
-    Twist,
-    Bulge,
-    Ripple,
-    Shear,
     Zoom,
     Accent,
     Line,
-    Jitter,
     Phase,
     Kick,
     Flip,
@@ -928,14 +859,9 @@ impl Property {
             Self::Spin => "SPIN",
             Self::Pitch => "PITCH",
             Self::Roll => "ROLL",
-            Self::Twist => "TWIST",
-            Self::Bulge => "BULGE",
-            Self::Ripple => "RIPPLE",
-            Self::Shear => "SHEAR",
             Self::Zoom => "ZOOM",
             Self::Accent => "ACCENT",
             Self::Line => "LINE",
-            Self::Jitter => "JITTER",
             Self::Phase => "PHASE",
             Self::Kick => "KICK",
             Self::Flip => "FLIP",
@@ -954,17 +880,10 @@ impl Property {
             Self::Spin => "Band 04 speeds the continuous yaw rotation; the style axis weights it.",
             Self::Pitch => "Band 05 tilts the camera; the style Y axis scales the tilt.",
             Self::Roll => "Band 06 rolls the camera; the style Z axis scales the roll.",
-            Self::Twist => {
-                "Band 07 twists vertices around the vertical axis; twist sign reverses it."
-            }
-            Self::Bulge => "Band 08 inflates the model radially; deform bias scales the bulge.",
-            Self::Ripple => "Band 09 adds a travelling radial wave to every vertex.",
-            Self::Shear => "Band 10 slants X by Y; shear sign reverses the slant.",
             Self::Zoom => "Band 11 pulls the camera closer and enlarges the projected model.",
             Self::Accent => "Band 12 picks the vivid tint of the next model.",
             Self::Line => "Band 13 raises edge opacity above the near-opacity floor.",
-            Self::Jitter => "Band 14 adds per-vertex noise; jitter bias scales it.",
-            Self::Phase => "Band 15 speeds the phase clock behind ripple and jitter.",
+            Self::Phase => "Band 15 speeds the phase clock used by pitch motion.",
             Self::Kick => "A kick-kernel flux peak latches a decaying kick that swells the model.",
             Self::Flip => {
                 "Every Nth snare adds 180 degrees to the pitch baseline through a damped spring."
@@ -990,14 +909,9 @@ impl Property {
             Self::Spin => (0.0, 4.5),
             Self::Pitch => (-1.2, 0.8),
             Self::Roll => (-1.2, 1.2),
-            Self::Twist => (-2.5, 2.5),
-            Self::Bulge => (0.0, 0.6),
-            Self::Ripple => (0.0, 1.2),
-            Self::Shear => (-0.8, 0.8),
             Self::Zoom => (1.0, 1.2),
             Self::Accent | Self::Crossfade | Self::Entrance => (0.0, 1.0),
             Self::Line => (0.0, 2.0),
-            Self::Jitter => (0.0, 0.08),
             Self::Phase => (0.0, 6.0),
             Self::Kick => (0.0, 1.5),
             Self::Flip => (-TAU, TAU),
@@ -1007,7 +921,7 @@ impl Property {
     }
 
     /// Value the property contributes while it is muted. Scale, opacity, and
-    /// progress multipliers use one; angles, deformations, and rates use zero.
+    /// progress multipliers use one; angles and rates use zero.
     fn neutral(self) -> f32 {
         match self {
             Self::Pulse | Self::Zoom | Self::Line | Self::Crossfade | Self::Entrance => 1.0,
@@ -1028,14 +942,9 @@ impl Property {
             Self::Spin => &[Dependency::Band(BandComponent::Spin), Dependency::Power],
             Self::Pitch => &[Dependency::Band(BandComponent::Pitch), Dependency::Power],
             Self::Roll => &[Dependency::Band(BandComponent::Roll), Dependency::Power],
-            Self::Twist => &[Dependency::Band(BandComponent::Twist)],
-            Self::Bulge => &[Dependency::Band(BandComponent::Bulge)],
-            Self::Ripple => &[Dependency::Band(BandComponent::Ripple)],
-            Self::Shear => &[Dependency::Band(BandComponent::Shear)],
             Self::Zoom => &[Dependency::Band(BandComponent::Zoom)],
             Self::Accent => &[Dependency::Band(BandComponent::Accent)],
             Self::Line => &[Dependency::Band(BandComponent::Line)],
-            Self::Jitter => &[Dependency::Band(BandComponent::Jitter)],
             Self::Phase => &[Dependency::Band(BandComponent::Phase), Dependency::Power],
             Self::Kick => &[Dependency::KickOnset],
             Self::Flip => &[Dependency::SnareOnset],
@@ -1261,7 +1170,6 @@ pub struct BandDebug {
     pub drp: f32,
     pub low_hz: f32,
     pub high_hz: f32,
-    pub role: BandRole,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1273,12 +1181,8 @@ pub struct EnvelopeDebug {
 #[derive(Clone, Copy, Debug)]
 pub struct StyleDebug {
     pub axis: [f32; 3],
-    pub twist_sign: f32,
-    pub shear_sign: f32,
-    pub deform_bias: f32,
     pub zoom_bias: f32,
     pub phase_rate: f32,
-    pub jitter_bias: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -2951,14 +2855,9 @@ impl Visualizer {
             Property::Spin => current.spin_speed,
             Property::Pitch => current.pose.pitch,
             Property::Roll => current.pose.roll,
-            Property::Twist => current.deformation.twist,
-            Property::Bulge => current.deformation.bulge,
-            Property::Ripple => current.deformation.ripple,
-            Property::Shear => current.deformation.shear,
             Property::Zoom => current.camera_zoom,
             Property::Accent => self.accent(),
             Property::Line => current.line_energy,
-            Property::Jitter => current.deformation.jitter,
             Property::Phase => current.phase_speed,
             Property::Kick => self.kick,
             Property::Flip => wrap_angle(self.flip.value()),
@@ -3049,7 +2948,6 @@ impl Visualizer {
                 drp: status.bands[index].drp,
                 low_hz,
                 high_hz,
-                role: BandRole::for_index(index),
             }
         });
         let style = self
@@ -3106,12 +3004,8 @@ impl Visualizer {
             transition: self.scene.transition,
             style: StyleDebug {
                 axis: [style.axis.x, style.axis.y, style.axis.z],
-                twist_sign: style.twist_sign,
-                shear_sign: style.shear_sign,
-                deform_bias: style.deform_bias,
                 zoom_bias: style.zoom_bias,
                 phase_rate: style.phase_rate,
-                jitter_bias: style.jitter_bias,
             },
             phase: self
                 .scene
@@ -3915,7 +3809,6 @@ struct ModelRuntime {
     tint: ModelTint,
     phase: f32,
     /// Latest values written by `update` and read by the debug inspector.
-    deformation: Deformation,
     spin_speed: f32,
     phase_speed: f32,
     camera_zoom: f32,
@@ -4036,7 +3929,6 @@ impl ModelRuntime {
             target_style,
             tint,
             phase: 0.0,
-            deformation: Deformation::default(),
             spin_speed: 0.0,
             phase_speed: 0.0,
             camera_zoom: 1.0,
@@ -4189,10 +4081,6 @@ impl ModelRuntime {
         // model, while the rotations use the signed value.
         self.pose.scale =
             self.frozen_scale + (target_scale - self.frozen_scale) * model_motion.abs();
-        // Models are rigid, so the vertex distortion controls contribute an
-        // identity transform.
-        let deformation = Deformation::default();
-        self.deformation = deformation;
         self.line_energy = gates.drive(Property::Line, mixer.value(MixPoint::Line, &context));
         self.world_vertices.clear();
         self.vertices.clear();
@@ -4284,11 +4172,10 @@ impl ModelRuntime {
             blend,
         };
         for index in 0..self.wireframe.vertex_count() {
-            let mut rest = self.wireframe.vertex(index);
+            let mut world = self.wireframe.vertex(index);
             if self.slide_vertices[index] {
-                rest = rest + showcase.slide_offset;
+                world = world + showcase.slide_offset;
             }
-            let world = deformation.apply(rest);
             self.world_vertices.push(world);
             self.vertices.push(if blend != 0.0 {
                 camera.project_focused(world, pose, focus)
@@ -4753,24 +4640,16 @@ fn push_ribbon(out: &mut Vec<RibbonInstance>, screen: ScreenBounds, ribbon: Ribb
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Style {
     axis: Vec3,
-    twist_sign: f32,
-    shear_sign: f32,
-    deform_bias: f32,
     zoom_bias: f32,
     phase_rate: f32,
-    jitter_bias: f32,
 }
 
 impl Default for Style {
     fn default() -> Self {
         Self {
             axis: Vec3::new(0.55, 0.25, 0.4).normalized(),
-            twist_sign: 1.0,
-            shear_sign: 1.0,
-            deform_bias: 0.55,
             zoom_bias: 1.0,
             phase_rate: 1.0,
-            jitter_bias: 0.5,
         }
     }
 }
@@ -4781,12 +4660,8 @@ impl Style {
         // Do not renormalize here: opposite target axes must pass through zero
         // smoothly instead of snapping through a singularity.
         self.axis = self.axis + (target.axis - self.axis) * blend;
-        self.twist_sign += (target.twist_sign - self.twist_sign) * blend;
-        self.shear_sign += (target.shear_sign - self.shear_sign) * blend;
-        self.deform_bias += (target.deform_bias - self.deform_bias) * blend;
         self.zoom_bias += (target.zoom_bias - self.zoom_bias) * blend;
         self.phase_rate += (target.phase_rate - self.phase_rate) * blend;
-        self.jitter_bias += (target.jitter_bias - self.jitter_bias) * blend;
     }
 }
 
@@ -4796,11 +4671,7 @@ fn style_value(style: &Style, input: StyleInput) -> f32 {
         StyleInput::AxisY => style.axis.y,
         StyleInput::AxisZ => style.axis.z,
         StyleInput::PhaseRate => style.phase_rate,
-        StyleInput::TwistSign => style.twist_sign,
-        StyleInput::ShearSign => style.shear_sign,
-        StyleInput::DeformBias => style.deform_bias,
         StyleInput::ZoomBias => style.zoom_bias,
-        StyleInput::JitterBias => style.jitter_bias,
     }
 }
 
@@ -4810,11 +4681,7 @@ fn set_style_value(style: &mut Style, input: StyleInput, value: f32) {
         StyleInput::AxisY => style.axis.y = value,
         StyleInput::AxisZ => style.axis.z = value,
         StyleInput::PhaseRate => style.phase_rate = value,
-        StyleInput::TwistSign => style.twist_sign = value,
-        StyleInput::ShearSign => style.shear_sign = value,
-        StyleInput::DeformBias => style.deform_bias = value,
         StyleInput::ZoomBias => style.zoom_bias = value,
-        StyleInput::JitterBias => style.jitter_bias = value,
     }
 }
 
@@ -6465,40 +6332,6 @@ mod tests {
     }
 
     #[test]
-    fn phase_rebase_preserves_deformation_geometry() {
-        let vertex = Vec3::new(0.6, 0.3, 0.4);
-        let before = Deformation {
-            twist: 0.3,
-            bulge: 0.2,
-            ripple: 0.4,
-            shear: 0.1,
-            jitter: 0.02,
-            phase: 0.0,
-        };
-        let after = Deformation {
-            phase: PHASE_PERIOD,
-            ..before
-        };
-        let a = before.apply(vertex);
-        let b = after.apply(vertex);
-        assert!(
-            (a - b).length() < 0.01,
-            "phase rebase jumped the vertex: {a:?} vs {b:?}"
-        );
-        let before = Deformation {
-            phase: TAU - 0.001,
-            ..before
-        };
-        let after = Deformation {
-            phase: TAU + 0.001,
-            ..after
-        };
-        let a = before.apply(vertex);
-        let b = after.apply(vertex);
-        assert!((a - b).length() < 0.01);
-    }
-
-    #[test]
     fn diagnosis_appears_on_a_vertex_and_follows_it_lazily() {
         let mut visualizer = loaded_visualizer();
         let palette = Palette::from_theme(crate::theme::ThemeId::default());
@@ -6788,16 +6621,16 @@ mod tests {
         visualizer.set_parameter(Parameter::Attack(EnvelopeTarget::Power), 22.0);
         visualizer.set_parameter(Parameter::Release(EnvelopeTarget::Bass), 8.0);
         visualizer.set_parameter(Parameter::InputAmount(EnvelopeTarget::Power), 3.0);
-        visualizer.set_parameter(Parameter::Style(StyleInput::DeformBias), 1.25);
+        visualizer.set_parameter(Parameter::Style(StyleInput::ZoomBias), 1.25);
         visualizer.toggle_adaptive(EnvelopeTarget::Power);
-        visualizer.toggle_property_mute(Property::Twist);
+        visualizer.toggle_property_mute(Property::Roll);
         visualizer.toggle_property_solo(Property::Spin);
         let base = Contribution::Fixed(MixPoint::PulseEnergy, 3);
         visualizer.set_parameter(Parameter::Constant(base), 0.4);
         let extra = visualizer.add_extra(MixPoint::SpinSpeed);
         visualizer.set_parameter(
             Parameter::ExtraSource(extra),
-            SelectableInput::Band(BandComponent::Bulge).index() as f32,
+            SelectableInput::Band(BandComponent::Line).index() as f32,
         );
         visualizer.set_parameter(Parameter::ExtraGain(extra), 1.5);
         visualizer.toggle_contribution_mix(Contribution::Extra(extra));
@@ -6832,14 +6665,14 @@ mod tests {
             9.0
         );
         assert_eq!(restored.parameter_value(Parameter::Constant(base)), 0.4);
-        assert!(restored.property_muted(Property::Twist));
+        assert!(restored.property_muted(Property::Roll));
         assert!(restored.property_soloed(Property::Spin));
         let restored_extra = restored
             .mixer
             .extras(MixPoint::SpinSpeed)
             .next()
             .expect("the extra input is restored");
-        assert_eq!(restored_extra.1.input, Input::Band(BandComponent::Bulge));
+        assert_eq!(restored_extra.1.input, Input::Band(BandComponent::Line));
         assert_eq!(restored_extra.1.gain, 1.5);
         assert_eq!(restored_extra.1.mix, Mix::Mul);
     }
@@ -6858,7 +6691,7 @@ mod tests {
     #[test]
     fn a_pinned_style_value_survives_a_model_change() {
         let mut visualizer = loaded_visualizer();
-        visualizer.set_parameter(Parameter::Style(StyleInput::DeformBias), 1.25);
+        visualizer.set_parameter(Parameter::Style(StyleInput::ZoomBias), 1.25);
         assert!(
             (visualizer
                 .scene
@@ -6866,7 +6699,7 @@ mod tests {
                 .as_ref()
                 .expect("the model is loaded")
                 .target_style
-                .deform_bias
+                .zoom_bias
                 - 1.25)
                 .abs()
                 < 1e-6
@@ -6882,7 +6715,7 @@ mod tests {
                 .as_ref()
                 .expect("the next model is loaded")
                 .target_style
-                .deform_bias
+                .zoom_bias
                 - 1.25)
                 .abs()
                 < 1e-6,
@@ -6920,9 +6753,6 @@ mod tests {
         );
         let after = visualizer.debug_snapshot().properties[Property::Spin.index()];
         assert!(after < before);
-        let jitter = Parameter::Gain(Gain::JitterBand);
-        visualizer.set_parameter(jitter, 100.0);
-        assert_eq!(visualizer.parameter_value(jitter), 10.0);
         let spin_gain = Parameter::Gain(Gain::SpinBand);
         assert_eq!(spin_gain.range().1, 10.0);
         visualizer.set_parameter(spin_gain, 100.0);

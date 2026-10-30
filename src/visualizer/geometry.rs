@@ -250,55 +250,6 @@ pub fn soft_saturate(value: f32, limit: f32) -> f32 {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Deformation {
-    pub twist: f32,
-    pub bulge: f32,
-    pub ripple: f32,
-    pub shear: f32,
-    pub jitter: f32,
-    pub phase: f32,
-}
-
-impl Default for Deformation {
-    fn default() -> Self {
-        Self {
-            twist: 0.0,
-            bulge: 0.0,
-            ripple: 0.0,
-            shear: 0.0,
-            jitter: 0.0,
-            phase: 0.0,
-        }
-    }
-}
-
-impl Deformation {
-    pub fn apply(self, vertex: Vec3) -> Vec3 {
-        let mut value = vertex.rotate_y(vertex.y * self.twist);
-        let radius_wave = (self.phase * 2.3 + value.length() * 7.0).sin();
-        value = value * (1.0 + self.bulge + self.ripple * radius_wave * 0.28);
-        value.x += value.y * self.shear;
-        if self.jitter > 0.0 {
-            value = value
-                + Vec3::new(
-                    (self.phase * 7.1 + vertex.x * 13.0).sin(),
-                    (self.phase * 5.3 + vertex.y * 11.0).cos(),
-                    (self.phase * 3.7 + vertex.z * 17.0).sin(),
-                ) * self.jitter;
-        }
-        // Keep an extreme deformation from overflowing the perspective camera
-        // without introducing a velocity kink at the limit.
-        let radius = value.length();
-        let compressed = soft_saturate(radius, 1.6);
-        if radius > 1e-6 {
-            value * (compressed / radius)
-        } else {
-            value
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
 pub struct Pose {
     pub yaw: f32,
     pub pitch: f32,
@@ -738,24 +689,6 @@ mod tests {
 
         let flat = DepthOpacity::centered(4.2, 0.0, 0.5);
         assert!((flat.factor(4.2) - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn deformation_stays_finite_and_bounded() {
-        let wireframe = cube();
-        let deformation = Deformation {
-            twist: 1.3,
-            bulge: 0.4,
-            ripple: 0.5,
-            shear: 0.7,
-            jitter: 0.2,
-            phase: 12.0,
-        };
-        for index in 0..wireframe.vertex_count() {
-            let vertex = deformation.apply(wireframe.vertex(index));
-            assert!(vertex.x.is_finite() && vertex.y.is_finite() && vertex.z.is_finite());
-            assert!(vertex.length() <= 1.6);
-        }
     }
 
     #[test]

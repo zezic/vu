@@ -234,8 +234,7 @@ Energy drops and `\` advance to the next model, wrapping around, and the HUD
 reports the current model position. The model is driven by spin, pitch, roll,
 pulse, accent, and depth-opacity controls. The accent band picks the vivid theme
 color used by the current model; the color is frozen when the model appears. The
-inspector still exposes twist, bulge, ripple, shear, and jitter; the wireframe
-stays rigid for now, so those vertex-distortion controls do not move it yet.
+wireframe stays rigid while the showcase moves and frames the model.
 
 `T` optionally enables analytical motion blur. The motion-blur intensity is
 `floor + (1 - floor) * (1 - speed)^power`: `L` / `R` move the opacity floor and
@@ -245,8 +244,7 @@ the current model position, blur state, line width, opacity floor, fade power,
 and live line count beside the shutter readout.
 
 A 16-band spectrum analyzer covers 32 Hz to 16 kHz in log-spaced areas. The bands
-drive rotation, camera tilt, twist, bulge, ripple, shear, jitter, line brightness,
-and the pulse. Every band extracts a continuous onset flow from its FFT bins.
+drive rotation, camera tilt, line brightness, camera zoom, and the pulse. Every band extracts a continuous onset flow from its FFT bins.
 Each bin keeps a background envelope with configurable attack and release
 (320 ms and 200 ms by default), and the positive relative excess over that
 background is divided by `background + floor` (1% of the normalized magnitude
@@ -354,8 +352,8 @@ stroke clears the body, so an edge moving along its own direction also keeps
 just the body.
 
 The animation phase runs on a continuous clock and is rebased only at a period
-that is an integer number of cycles for every phase-driven deformation. Crossing
-2*PI therefore never snaps the geometry.
+that is an integer number of cycles for the pitch oscillator. Crossing 2*PI
+therefore never snaps the camera motion.
 
 The selected Gogh theme drives the scene through its four neutral and twelve
 vivid colors. Theme changes crossfade the wireframe palette along with the HUD.
@@ -372,12 +370,12 @@ Press `D` to show the live analysis panel. It refreshes once per completed FFT
 hop by default; `B` cycles through FFT-hop, 20, 10, 5, 2, and 1 Hz. The panel
 renders:
 
-- all sixteen smoothed bands with raw values, their scene roles, and a short
+- all sixteen smoothed bands with raw values, frequency ranges, and a short
   onset-history strip left of each level bar. Each row names what the band
   drives: `V` marks a dependency on the band value, `K` a kick sequence, `S` a
   snare slot, and `D` the drop detector.
 - the live animation properties in a two-column grid: pulse, spin, pitch, roll,
-  twist, bulge, ripple, shear, zoom, accent, line energy, jitter, phase, kick,
+  zoom, accent, line energy, phase, kick,
   flip, quake, crossfade, style morph, and entrance
 - broadband, bass, and treble envelopes with raw levels in the footer, plus
   kick, snare, hat, and drop hit totals, their trigger flashes, model name, and

@@ -236,7 +236,7 @@ mod tests {
              shape: (low: 0.8, high: 0.2, curve: Linear, amount: 1.0, tracking: Manual))))))",
             "(tuning: (routing: { Spin: 16 }))",
             "(tuning: (gains: { SpinBand: 20.0 }))",
-            "(tuning: (style: { DeformBias: 3.0 }))",
+            "(tuning: (style: { ZoomBias: 3.0 }))",
             "(frame_rate_limit: Fps99)",
             "(theme: \"Unknown theme\")",
         ] {
