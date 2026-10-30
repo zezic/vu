@@ -2060,7 +2060,7 @@ impl Visualizer {
         }
     }
 
-    /// Screen position of a model vertex selected once for a POI callout.
+    /// Screen position of a model vertex used as a POI callout anchor.
     pub fn vertex_screen(&self, vertex: u16) -> Option<[f32; 2]> {
         let projected = self
             .scene

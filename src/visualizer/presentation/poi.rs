@@ -1,8 +1,8 @@
-//! POI focus presentation: floating callout cards around a single model vertex.
+//! POI focus presentation: floating callout cards around model vertices.
 //!
 //! Each POI beat chooses a new card split, typography, side arrangement and
-//! color trio. Cards are anchored to one vertex chosen once per beat and drift
-//! slowly around their targets, so the infographic never becomes static.
+//! color trio. Every card anchors to a random vertex chosen once per beat and
+//! drifts slowly around its target, so the infographic never becomes static.
 
 use std::{collections::BTreeSet, f32::consts::TAU};
 
@@ -49,6 +49,8 @@ struct CardSpec {
     pad_units: f64,
     texts: Vec<TextSpec>,
     barcode: Option<u64>,
+    /// Mesh vertex this card's leader line attaches to.
+    vertex: Option<u16>,
 }
 
 struct PoiContent {
@@ -69,6 +71,10 @@ struct PoiCard {
     side: Side,
     width: f64,
     height: f64,
+    /// Mesh vertex this card's leader line attaches to.
+    vertex: Option<u16>,
+    /// Screen position of `vertex` for the current frame.
+    anchor: Point,
     spring_x: Spring,
     spring_y: Spring,
     drift_phase: f32,
@@ -103,14 +109,12 @@ pub struct PoiScene {
     key: Option<String>,
     model_id: Option<String>,
     content: Option<PoiContent>,
-    vertex: Option<u16>,
     cards: Vec<PoiCard>,
     outgoing: Vec<PoiCard>,
     outgoing_fact: bool,
     stage_unit: f64,
     stage_size: (f64, f64),
     time: f32,
-    anchor: Point,
     markers: Vec<HitMarker>,
 }
 
@@ -120,14 +124,12 @@ impl Default for PoiScene {
             key: None,
             model_id: None,
             content: None,
-            vertex: None,
             cards: Vec::new(),
             outgoing: Vec::new(),
             outgoing_fact: false,
             stage_unit: f64::NAN,
             stage_size: (0.0, 0.0),
             time: 0.0,
-            anchor: Point::new(0.0, 0.0),
             markers: Vec::new(),
         }
     }
@@ -145,7 +147,6 @@ impl PoiScene {
     pub fn hide(&mut self) {
         self.key = None;
         self.content = None;
-        self.vertex = None;
         self.cards.clear();
         self.outgoing.clear();
         self.outgoing_fact = false;
@@ -176,9 +177,10 @@ impl PoiScene {
             if self.key.as_deref() != Some(target) {
                 self.exit_cards(rng);
                 self.key = Some(target.to_owned());
-                self.vertex = choose_vertex(visualizer, target, rng);
-                self.content = weapon
-                    .and_then(|weapon| build_content(weapon, target, comedy_spec, stage, rng));
+                let vertices = visualizer.poi_vertices(target);
+                self.content = weapon.and_then(|weapon| {
+                    build_content(weapon, target, comedy_spec, &vertices, stage, rng)
+                });
                 self.cards = self
                     .content
                     .as_ref()
@@ -201,7 +203,6 @@ impl PoiScene {
         } else if self.key.is_some() {
             self.key = None;
             self.content = None;
-            self.vertex = None;
             self.exit_cards(rng);
         }
 
@@ -249,25 +250,11 @@ impl PoiScene {
         }
     }
 
-    fn anchor_point(&self, visualizer: &Visualizer, stage: &Stage) -> Point {
-        let anchor = self
-            .vertex
-            .and_then(|vertex| visualizer.vertex_screen(vertex))
-            .map_or(Point::new(stage.width * 0.5, stage.height * 0.5), |point| {
-                Point::new(f64::from(point[0]), f64::from(point[1]))
-            });
-        Point::new(
-            anchor.x.clamp(stage.margin, stage.width - stage.margin),
-            anchor.y.clamp(stage.margin, stage.height - stage.margin),
-        )
-    }
-
     fn place_cards(&mut self, visualizer: &Visualizer, stage: &Stage, reset: bool) {
-        let anchor = self.anchor_point(visualizer, stage);
-        self.anchor = anchor;
         let air = stage.px(112.0);
         for card in &mut self.cards {
-            let (x, y) = card_target(stage, anchor, card, air);
+            card.anchor = card_anchor(visualizer, stage, card.vertex);
+            let (x, y) = card_target(stage, card.anchor, card, air);
             if reset {
                 card.spring_x.reset(x as f32);
                 card.spring_y.reset(y as f32);
@@ -279,14 +266,13 @@ impl PoiScene {
     }
 
     fn update_flow(&mut self, dt: f32, visualizer: &Visualizer, stage: &Stage) {
-        let anchor = self.anchor_point(visualizer, stage);
-        self.anchor = anchor;
         let air = stage.px(112.0);
-        let stiffness = 30.0;
-        let damping = 3.0;
+        let stiffness = 80.0;
+        let damping = 10.0;
         let time = f64::from(self.time);
         for card in &mut self.cards {
-            let (base_x, base_y) = card_target(stage, anchor, card, air);
+            card.anchor = card_anchor(visualizer, stage, card.vertex);
+            let (base_x, base_y) = card_target(stage, card.anchor, card, air);
             let drift_x = (time * 0.31 + f64::from(card.drift_phase)).sin() * card.drift_amp.0;
             let drift_y =
                 (time * 0.24 + f64::from(card.drift_phase) * 1.7).cos() * card.drift_amp.1;
@@ -331,7 +317,6 @@ impl PoiScene {
     }
 
     pub fn occluders(&self, stage: &Stage) -> Vec<Rect> {
-        let anchor = self.anchor;
         let pad = stage.px(12.0);
         let mut rects = Vec::new();
         for card in self.cards.iter().chain(&self.outgoing) {
@@ -339,12 +324,17 @@ impl PoiScene {
         }
         if self.is_visible() {
             let air = stage.px(104.0);
-            rects.push(Rect::new(
-                anchor.x - air,
-                anchor.y - air,
-                anchor.x + air,
-                anchor.y + air,
-            ));
+            let mut anchored = BTreeSet::new();
+            for card in self.cards.iter().chain(&self.outgoing) {
+                if anchored.insert(card.vertex) {
+                    rects.push(Rect::new(
+                        card.anchor.x - air,
+                        card.anchor.y - air,
+                        card.anchor.x + air,
+                        card.anchor.y + air,
+                    ));
+                }
+            }
         }
         rects
     }
@@ -357,25 +347,48 @@ impl PoiScene {
         if alpha <= 0.001 {
             return;
         }
-        let anchor = self.anchor;
         for card in &self.outgoing {
             if card.any_visible() {
-                draw_card(scene, stage, palette, anchor, card, alpha * 0.8, self.time);
+                draw_card(
+                    scene,
+                    stage,
+                    palette,
+                    card.anchor,
+                    card,
+                    alpha * 0.8,
+                    self.time,
+                );
             }
         }
         for card in &self.cards {
-            draw_leader(scene, stage, palette, anchor, card.rect(), alpha);
-            draw_card(scene, stage, palette, anchor, card, alpha, self.time);
+            draw_leader(scene, stage, palette, card.anchor, card.rect(), alpha);
+            draw_card(scene, stage, palette, card.anchor, card, alpha, self.time);
         }
-        draw_anchor(scene, stage, palette, anchor, alpha);
+        let mut drawn = BTreeSet::new();
+        for card in self.outgoing.iter().chain(&self.cards) {
+            if drawn.insert(card.vertex) {
+                draw_anchor(scene, stage, palette, card.anchor, alpha);
+            }
+        }
         for marker in &self.markers {
             draw_hit_marker(scene, stage, palette, marker, alpha);
         }
     }
 }
 
-fn choose_vertex(visualizer: &Visualizer, target_id: &str, rng: &mut Rng) -> Option<u16> {
-    let vertices = visualizer.poi_vertices(target_id);
+fn card_anchor(visualizer: &Visualizer, stage: &Stage, vertex: Option<u16>) -> Point {
+    let anchor = vertex
+        .and_then(|vertex| visualizer.vertex_screen(vertex))
+        .map_or(Point::new(stage.width * 0.5, stage.height * 0.5), |point| {
+            Point::new(f64::from(point[0]), f64::from(point[1]))
+        });
+    Point::new(
+        anchor.x.clamp(stage.margin, stage.width - stage.margin),
+        anchor.y.clamp(stage.margin, stage.height - stage.margin),
+    )
+}
+
+fn random_vertex(vertices: &[u16], rng: &mut Rng) -> Option<u16> {
     if vertices.is_empty() {
         None
     } else {
@@ -387,6 +400,7 @@ fn build_content(
     weapon: &Weapon,
     target_id: &str,
     comedy_spec: Option<&ComedySpec>,
+    vertices: &[u16],
     stage: &Stage,
     rng: &mut Rng,
 ) -> Option<PoiContent> {
@@ -543,6 +557,7 @@ fn build_content(
                 pad_units: 18.0,
                 texts,
                 barcode,
+                vertex: random_vertex(vertices, rng),
             });
         }
         2 => {
@@ -563,6 +578,7 @@ fn build_content(
                 pad_units: 16.0,
                 texts: label_card,
                 barcode: label_barcode,
+                vertex: random_vertex(vertices, rng),
             });
             cards.push(CardSpec {
                 side: sides[1],
@@ -570,6 +586,7 @@ fn build_content(
                 pad_units: 18.0,
                 texts: body_card,
                 barcode,
+                vertex: random_vertex(vertices, rng),
             });
         }
         _ => {
@@ -579,6 +596,7 @@ fn build_content(
                 pad_units: 16.0,
                 texts: vec![label],
                 barcode: None,
+                vertex: random_vertex(vertices, rng),
             });
             cards.push(CardSpec {
                 side: sides[1],
@@ -586,6 +604,7 @@ fn build_content(
                 pad_units: 18.0,
                 texts: vec![body],
                 barcode: None,
+                vertex: random_vertex(vertices, rng),
             });
             if let Some(meta) = meta {
                 cards.push(CardSpec {
@@ -594,6 +613,7 @@ fn build_content(
                     pad_units: 14.0,
                     texts: vec![meta],
                     barcode,
+                    vertex: random_vertex(vertices, rng),
                 });
             }
         }
@@ -714,6 +734,8 @@ fn build_cards(
             side: spec.side,
             width,
             height,
+            vertex: spec.vertex,
+            anchor: Point::ORIGIN,
             spring_x: Spring::default(),
             spring_y: Spring::default(),
             drift_phase: rng.unit() * TAU,

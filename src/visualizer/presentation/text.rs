@@ -99,7 +99,6 @@ pub struct Backdrop {
     /// bottom-right, bottom-left.
     pub cut: [bool; 4],
     pub cut_size: f64,
-    pub fill_alpha: f32,
 }
 
 impl Backdrop {
@@ -129,7 +128,6 @@ impl Backdrop {
             padding,
             cut,
             cut_size: text_size * (0.08 + rng.unit() as f64 * 0.22),
-            fill_alpha: 0.72 + rng.unit() * 0.2,
         }
     }
 }
@@ -930,7 +928,7 @@ impl AnimatedText {
         scene.fill(
             Fill::NonZero,
             transform,
-            palette.muted.with_alpha(backdrop.fill_alpha * alpha),
+            palette.ink.with_alpha(alpha),
             None,
             &path,
         );
@@ -1226,7 +1224,6 @@ mod tests {
                 padding,
                 cut: [false; 4],
                 cut_size: 0.0,
-                fill_alpha: 0.8,
             })
         };
 
