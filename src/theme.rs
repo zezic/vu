@@ -155,12 +155,52 @@ fn hex(value: &str) -> Color {
     Color::from_rgb8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
+/// One entry of the bundled Gogh `themes.json` catalog.
 #[derive(Deserialize)]
 struct GoghTheme {
     name: String,
     background: String,
     foreground: String,
-    basic: [String; 16],
+    color_01: String,
+    color_02: String,
+    color_03: String,
+    color_04: String,
+    color_05: String,
+    color_06: String,
+    color_07: String,
+    color_08: String,
+    color_09: String,
+    color_10: String,
+    color_11: String,
+    color_12: String,
+    color_13: String,
+    color_14: String,
+    color_15: String,
+    color_16: String,
+}
+
+impl GoghTheme {
+    /// The sixteen standard terminal slots in ANSI order.
+    fn palette(&self) -> [&str; 16] {
+        [
+            &self.color_01,
+            &self.color_02,
+            &self.color_03,
+            &self.color_04,
+            &self.color_05,
+            &self.color_06,
+            &self.color_07,
+            &self.color_08,
+            &self.color_09,
+            &self.color_10,
+            &self.color_11,
+            &self.color_12,
+            &self.color_13,
+            &self.color_14,
+            &self.color_15,
+            &self.color_16,
+        ]
+    }
 }
 
 struct Entry {
@@ -173,14 +213,14 @@ struct Entry {
 fn registry() -> &'static [Entry] {
     static REGISTRY: OnceLock<Vec<Entry>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let themes: Vec<GoghTheme> =
-            ron::from_str(include_str!("../assets/themes.ron")).expect("valid bundled palettes");
+        let themes: Vec<GoghTheme> = serde_json::from_str(include_str!("../assets/themes.json"))
+            .expect("valid bundled palettes");
         let mut entries: Vec<_> = themes
             .into_iter()
             .map(|theme| Entry {
                 colors: ThemeColors::from_gogh(&theme),
                 foreground: hex(&theme.foreground),
-                accents: theme.basic.each_ref().map(|value| hex(value)),
+                accents: theme.palette().map(hex),
                 name: theme.name,
             })
             .collect();
@@ -260,7 +300,7 @@ mod tests {
 
     #[test]
     fn registry_cycles_and_serializes_every_shipped_theme() {
-        assert_eq!(registry().len(), 41);
+        assert_eq!(registry().len(), 361);
         let first = ThemeId(0);
         assert_eq!(
             first
@@ -274,6 +314,18 @@ mod tests {
             assert_eq!(ron::from_str::<ThemeId>(&text).unwrap(), id);
         }
         assert!(ron::from_str::<ThemeId>("\"Unknown theme\"").is_err());
+    }
+
+    #[test]
+    fn bundled_theme_names_are_unique() {
+        let mut names: Vec<_> = registry().iter().map(|entry| entry.name.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            registry().len(),
+            "names address the saved theme"
+        );
     }
 
     #[test]

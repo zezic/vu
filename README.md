@@ -28,7 +28,7 @@ On macOS, allow system audio recording when prompted.
 - `B` - cycles the analyzer's refresh rate: FFT hop, 20, 10, 5, 2, and 1 Hz.
 - `D` - toggles the analyzer debug panel.
 - `Esc` - closes the analysis inspector without leaving the debug panel.
-- `A` / `S` - cycle backward or forward through Cordex's 41 selected Gogh themes.
+- `A` / `S` - cycle backward or forward through all 361 bundled Gogh themes.
 - `Z` / `X` - decrease or increase preamp by 6 dB, or 1 dB while holding `Shift`.
 - `Q` / `W` - cycle backward or forward through the frame rate limits: 30, 48,
   55, 60, 72, 90, 120, 180, 240, and VSync.
