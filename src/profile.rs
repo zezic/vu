@@ -36,7 +36,7 @@ pub struct Run {
     phase: Phase,
     audio_frames: usize,
     frames: u32,
-    base_rasterizations: u32,
+    rasterized_frames: u32,
     draw: Duration,
     stages: Stages,
 }
@@ -50,7 +50,7 @@ impl Run {
                 phase: Phase::Pending,
                 audio_frames: 0,
                 frames: 0,
-                base_rasterizations: 0,
+                rasterized_frames: 0,
                 draw: Duration::ZERO,
                 stages: Stages::default(),
             })),
@@ -113,7 +113,7 @@ impl Run {
             && matches!(result, Presentation::Presented)
         {
             self.frames += 1;
-            self.base_rasterizations += u32::from(changed);
+            self.rasterized_frames += u32::from(changed);
             self.draw += present - draw;
             self.stages.acquire += stages.acquire;
             self.stages.rasterize += stages.rasterize;
@@ -151,9 +151,9 @@ impl Run {
         let main_cpu = thread_start.try_elapsed()?.as_secs_f64();
         let frames = f64::from(self.frames);
         eprintln!(
-            "VU profile: {:.1} FPS; {}/{} base rasterizations; draw {:.1} us/frame; present {:.1} us/frame",
+            "VU profile: {:.1} FPS; {}/{} frames rasterized; draw {:.1} us/frame; present {:.1} us/frame",
             frames / elapsed,
-            self.base_rasterizations,
+            self.rasterized_frames,
             self.frames,
             self.draw.as_secs_f64() * 1e6 / frames,
             (self.stages.acquire + self.stages.rasterize + self.stages.submit).as_secs_f64() * 1e6

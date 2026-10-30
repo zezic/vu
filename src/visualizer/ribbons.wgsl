@@ -6,11 +6,11 @@ struct Uniforms {
 
 struct Instance {
     @location(0) start: vec4<f32>,
-    @location(1) end: vec4<f32>,
+    @location(1) end: vec2<f32>,
     @location(2) start_color: vec4<f32>,
     @location(3) end_color: vec4<f32>,
     @location(4) third_color: vec4<f32>,
-    @location(5) style: vec4<f32>,
+    @location(5) style: vec2<f32>,
 }
 
 struct VertexOutput {
@@ -31,13 +31,11 @@ fn ribbon_vertex(
     @builtin(vertex_index) vertex_index: u32,
     instance: Instance,
 ) -> VertexOutput {
-    let points = array<vec2<f32>, 6>(
+    let points = array<vec2<f32>, 3>(
         instance.start.xy, instance.start.zw, instance.end.xy,
-        instance.start.xy, instance.end.xy, instance.end.xy,
     );
-    let colors = array<vec4<f32>, 6>(
+    let colors = array<vec4<f32>, 3>(
         instance.start_color, instance.end_color, instance.third_color,
-        instance.start_color, instance.third_color, instance.third_color,
     );
     let point = points[vertex_index];
     let clip = vec2(

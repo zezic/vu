@@ -259,37 +259,9 @@ impl Renderer {
             label: Some("Visualizer ribbons"),
             source: wgpu::ShaderSource::Wgsl(include_str!("ribbons.wgsl").into()),
         });
-        let ribbon_attributes = [
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 0,
-                shader_location: 0,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 16,
-                shader_location: 1,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 32,
-                shader_location: 2,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 48,
-                shader_location: 3,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 64,
-                shader_location: 4,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 80,
-                shader_location: 5,
-            },
+        let ribbon_attributes = wgpu::vertex_attr_array![
+            0 => Float32x4, 1 => Float32x2, 2 => Float32x4,
+            3 => Float32x4, 4 => Float32x4, 5 => Float32x2
         ];
         let model_additive_ribbon_pipeline = instance_pipeline(
             device,
@@ -492,7 +464,7 @@ impl Renderer {
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &self.uniform_bindings, &[]);
             pass.set_vertex_buffer(0, self.ribbon_buffer.slice(0..ribbon_bytes));
-            pass.draw(0..6, 0..ribbon_count as u32);
+            pass.draw(0..3, 0..ribbon_count as u32);
         }
         if line_count > 0 {
             pass.set_pipeline(&self.line_pipeline);
@@ -790,15 +762,18 @@ mod tests {
             }
         }
         for ribbon in frame.ribbons {
-            for corner in [ribbon.start, ribbon.end] {
-                for (x, y) in [(corner[0], corner[1]), (corner[2], corner[3])] {
-                    min_x = min_x.min(x);
-                    max_x = max_x.max(x);
-                    min_y = min_y.min(y);
-                    max_y = max_y.max(y);
-                }
+            for (x, y) in [
+                (ribbon.start[0], ribbon.start[1]),
+                (ribbon.start[2], ribbon.start[3]),
+                (ribbon.end[0], ribbon.end[1]),
+            ] {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
             }
         }
+
         assert!(
             min_x > -(width as f32) / 4.0
                 && max_x < width as f32 * 1.25

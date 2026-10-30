@@ -1215,24 +1215,23 @@ pub struct DebugSnapshot {
     pub ribbons: usize,
 }
 
-/// One gradient section of a three-pose motion blur. Ordinary sweeps use a swept
-/// quad between poses; crossing sweeps use per-vertex triangle instances with an
-/// independent opacity at each corner.
+/// One triangle of analytical swept-line motion blur, with independent color
+/// and opacity at each vertex.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RibbonInstance {
     /// First two triangle vertices: a.xy, b.xy.
     pub start: [f32; 4],
-    /// Third triangle vertex duplicated: c.xy, c.xy.
-    pub end: [f32; 4],
+    /// Third triangle vertex: c.xy.
+    pub end: [f32; 2],
     /// Tint and opacity at the first vertex.
     pub start_color: [f32; 4],
     /// Tint and opacity at the second vertex.
     pub end_color: [f32; 4],
     /// Tint and opacity at the third vertex.
     pub third_color: [f32; 4],
-    /// Wing-mask flag, coverage edge mask, padding, padding.
-    pub style: [f32; 4],
+    /// Wing-mask flag and coverage edge mask.
+    pub style: [f32; 2],
 }
 
 impl RibbonInstance {
@@ -1241,11 +1240,11 @@ impl RibbonInstance {
     fn triangle(points: [Vec2; 3], colors: [[f32; 4]; 3]) -> Self {
         Self {
             start: [points[0].x, points[0].y, points[1].x, points[1].y],
-            end: [points[2].x, points[2].y, points[2].x, points[2].y],
+            end: [points[2].x, points[2].y],
             start_color: colors[0],
             end_color: colors[1],
             third_color: colors[2],
-            style: [0.0; 4],
+            style: [0.0; 2],
         }
     }
 
@@ -4213,12 +4212,15 @@ impl ModelRuntime {
                 }
             }));
         let exposure = if self.motion_blur {
-            if self.history.len() == MAX_HISTORY {
-                self.history.pop_front();
-            }
+            let mut lines = if self.history.len() == MAX_HISTORY {
+                self.history.pop_front().expect("history is full").lines
+            } else {
+                Vec::new()
+            };
+            lines.clone_from(&self.current);
             self.history.push_back(PoseSnapshot {
                 at: frame_end,
-                lines: self.current.clone(),
+                lines,
             });
             while self
                 .history
@@ -4289,8 +4291,8 @@ impl ModelRuntime {
             };
 
             push_sweep(
-                exposure.first[index],
-                exposure.last[index],
+                exposure.first.line(index),
+                exposure.last.line(index),
                 SweepInk {
                     rgb,
                     alpha: edge_alpha,
@@ -4345,7 +4347,7 @@ impl ModelRuntime {
     /// The two recorded poses spanning one shutter exposure. The middle pose is
     /// reconstructed as the median of the endpoints, never sampled from history,
     /// so the gradient is centred on a straight interpolation of the exposure.
-    fn exposure_poses(&self, start: AudioTime, end: AudioTime) -> Option<ExposurePoses> {
+    fn exposure_poses(&self, start: AudioTime, end: AudioTime) -> Option<ExposurePoses<'_>> {
         if end <= start || self.history.len() < 2 {
             return None;
         }
@@ -4359,14 +4361,14 @@ impl ModelRuntime {
         })
     }
 
-    fn pose_at(&self, time: AudioTime) -> Option<Vec<LineGeometry>> {
+    fn pose_at(&self, time: AudioTime) -> Option<SampledPose<'_>> {
         let first = self.history.front()?;
         let last = self.history.back()?;
         if time <= first.at {
-            return Some(first.lines.clone());
+            return Some(SampledPose::Recorded(&first.lines));
         }
         if time >= last.at {
-            return Some(last.lines.clone());
+            return Some(SampledPose::Recorded(&last.lines));
         }
         let mut before = first;
         for snapshot in self.history.iter().skip(1) {
@@ -4377,24 +4379,53 @@ impl ModelRuntime {
                 } else {
                     0.0
                 };
-                return Some(
-                    before
-                        .lines
-                        .iter()
-                        .zip(&snapshot.lines)
-                        .map(|(&from, &to)| lerp_line(from, to, fraction))
-                        .collect(),
-                );
+                return Some(SampledPose::Interpolated {
+                    before: &before.lines,
+                    after: &snapshot.lines,
+                    fraction,
+                });
             }
             before = snapshot;
         }
-        Some(last.lines.clone())
+        Some(SampledPose::Recorded(&last.lines))
     }
 }
 
-struct ExposurePoses {
-    first: Vec<LineGeometry>,
-    last: Vec<LineGeometry>,
+struct ExposurePoses<'a> {
+    first: SampledPose<'a>,
+    last: SampledPose<'a>,
+}
+
+/// A shutter endpoint borrows history and interpolates only the edges emitted.
+enum SampledPose<'a> {
+    Recorded(&'a [LineGeometry]),
+    Interpolated {
+        before: &'a [LineGeometry],
+        after: &'a [LineGeometry],
+        fraction: f32,
+    },
+}
+
+impl SampledPose<'_> {
+    fn line(&self, index: usize) -> LineGeometry {
+        match self {
+            Self::Recorded(lines) => lines[index],
+            Self::Interpolated {
+                before,
+                after,
+                fraction,
+            } => lerp_line(before[index], after[index], *fraction),
+        }
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = LineGeometry> + '_ {
+        let count = match self {
+            Self::Recorded(lines) => lines.len(),
+            Self::Interpolated { before, .. } => before.len(),
+        };
+        (0..count).map(|index| self.line(index))
+    }
 }
 
 /// A constant-width quad stroke with independent opacity at each end. Used for
@@ -5471,7 +5502,7 @@ mod tests {
             let movement = exposure
                 .first
                 .iter()
-                .zip(&exposure.last)
+                .zip(exposure.last.iter())
                 .map(|(first, last)| {
                     (last.start - first.start)
                         .length()
